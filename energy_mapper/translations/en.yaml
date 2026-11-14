@@ -1,0 +1,49 @@
+configuration:
+  analysis_time:
+    name: Analysis time
+    description: Local time (HH:MM) of the nightly analysis of the previous day.
+  backfill_days:
+    name: Backfill days
+    description: >-
+      How many past days to analyse when they have no report yet (limited by
+      what the recorder still holds).
+  grid_entity:
+    name: Grid power sensor
+    description: >-
+      Leave empty to use the grid meter of the Energy dashboard. Signed power
+      (W or kW): positive when importing.
+  grid_export_entity:
+    name: Grid export power sensor
+    description: Only for meters that report import and export as two positive sensors.
+  grid_invert:
+    name: Invert the grid sign
+    description: Enable if the grid sensor is positive when exporting.
+  pv_entity:
+    name: Solar power sensor
+    description: Leave empty to use the solar production of the Energy dashboard.
+  battery_entity:
+    name: Battery power sensor
+    description: Leave empty to use the battery of the Energy dashboard. Positive when discharging.
+  battery_invert:
+    name: Invert the battery sign
+    description: Enable if the battery sensor is positive when charging.
+  submeters:
+    name: Sub-meters
+    description: >-
+      Power sensors of measured appliances, subtracted before the analysis.
+      Leave empty to use the individual devices of the Energy dashboard.
+  switched_loads:
+    name: Switched loads
+    description: >-
+      Appliances driven by a switch (entity_id, optional name and on_states):
+      their power is measured from the house meter each time the switch
+      changes.
+  step_threshold_w:
+    name: Step threshold (W)
+    description: Smallest power change considered as an appliance switching. Default 300 W.
+  peak_threshold_w:
+    name: Peak threshold (W)
+    description: Fixed peak threshold. Default 80 % of the day's maximum.
+  log_level:
+    name: Log level
+    description: Verbosity of the add-on log.

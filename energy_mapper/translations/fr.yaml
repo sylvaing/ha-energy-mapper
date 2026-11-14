@@ -1,0 +1,49 @@
+configuration:
+  analysis_time:
+    name: Heure de l'analyse
+    description: Heure locale (HH:MM) de l'analyse nocturne de la veille.
+  backfill_days:
+    name: Jours de rattrapage
+    description: >-
+      Nombre de jours passés à analyser s'ils n'ont pas encore de rapport
+      (dans la limite de ce que l'enregistreur conserve).
+  grid_entity:
+    name: Capteur de puissance du réseau
+    description: >-
+      Laisser vide pour utiliser le compteur réseau du tableau Énergie.
+      Puissance signée (W ou kW) : positive en soutirage.
+  grid_export_entity:
+    name: Capteur de puissance injectée
+    description: Seulement pour les compteurs qui donnent soutirage et injection en deux capteurs positifs.
+  grid_invert:
+    name: Inverser le signe du réseau
+    description: À activer si le capteur réseau est positif en injection.
+  pv_entity:
+    name: Capteur de production solaire
+    description: Laisser vide pour utiliser la production solaire du tableau Énergie.
+  battery_entity:
+    name: Capteur de puissance de la batterie
+    description: Laisser vide pour utiliser la batterie du tableau Énergie. Positif en décharge.
+  battery_invert:
+    name: Inverser le signe de la batterie
+    description: À activer si le capteur de la batterie est positif en charge.
+  submeters:
+    name: Sous-compteurs
+    description: >-
+      Capteurs de puissance des appareils mesurés, retirés avant l'analyse.
+      Laisser vide pour utiliser les appareils individuels du tableau Énergie.
+  switched_loads:
+    name: Appareils pilotés
+    description: >-
+      Appareils commandés par un interrupteur (entity_id, nom et on_states
+      facultatifs) : leur puissance est mesurée sur le compteur de la maison
+      à chaque changement d'état.
+  step_threshold_w:
+    name: Seuil des marches (W)
+    description: Plus petite variation de puissance prise pour un appareil qui s'allume ou s'éteint. 300 W par défaut.
+  peak_threshold_w:
+    name: Seuil des pics (W)
+    description: Seuil fixe des pics. Par défaut 80 % du maximum de la journée.
+  log_level:
+    name: Niveau de journalisation
+    description: Niveau de détail du journal de l'add-on.

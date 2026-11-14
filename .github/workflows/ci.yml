@@ -32,7 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.12: add-on base image; 3.13: current Home Assistant
+        # 3.12: minimum supported; 3.13: add-on base image and current Home Assistant
         python: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v7
@@ -61,12 +61,16 @@ jobs:
           ignore: brands
 
   addon:
-    name: Add-on (lint, build)
-    runs-on: ubuntu-latest
+    name: Add-on (lint, build ${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, aarch64]
+        include:
+          - arch: amd64
+            os: ubuntu-24.04
+          - arch: aarch64
+            os: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7
       - id: present
@@ -76,14 +80,31 @@ jobs:
         uses: frenck/action-addon-linter@v2
         with:
           path: ./energy_mapper
+      - id: version
+        if: steps.present.outputs.yes == '1'
+        run: |
+          version=$(grep -m1 '^version:' energy_mapper/config.yaml | cut -d: -f2 | tr -d ' "')
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+      # test build only: nothing is pushed or signed
       - name: Test build
         if: steps.present.outputs.yes == '1'
-        uses: home-assistant/builder@2026.09.0
+        uses: home-assistant/builder/actions/build-image@2026.09.0
         with:
-          args: |
-            --test \
-            --${{ matrix.arch }} \
-            --target /data/energy_mapper
+          arch: ${{ matrix.arch }}
+          context: ./energy_mapper
+          image: ghcr.io/${{ github.repository_owner }}/${{ matrix.arch }}-energy_mapper
+          image-tags: test
+          version: ${{ steps.version.outputs.version }}
+          container-registry-password: ${{ secrets.GITHUB_TOKEN }}
+          push: "false"
+          cosign: "false"
+          load: "true"
+      - name: Smoke test (the image starts and imports the service)
+        if: steps.present.outputs.yes == '1'
+        run: |
+          docker run --rm --entrypoint python3 \
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.arch }}-energy_mapper:test \
+            -c "import sys; sys.path.insert(0, '/app'); import main, zoneinfo; zoneinfo.ZoneInfo('Europe/Paris'); print('ok')"
 
   frontend:
     name: Panel build

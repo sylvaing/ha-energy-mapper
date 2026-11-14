@@ -1,0 +1,283 @@
+"""The nightly analysis: read Home Assistant, analyse one local day, store it."""
+
+from __future__ import annotations
+
+import datetime as dt
+import logging
+import threading
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+
+from const import VERSION
+from energy_config import DerivedConfig, derive, tracking_gaps
+from ha_client import HAError
+from nilm_core import analyze, parse_numeric
+from storage import ReportStore
+
+_LOGGER = logging.getLogger(__name__)
+
+DEFAULT_ANALYSIS_TIME = "04:30"
+DEFAULT_BACKFILL_DAYS = 30
+# the first grid reading must be at most this late after midnight, otherwise
+# the recorder no longer holds the whole day (purged) and the day is skipped
+MAX_START_GAP_S = 3600
+# consecutive days without data after which the backfill stops
+MAX_EMPTY_DAYS = 3
+
+
+class AnalysisError(Exception):
+    """A day that cannot be analysed. ``code`` is part of the HTTP API."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+# ---------------------------------------------------------------------------
+# options
+# ---------------------------------------------------------------------------
+def derive_options(options: dict) -> dict:
+    """Add-on options -> ``derive()`` options. Empty values mean "derive it
+    from the Energy dashboard"."""
+    out: dict = {}
+    for key in ("grid_entity", "grid_export_entity", "pv_entity", "battery_entity"):
+        value = (options.get(key) or "").strip()
+        if value:
+            out[key] = value
+    for key in ("grid_invert", "battery_invert"):
+        out[key] = bool(options.get(key))
+    submeters = [s.strip() for s in options.get("submeters") or [] if s and s.strip()]
+    if submeters:
+        out["submeters"] = submeters
+    loads = []
+    for item in options.get("switched_loads") or []:
+        entity = (item.get("entity_id") or "").strip()
+        if not entity:
+            continue
+        states = [s for s in item.get("on_states") or [] if s]
+        loads.append({"entity_id": entity, "name": item.get("name") or entity, "on_states": states or ["on"]})
+    if loads:
+        out["switched_loads"] = loads
+    for key in ("step_threshold_w", "peak_threshold_w"):
+        if options.get(key):
+            out[key] = float(options[key])
+    return out
+
+
+def parse_hhmm(value: str | None) -> dt.time:
+    try:
+        h, m = (int(x) for x in (value or DEFAULT_ANALYSIS_TIME).split(":"))
+        return dt.time(h, m)
+    except ValueError:
+        _LOGGER.warning("invalid analysis_time %r, using %s", value, DEFAULT_ANALYSIS_TIME)
+        h, m = (int(x) for x in DEFAULT_ANALYSIS_TIME.split(":"))
+        return dt.time(h, m)
+
+
+# ---------------------------------------------------------------------------
+# calendar helpers (pure)
+# ---------------------------------------------------------------------------
+def day_bounds(day: dt.date, tz: dt.tzinfo) -> tuple[float, float]:
+    """[00:00, 24:00) of a local day as unix timestamps (23 or 25 h on DST days)."""
+    start = dt.datetime.combine(day, dt.time(0), tzinfo=tz)
+    end = dt.datetime.combine(day + dt.timedelta(days=1), dt.time(0), tzinfo=tz)
+    return start.timestamp(), end.timestamp()
+
+
+def days_to_analyze(today: dt.date, existing: set[str], backfill_days: int) -> list[dt.date]:
+    """Past days without a report, newest first: yesterday and up to
+    ``backfill_days`` days back."""
+    window = max(1, backfill_days)
+    days = [today - dt.timedelta(days=i) for i in range(1, window + 1)]
+    return [d for d in days if d.isoformat() not in existing]
+
+
+def next_run(now: dt.datetime, at: dt.time) -> dt.datetime:
+    """Next occurrence of the local time ``at`` strictly after ``now`` (aware)."""
+    candidate = dt.datetime.combine(now.date(), at, tzinfo=now.tzinfo)
+    if candidate <= now:
+        candidate = dt.datetime.combine(now.date() + dt.timedelta(days=1), at, tzinfo=now.tzinfo)
+    return candidate
+
+
+def local_tz(name: str | None) -> dt.tzinfo:
+    if name:
+        try:
+            from zoneinfo import ZoneInfo
+
+            return ZoneInfo(name)
+        except Exception:  # missing tzdata or unknown zone
+            _LOGGER.warning("time zone %r unavailable, using the container's", name)
+    return dt.datetime.now().astimezone().tzinfo or dt.UTC
+
+
+# ---------------------------------------------------------------------------
+# analysis
+# ---------------------------------------------------------------------------
+@dataclass
+class Context:
+    derived: DerivedConfig
+    tz: dt.tzinfo
+    entities: list[str] = field(default_factory=list)
+
+
+class Analyzer:
+    def __init__(
+        self,
+        client,
+        store: ReportStore,
+        options: dict,
+        clock: Callable[[], float] = time.time,
+    ):
+        self.client = client
+        self.store = store
+        self.options = options
+        self.clock = clock
+        self.lock = threading.Lock()
+        self.tz: dt.tzinfo = local_tz(None)
+
+    @property
+    def backfill_days(self) -> int:
+        try:
+            return int(self.options.get("backfill_days", DEFAULT_BACKFILL_DAYS))
+        except (TypeError, ValueError):
+            return DEFAULT_BACKFILL_DAYS
+
+    def today(self) -> dt.date:
+        return dt.datetime.fromtimestamp(self.clock(), self.tz).date()
+
+    def prepare(self) -> Context:
+        """Read the Energy dashboard, states and registry; derive the configuration."""
+        snap = self.client.snapshot()
+        self.tz = local_tz((snap.get("config") or {}).get("time_zone"))
+        derived = derive(snap["prefs"], snap["states"], snap["registry"], derive_options(self.options))
+        if derived.config is None:
+            raise AnalysisError(
+                "no_grid", "no grid power sensor: configure the Energy dashboard or grid_entity"
+            )
+        entities = list(derived.config.entities())
+        entities += [t.energy_entity for t in derived.tracked if t.role == "switched"]
+        return Context(derived, self.tz, list(dict.fromkeys(entities)))
+
+    def _run_day(self, day: dt.date, ctx: Context) -> dict:
+        cfg = ctx.derived.config
+        start, end = day_bounds(day, ctx.tz)
+        histories = self.client.history(ctx.entities, start - cfg.context_s, end)
+        grid = [ts for ts, _ in parse_numeric(histories.get(cfg.grid_entity, [])) if ts < end]
+        in_day = [ts for ts in grid if ts >= start]
+        if not in_day:
+            raise AnalysisError("no_data", f"{day}: no grid data in the recorder")
+        if min(grid) > start + MAX_START_GAP_S:
+            raise AnalysisError("partial_day", f"{day}: the recorder history starts after midnight")
+        tz = ctx.tz
+        report = analyze(
+            histories, cfg, start, end, local_hour=lambda ts: dt.datetime.fromtimestamp(ts, tz).hour
+        )
+        findings = ctx.derived.findings + tracking_gaps(report, ctx.derived.tracked, histories)
+        report.update(
+            {
+                "day": day.isoformat(),
+                "time_zone": str(tz),
+                "addon_version": VERSION,
+                "config": ctx.derived.to_dict(),
+                "findings": [f.to_dict() for f in findings],
+            }
+        )
+        self.store.save(day.isoformat(), report)
+        self.store.set_state(last_run=self.clock())
+        _LOGGER.info(
+            "%s analysed: house %.1f kWh, base %d W, %d signatures, %d known loads",
+            day,
+            report["energy_kwh"].get("house", 0.0),
+            report["energy_kwh"].get("base_w", 0),
+            len(report["signatures"]),
+            len(report["known_loads"]),
+        )
+        return report
+
+    def analyze_day(self, day: dt.date) -> dict:
+        """Analyse one past day now (overwrites its report)."""
+        with self.lock:
+            ctx = self.prepare()
+            if day >= self.today():
+                raise AnalysisError("invalid_day", f"{day} is not over yet")
+            return self._run_day(day, ctx)
+
+    def catch_up(self) -> dict:
+        """Analyse yesterday and the missing days of the backfill window,
+        newest first, until the recorder runs out of history.
+
+        Raises ``HAError`` and ``AnalysisError('no_grid')``: nothing can be
+        done before they are fixed. Any other failure only skips its day."""
+        with self.lock:
+            missing = days_to_analyze(self.today(), set(self.store.days()), self.backfill_days)
+            done, failed = [], []
+            if not missing:
+                return {"analysed": done, "failed": failed}
+            ctx = self.prepare()
+            # the time zone may have changed with prepare()
+            missing = days_to_analyze(self.today(), set(self.store.days()), self.backfill_days)
+            empty = 0
+            for day in missing:
+                try:
+                    self._run_day(day, ctx)
+                    done.append(day.isoformat())
+                    empty = 0
+                except AnalysisError as err:
+                    # a day without data may be an outage: look further back,
+                    # but a partial day or a run of empty days is the start
+                    # of the recorder history
+                    empty = empty + 1 if err.code == "no_data" else 0
+                    if err.code == "partial_day" or empty >= MAX_EMPTY_DAYS:
+                        _LOGGER.info("%s; older days are not analysed", err.message)
+                        break
+                    _LOGGER.warning("%s", err.message)
+                    failed.append(day.isoformat())
+                except HAError:
+                    raise
+                except Exception:
+                    _LOGGER.exception("analysis of %s failed", day)
+                    failed.append(day.isoformat())
+            return {"analysed": done, "failed": failed}
+
+
+class Scheduler:
+    """Catch up on start, then every day at ``analysis_time``."""
+
+    RETRY_S = (60, 300, 900, 3600)
+
+    def __init__(self, analyzer: Analyzer, analysis_time: str | None):
+        self.analyzer = analyzer
+        self.at = parse_hhmm(analysis_time)
+        self.stop = threading.Event()
+        self._failures = 0
+
+    def run_once(self) -> float:
+        """One pass; returns the number of seconds to wait before the next."""
+        try:
+            result = self.analyzer.catch_up()
+            if result["analysed"] or result["failed"]:
+                _LOGGER.info(
+                    "pass done: %d day(s) analysed, %d failed", len(result["analysed"]), len(result["failed"])
+                )
+            self._failures = 0
+        except HAError as err:
+            self._failures += 1
+            delay = self.RETRY_S[min(self._failures, len(self.RETRY_S)) - 1]
+            _LOGGER.warning("Home Assistant unavailable (%s); retrying in %d s", err, delay)
+            return delay
+        except AnalysisError as err:
+            _LOGGER.error("%s", err.message)
+        except Exception:
+            _LOGGER.exception("analysis pass failed")
+        now = dt.datetime.fromtimestamp(self.analyzer.clock(), self.analyzer.tz)
+        nxt = next_run(now, self.at)
+        _LOGGER.info("next analysis at %s", nxt.isoformat(timespec="minutes"))
+        return max((nxt - now).total_seconds(), 1.0)
+
+    def loop(self) -> None:
+        while not self.stop.is_set():
+            delay = self.run_once()
+            self.stop.wait(delay)
