@@ -1,4 +1,5 @@
 """Group activations that look alike into signatures (candidate appliances)."""
+
 from __future__ import annotations
 
 import math
@@ -59,9 +60,7 @@ def signature_id(kind: str, band: str, power_w: float) -> str:
     return f"{prefix}-{rounded}w"
 
 
-def cluster(
-    activations: list[Activation], power_tol: float = 0.12, local_hour=None
-) -> list[Signature]:
+def cluster(activations: list[Activation], power_tol: float = 0.12, local_hour=None) -> list[Signature]:
     """Greedy one-dimensional clustering on power, per kind and duration band."""
     local_hour = local_hour or (lambda ts: time.localtime(ts).tm_hour)
     groups: dict[tuple[str, str], list[Activation]] = {}

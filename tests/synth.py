@@ -3,6 +3,7 @@
 The repository never contains real consumption data: every test builds its
 own day from simple, explicit appliances.
 """
+
 from __future__ import annotations
 
 import math
@@ -55,7 +56,7 @@ class House:
         return self.pv_peak_w * math.sin(math.pi * (h - 8) / 10)
 
     def consumption_at(self, t: float) -> float:
-        return self.base_w + sum(l.power_at(t) for l in self.loads)
+        return self.base_w + sum(load.power_at(t) for load in self.loads)
 
     def histories(
         self,

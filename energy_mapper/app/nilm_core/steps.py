@@ -1,10 +1,12 @@
 """Step detection: an appliance switching on or off is a step in the load."""
+
 from __future__ import annotations
 
 import bisect
 import statistics
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
+from itertools import pairwise
 
 
 @dataclass
@@ -49,7 +51,7 @@ def detect_steps(
     sig = Signal(points)
     # adapt the windows to the meter's reporting interval (1 s to 60 s meters)
     if len(sig.ts) > 2:
-        dt = statistics.median(b - a for a, b in zip(sig.ts, sig.ts[1:]))
+        dt = statistics.median(b - a for a, b in pairwise(sig.ts))
         window_s = max(window_s, 3.1 * dt)  # at least 3 readings per side
         merge_s = max(merge_s, 1.1 * dt)
     cand: list[Step] = []

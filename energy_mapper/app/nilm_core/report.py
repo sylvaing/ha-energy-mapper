@@ -1,15 +1,15 @@
 """Analyse one period (usually one day) and build a JSON-friendly report."""
+
 from __future__ import annotations
 
-import bisect
-import statistics
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
+from itertools import pairwise
 
-from .activations import Activation, find_cycling_sessions, pair_steps, validate_activations
+from .activations import find_cycling_sessions, pair_steps, validate_activations
 from .known import KnownLoad, SwitchedLoadConfig, resolve_switched_load
-from .signal import StepSeries, build_samples, parse_numeric, scaled
+from .signal import build_samples, parse_numeric, scaled
 from .signatures import cluster
 from .steps import detect_steps
 
@@ -116,10 +116,10 @@ def analyze(
 
     in_period = [s for s in samples if start <= s.ts < end]
     pv_unknown_s = 0.0
-    for a, b in zip(in_period, in_period[1:]):
+    for a, b in pairwise(in_period):
         if a.pv is None:
             pv_unknown_s += min(b.ts - a.ts, 300)
-    gaps = [b.ts - a.ts for a, b in zip(in_period, in_period[1:])]
+    gaps = [b.ts - a.ts for a, b in pairwise(in_period)]
 
     return {
         "version": REPORT_VERSION,
@@ -206,8 +206,17 @@ def _curve(samples, config, known, acts, start, end):
         rows.append(row)
 
     base = base_load([r["_room"] for r in rows])
-    totals = {"house": 0.0, "grid_import": 0.0, "grid_export": 0.0, "pv": 0.0,
-              "submetered": 0.0, "base": 0.0, "other": 0.0, "known": {}, "signatures": {}}
+    totals = {
+        "house": 0.0,
+        "grid_import": 0.0,
+        "grid_export": 0.0,
+        "pv": 0.0,
+        "submetered": 0.0,
+        "base": 0.0,
+        "other": 0.0,
+        "known": {},
+        "signatures": {},
+    }
     h = res / 3600 / 1000
     for row in rows:
         room = row.pop("_room")
@@ -282,21 +291,25 @@ def _peaks(samples, config, known, acts, start, end):
         for a in acts:
             p = a.power_at(m.ts)
             if p > 0:
-                parts.append({
-                    "kind": "signature",
-                    "name": a.signature or "?",
-                    "power_w": round(p),
-                    "since": a.start,
-                })
+                parts.append(
+                    {
+                        "kind": "signature",
+                        "name": a.signature or "?",
+                        "power_w": round(p),
+                        "since": a.start,
+                    }
+                )
         explained = sum(p["power_w"] for p in parts)
-        out.append({
-            "start": e["start"],
-            "end": e["end"],
-            "max_ts": m.ts,
-            "house_w": round(m.house),
-            "grid_w": round(m.grid),
-            "pv_w": round(m.pv or 0),
-            "parts": parts,
-            "unexplained_w": round(m.house - explained),
-        })
+        out.append(
+            {
+                "start": e["start"],
+                "end": e["end"],
+                "max_ts": m.ts,
+                "house_w": round(m.house),
+                "grid_w": round(m.grid),
+                "pv_w": round(m.pv or 0),
+                "parts": parts,
+                "unexplained_w": round(m.house - explained),
+            }
+        )
     return out

@@ -1,4 +1,5 @@
 """Unit tests of nilm_core on synthetic households (python3 -m unittest)."""
+
 from __future__ import annotations
 
 import pathlib
@@ -11,7 +12,6 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from nilm_core import (  # noqa: E402
     AnalysisConfig,
-    SubmeterConfig,
     SwitchedLoadConfig,
     analyze,
     build_samples,
@@ -46,7 +46,9 @@ class SignalTests(unittest.TestCase):
     def test_pv_is_added_back(self):
         h = House(base_w=400, pv_peak_w=3000)
         hist = h.histories(DAY0 + 12 * HOUR, DAY0 + 12 * HOUR + 600)
-        samples = build_samples(parse_numeric(hist["sensor.grid_power"]), parse_numeric(hist["sensor.pv_power"]))
+        samples = build_samples(
+            parse_numeric(hist["sensor.grid_power"]), parse_numeric(hist["sensor.pv_power"])
+        )
         mean = sum(s.house for s in samples) / len(samples)
         self.assertAlmostEqual(mean, 400, delta=15)
         self.assertTrue(any(s.grid < 0 for s in samples))  # exporting
@@ -62,7 +64,9 @@ class SignalTests(unittest.TestCase):
         h = House(base_w=400, pv_peak_w=3000)
         t = DAY0 + 12 * HOUR
         hist = h.histories(t, t + 3600, pv_dropouts=((t + 600, t + 3000),))
-        samples = build_samples(parse_numeric(hist["sensor.grid_power"]), parse_numeric(hist["sensor.pv_power"]))
+        samples = build_samples(
+            parse_numeric(hist["sensor.grid_power"]), parse_numeric(hist["sensor.pv_power"])
+        )
         unknown = [s for s in samples if s.house is None]
         self.assertTrue(unknown)
         self.assertTrue(all(t + 600 + 300 <= s.ts < t + 3000 for s in unknown))
@@ -71,7 +75,9 @@ class SignalTests(unittest.TestCase):
         h = House(base_w=250, pv_peak_w=3000)
         t = DAY0 + 2 * HOUR
         hist = h.histories(t, t + 3600, pv_dropouts=((t, t + 3600),))
-        samples = build_samples(parse_numeric(hist["sensor.grid_power"]), parse_numeric(hist["sensor.pv_power"]))
+        samples = build_samples(
+            parse_numeric(hist["sensor.grid_power"]), parse_numeric(hist["sensor.pv_power"])
+        )
         self.assertTrue(all(s.pv == 0.0 for s in samples))
 
     def test_kw_and_inverted_sign(self):
@@ -225,7 +231,13 @@ class ReportTests(unittest.TestCase):
     def test_energy_balance(self):
         r = self.day()
         e = r["energy_kwh"]
-        parts = e["base"] + e["other"] + e["submetered"] + sum(e["known"].values()) + sum(e["signatures"].values())
+        parts = (
+            e["base"]
+            + e["other"]
+            + e["submetered"]
+            + sum(e["known"].values())
+            + sum(e["signatures"].values())
+        )
         self.assertAlmostEqual(parts, e["house"], delta=0.05 * e["house"])
         self.assertAlmostEqual(e["base_w"], 250, delta=40)
 

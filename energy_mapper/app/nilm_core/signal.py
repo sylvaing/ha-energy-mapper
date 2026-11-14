@@ -3,11 +3,12 @@
 All functions work on plain lists of ``(timestamp, value)`` tuples so the
 library has no dependency on Home Assistant and can be replayed offline.
 """
+
 from __future__ import annotations
 
 import bisect
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Iterable, Sequence
 
 UNAVAILABLE = ("unavailable", "unknown", "", "none", "None")
 

@@ -4,12 +4,13 @@ Example: an electric water heater on a relay (``switch.water_heater``). The
 entity state tells *when* it may run; the steps in the house load tell *if*
 it actually drew power (a hot tank's thermostat may be open) and *how much*.
 """
+
 from __future__ import annotations
 
 import bisect
 import statistics
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Iterable, Sequence
 
 from .steps import Step
 

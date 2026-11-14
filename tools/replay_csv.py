@@ -14,6 +14,7 @@ Example:
         --pv sensor.pv_power --submeter sensor.pool_pump_power \\
         --switch switch.water_heater=on --switch switch.radiator=off
 """
+
 from __future__ import annotations
 
 import argparse
@@ -75,15 +76,21 @@ def main() -> None:
         end = dt.datetime.combine(day + dt.timedelta(days=1), dt.time()).timestamp()
         r = analyze(hist, cfg, start, end)
         e = r["energy_kwh"]
-        known = " ".join(f"{k['name'].split('.')[-1]}={k['power_w']}W/{e['known'].get(k['name'], 0):.1f}kWh"
-                         for k in r["known_loads"])
+        known = " ".join(
+            f"{k['name'].split('.')[-1]}={k['power_w']}W/{e['known'].get(k['name'], 0):.1f}kWh"
+            for k in r["known_loads"]
+        )
         top = r["peaks"][0] if r["peaks"] else None
         peak = ""
         if top:
             parts = "+".join(f"{p['name']}:{p['power_w']}" for p in top["parts"])
-            peak = f"peak {top['house_w']}W @{dt.datetime.fromtimestamp(top['max_ts']):%H:%M} [{parts}] rest {top['unexplained_w']}"
-        print(f"{day} house {e['house']:5.1f} base {e['base_w']:4}W sig {sum(e['signatures'].values()):4.1f} "
-              f"other {e['other']:4.1f} | {known} | sigs {len(r['signatures'])} | {peak} | {r['quality']['compute_s']}s")
+            at = dt.datetime.fromtimestamp(top["max_ts"])
+            peak = f"peak {top['house_w']}W @{at:%H:%M} [{parts}] rest {top['unexplained_w']}"
+        print(
+            f"{day} house {e['house']:5.1f} base {e['base_w']:4}W sig {sum(e['signatures'].values()):4.1f} "
+            f"other {e['other']:4.1f} | {known} | sigs {len(r['signatures'])} | {peak} "
+            f"| {r['quality']['compute_s']}s"
+        )
         if args.out:
             pathlib.Path(args.out).mkdir(parents=True, exist_ok=True)
             pathlib.Path(args.out, f"{day}.json").write_text(json.dumps(r))

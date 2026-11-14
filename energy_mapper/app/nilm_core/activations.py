@@ -9,11 +9,13 @@ Two kinds:
 * **simple activations**: an on-step paired with the off-step of the same
   size that closes it.
 """
+
 from __future__ import annotations
 
 import bisect
 import statistics
 from dataclasses import dataclass, field
+from itertools import pairwise
 
 from .steps import Step
 
@@ -124,11 +126,13 @@ def find_cycling_sessions(
     return sessions
 
 
-def _clean_match_soon(free: list[Step], j: int, ref: float, tol: float, up: bool, within_s: float = 30.0) -> bool:
+def _clean_match_soon(
+    free: list[Step], j: int, ref: float, tol: float, up: bool, within_s: float = 30.0
+) -> bool:
     """True if a step of the cycle's own size and direction follows shortly:
     then the big step belongs to another appliance and must not be split."""
     t = free[j].ts
-    for s in free[j + 1:]:
+    for s in free[j + 1 :]:
         if s.ts - t > within_s:
             break
         if (s.delta > 0) == up and abs(abs(s.delta) - ref) <= tol * ref:
@@ -139,11 +143,11 @@ def _clean_match_soon(free: list[Step], j: int, ref: float, tol: float, up: bool
 def _session(group: list[Step]) -> Activation:
     power = statistics.median(abs(s.delta) for s in group)
     ons, periods = [], []
-    for a, b in zip(group, group[1:]):
+    for a, b in pairwise(group):
         if a.delta > 0 and b.delta < 0:
             ons.append(b.ts - a.ts)
     ups = [s.ts for s in group if s.delta > 0]
-    periods = [b - a for a, b in zip(ups, ups[1:])]
+    periods = [b - a for a, b in pairwise(ups)]
     start = group[0].ts
     end = group[-1].ts
     on_total = sum(ons)
