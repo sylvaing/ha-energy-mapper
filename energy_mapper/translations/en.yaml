@@ -21,7 +21,7 @@ configuration:
   peak_window_days:
     name: Peak window (days)
     description: >-
-      The peak threshold is relative to the highest power of this many past
+      A peak is notable above 80 % of the highest power of this many past
       days, to follow the seasons.
   grid_entity:
     name: Grid power sensor
@@ -60,8 +60,8 @@ configuration:
   peak_threshold_w:
     name: Peak threshold (W)
     description: >-
-      Fixed peak threshold. Default 80 % of the highest power of the peak
-      window (or of the day, when higher).
+      Fixed threshold of the notable peaks. Default 80 % of the highest power
+      of the peak window (or of the day, when higher).
   log_level:
     name: Log level
     description: Verbosity of the add-on log.

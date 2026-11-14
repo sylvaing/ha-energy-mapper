@@ -23,7 +23,7 @@ configuration:
   peak_window_days:
     name: Fenêtre des pics (jours)
     description: >-
-      Le seuil des pics est relatif à la puissance la plus haute de ce
+      Un pic est notable au-dessus de 80 % de la puissance la plus haute de ce
       nombre de jours passés, pour suivre les saisons.
   grid_entity:
     name: Capteur de puissance du réseau
@@ -62,8 +62,8 @@ configuration:
   peak_threshold_w:
     name: Seuil des pics (W)
     description: >-
-      Seuil fixe des pics. Par défaut 80 % de la puissance la plus haute de
-      la fenêtre des pics (ou du jour, si elle est plus haute).
+      Seuil fixe des pics notables. Par défaut 80 % de la puissance la plus
+      haute de la fenêtre des pics (ou du jour, si elle est plus haute).
   log_level:
     name: Niveau de journalisation
     description: Niveau de détail du journal de l'add-on.

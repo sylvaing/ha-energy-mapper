@@ -6,7 +6,9 @@
   (`half_life_days`, 30 by default) and stable signature ids; new endpoint
   `GET /api/signatures`; daily reports served with registry ids.
 - Switched loads: learned power and polarity kept across days.
-- Peak threshold relative to the maximum of the last `peak_window_days` days.
+- Peaks: every report lists the day's top episodes (relative to the day's
+  maximum) and flags as `notable` those above 80 % of the maximum of the last
+  `peak_window_days` days (or above `peak_threshold_w` when it is set).
 - Bounded storage: full reports gzip-compressed and kept
   `report_retention_days` (90) days, day summaries kept while they still
   count; existing reports are compressed on start.

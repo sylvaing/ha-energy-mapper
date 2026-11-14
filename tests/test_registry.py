@@ -514,6 +514,39 @@ class KettleHA:
         return self.house.histories(a, end, dt=30) if a < end else {}
 
 
+class NotablePeakTests(unittest.TestCase):
+    def setUp(self):
+        t0 = midnight(D0)
+        house = House(
+            base_w=250, loads=[Steady(t0 + 3600, t0 + 3900, 3000), Steady(t0 + 7200, t0 + 7500, 2700)]
+        )
+        self.t0, self.hist = t0, house.histories(t0, t0 + 4 * 3600, dt=10)
+
+    def run_analysis(self, **kw):
+        from nilm_core import AnalysisConfig, analyze
+
+        cfg = AnalysisConfig(grid_entity="sensor.grid_power", context_s=0, **kw)
+        return analyze(self.hist, cfg, self.t0, self.t0 + 4 * 3600, local_hour=UTC_HOUR)
+
+    def test_top_peaks_always_listed(self):
+        # an ordinary day: both episodes listed (relative to the day), none notable
+        r = self.run_analysis(peak_reference_w=8000)
+        self.assertEqual(r["peak_threshold_w"], 6400)
+        self.assertEqual(len(r["peaks"]), 2)
+        self.assertEqual([p["notable"] for p in r["peaks"]], [False, False])
+        # no history: relative to the day itself, the highest one is notable
+        r = self.run_analysis()
+        self.assertAlmostEqual(r["peak_threshold_w"], 0.8 * r["max_house_w"], delta=1)
+        self.assertEqual([p["notable"] for p in r["peaks"]], [True, True])
+        # a fixed threshold defines "notable", not which episodes are listed
+        r = self.run_analysis(peak_threshold_w=3100, peak_reference_w=8000)
+        self.assertEqual(r["peak_threshold_w"], 3100)
+        self.assertEqual([p["notable"] for p in r["peaks"]], [True, False])
+        r = self.run_analysis(peak_threshold_w=20000)
+        self.assertEqual(len(r["peaks"]), 2)
+        self.assertFalse(any(p["notable"] for p in r["peaks"]))
+
+
 class EndToEndTests(unittest.TestCase):
     def test_nightly_runs_kettle_and_peak_window(self):
         peak_day = D0 + dt.timedelta(days=2)
@@ -540,11 +573,18 @@ class EndToEndTests(unittest.TestCase):
             # backfilled days are analysed newest first: no window yet
             first = store.load(D0.isoformat())
             self.assertEqual(first["peak_threshold_w"], round(0.8 * first["max_house_w"]))
-            self.assertEqual(len(first["peaks"]), 1)  # the kettle is the day's peak
-            # the following nights use the maximum of the window
+            self.assertEqual([p["notable"] for p in first["peaks"]], [True])  # the kettle is the day's peak
+            # the exceptional day: its 7 kW peak is notable
+            self.assertTrue(peak["peaks"][0]["notable"])
+            self.assertGreater(peak["peaks"][0]["house_w"], 7000)
+            # the following nights use the maximum of the window: the kettle is
+            # still the day's top episode, but not a notable one
             last = store.load((D0 + dt.timedelta(days=11)).isoformat())
             self.assertEqual(last["peak_threshold_w"], round(0.8 * peak["max_house_w"]))
-            self.assertEqual(last["peaks"], [])  # the kettle is no peak any more
+            self.assertEqual(len(last["peaks"]), 1)
+            self.assertFalse(last["peaks"][0]["notable"])
+            self.assertLess(last["peaks"][0]["house_w"], last["peak_threshold_w"])
+            self.assertEqual(last["peaks"][0]["house_w"], last["max_house_w"])
             reg = store.load_registry()
             self.assertEqual(reg["peak"]["reference_w"], peak["max_house_w"])
             self.assertEqual(reg["peak"]["threshold_w"], round(0.8 * peak["max_house_w"]))

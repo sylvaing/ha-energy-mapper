@@ -41,7 +41,7 @@ dashboard or when the automatic choice is wrong:
 | `backfill_days` | `30` | Past days analysed when they have no report yet. |
 | `half_life_days` | `30` | Age at which a past use counts half in the signature registry. |
 | `report_retention_days` | `90` | How long the full daily reports (with the curve) are kept. |
-| `peak_window_days` | `30` | The peak threshold is relative to the highest power of this many past days. |
+| `peak_window_days` | `30` | A peak is notable above 80 % of the highest power of this many past days. |
 | `grid_entity` | Energy dashboard | Grid power sensor (W or kW), positive when importing. |
 | `grid_export_entity` | Energy dashboard | Export power sensor, for meters that report import and export separately. |
 | `grid_invert` | `false` | The grid sensor is positive when exporting. |
@@ -51,7 +51,7 @@ dashboard or when the automatic choice is wrong:
 | `submeters` | Energy dashboard | Power sensors of measured appliances, subtracted before the analysis. |
 | `switched_loads` | Energy dashboard | Appliances driven by a switch. |
 | `step_threshold_w` | `300` | Smallest power change considered as an appliance switching. |
-| `peak_threshold_w` | 80 % of the recent maximum | Fixed threshold of the peaks (for example the subscribed power). |
+| `peak_threshold_w` | 80 % of the recent maximum | Fixed threshold of the notable peaks (for example the subscribed power). |
 | `log_level` | `info` | `debug`, `info`, `warning` or `error`. |
 
 Example of manual settings:
@@ -81,14 +81,16 @@ Each report is a JSON document with:
 - `energy_kwh`: house, grid import and export, solar, sub-metered, base load,
   known loads, signatures and the unexplained rest;
 - `max_house_w`, `peak_threshold_w`: the highest house power of the day and
-  the threshold used for its peaks;
+  the threshold of the notable peaks;
 - `curve`: the stacked breakdown of the house load, one point per minute;
 - `known_loads`: switch-driven appliances with their measured power;
 - `signatures`, `activations`: the appliances found in the curve that day.
   Their `signature` is a daily cluster id; the API adds `registry_id`, the
   long-lived id of the signature registry;
-- `peaks`: the biggest peaks and what was running (`registry_id` on the
-  signature parts);
+- `peaks`: the day's top episodes (up to 5, above 80 % of the day's own
+  maximum, so a normal day always has some) and what was running
+  (`registry_id` on the signature parts). `notable` is `true` when the
+  episode reaches `peak_threshold_w`;
 - `quality`: number of samples, longest gap, computing time;
 - `config`: the sensors used, derived from the Energy dashboard;
 - `findings`: what is worth checking (sensor without power sensor,
@@ -131,11 +133,13 @@ cluster gets a new id. The daily reports keep their own daily cluster ids
 The registry also remembers the **switched loads** (power and polarity
 learned on the days with transitions, with the same decay; a day without
 transitions keeps the last known values, and the learned power is used when
-a day has nothing to measure it) and the **peak threshold**: 80 % of the
-highest power of the last `peak_window_days` days, or of the day itself when
-higher, to follow the seasons. During the first days it is simply 80 % of the
-day's maximum; the days of the first backfill, analysed newest first, only
-know the days stored before them.
+a day has nothing to measure it) and the threshold of the **notable peaks**:
+80 % of the highest power of the last `peak_window_days` days, or of the day
+itself when higher, to follow the seasons (a fixed `peak_threshold_w` replaces
+it). Every daily report still lists the day's top episodes; only those that
+reach this threshold are flagged `notable`. During the first days the
+threshold is simply 80 % of the day's maximum; the days of the first
+backfill, analysed newest first, only know the days stored before them.
 
 ## Storage
 
