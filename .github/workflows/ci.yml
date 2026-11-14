@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: pip install ruff
+      - run: ruff check .
+      - run: ruff format --check .
+
+  tests:
+    name: Core tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12: add-on base image; 3.13: current Home Assistant
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests
+        if: hashFiles('tests/test_*.py') != ''
+        run: python -m unittest discover -s tests -v
+
+  integration:
+    name: Integration (hassfest, HACS)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - id: present
+        run: echo "yes=$([ -f custom_components/energy_mapper/manifest.json ] && echo 1 || echo 0)" >> "$GITHUB_OUTPUT"
+      - name: hassfest
+        if: steps.present.outputs.yes == '1'
+        uses: home-assistant/actions/hassfest@master
+      - name: HACS validation
+        if: steps.present.outputs.yes == '1'
+        uses: hacs/action@22.5.0
+        with:
+          category: integration
+          ignore: brands
+
+  addon:
+    name: Add-on (lint, build)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, aarch64]
+    steps:
+      - uses: actions/checkout@v7
+      - id: present
+        run: echo "yes=$([ -f energy_mapper/config.yaml ] && echo 1 || echo 0)" >> "$GITHUB_OUTPUT"
+      - name: Add-on linter
+        if: steps.present.outputs.yes == '1' && matrix.arch == 'amd64'
+        uses: frenck/action-addon-linter@v2
+        with:
+          path: ./energy_mapper
+      - name: Test build
+        if: steps.present.outputs.yes == '1'
+        uses: home-assistant/builder@2026.09.0
+        with:
+          args: |
+            --test \
+            --${{ matrix.arch }} \
+            --target /data/energy_mapper
+
+  frontend:
+    name: Panel build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - id: present
+        run: echo "yes=$([ -f frontend/package.json ] && echo 1 || echo 0)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v7
+        if: steps.present.outputs.yes == '1'
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build and check the committed bundle is up to date
+        if: steps.present.outputs.yes == '1'
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+          git diff --exit-code -- ../custom_components/energy_mapper/frontend/
