@@ -1,8 +1,10 @@
 """Internal HTTP API used by the Energy Mapper integration.
 
-GET  /api/health              {"status": "ok", "version", "last_run", "days"}
-GET  /api/days                {"days": ["YYYY-MM-DD", ...]} (ascending)
-GET  /api/report/YYYY-MM-DD   the stored report (404 if absent)
+GET  /api/health              {"status": "ok", "version", "last_run", "days",
+                               "signatures", "storage_bytes"}
+GET  /api/days                {"days": [...], "summary_days": [...]} (ascending)
+GET  /api/report/YYYY-MM-DD   the stored report with registry ids (404 if absent)
+GET  /api/signatures          the signature registry
 POST /api/analyze?day=YYYY-MM-DD
                               {"day", "ok": true} or {"day", "ok": false, "error", "message"}
 """
@@ -16,6 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from const import VERSION
 from ha_client import HAError
+from nilm_core.registry import annotate_report, empty_registry
 from service import AnalysisError, Analyzer
 from storage import ReportStore, parse_day
 
@@ -33,10 +36,23 @@ def route(analyzer: Analyzer, store: ReportStore, method: str, target: str) -> t
 
     if path == "/api/health" and method == "GET":
         last = store.state().get("last_run")
-        return 200, {"status": "ok", "version": VERSION, "last_run": last, "days": len(store.days())}
+        registry = store.load_registry() or {}
+        return 200, {
+            "status": "ok",
+            "version": VERSION,
+            "last_run": last,
+            "days": len(store.days()),
+            "signatures": len(registry.get("signatures") or []),
+            "storage_bytes": store.size_bytes(),
+        }
 
     if path == "/api/days" and method == "GET":
-        return 200, {"days": store.days()}
+        full = store.days()
+        kept = set(full)
+        return 200, {"days": full, "summary_days": [d for d in store.summary_days() if d not in kept]}
+
+    if path == "/api/signatures" and method == "GET":
+        return 200, store.load_registry() or empty_registry(analyzer.registry_config)
 
     if path.startswith("/api/report/") and method == "GET":
         day = path.removeprefix("/api/report/")
@@ -44,8 +60,13 @@ def route(analyzer: Analyzer, store: ReportStore, method: str, target: str) -> t
             return 400, {"error": "invalid_day", "message": "expected YYYY-MM-DD"}
         report = store.load(day)
         if report is None:
-            return 404, {"error": "not_found", "message": f"no report for {day}"}
-        return 200, report
+            # past the retention of full reports: the summary, without curve
+            report = store.load_summary(day)
+            if report is None:
+                return 404, {"error": "not_found", "message": f"no report for {day}"}
+            report["curve"] = []
+            report["curve_pruned"] = True
+        return 200, annotate_report(report, store.load_registry())
 
     if path == "/api/analyze" and method == "POST":
         value = (query.get("day") or [""])[0]
@@ -73,7 +94,7 @@ def route(analyzer: Analyzer, store: ReportStore, method: str, target: str) -> t
             return 500, {"day": value, "ok": False, "error": "internal", "message": str(err)}
         return 200, {"day": value, "ok": True}
 
-    known = {"/api/health", "/api/days", "/api/analyze"}
+    known = {"/api/health", "/api/days", "/api/analyze", "/api/signatures"}
     if path in known or path.startswith("/api/report/"):
         return 405, {"error": "method_not_allowed"}
     return 404, {"error": "not_found"}

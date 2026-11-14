@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.0
+
+- Signature registry learned across days, with progressive forgetting
+  (`half_life_days`, 30 by default) and stable signature ids; new endpoint
+  `GET /api/signatures`; daily reports served with registry ids.
+- Switched loads: learned power and polarity kept across days.
+- Peak threshold relative to the maximum of the last `peak_window_days` days.
+- Bounded storage: full reports gzip-compressed and kept
+  `report_retention_days` (90) days, day summaries kept while they still
+  count; existing reports are compressed on start.
+
 ## 0.1.0
 
 - First version: nightly analysis of the previous day, configured from the

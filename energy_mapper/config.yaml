@@ -1,6 +1,6 @@
 # https://developers.home-assistant.io/docs/apps/configuration
 name: Energy Mapper
-version: "0.1.0"
+version: "0.2.0"
 slug: energy_mapper
 description: Identify the appliances of the home from the whole-house power meter
 url: https://github.com/sylvaing/ha-energy-mapper/tree/main/energy_mapper
@@ -15,6 +15,9 @@ discovery:
 options:
   analysis_time: "04:30"
   backfill_days: 30
+  half_life_days: 30
+  report_retention_days: 90
+  peak_window_days: 30
   grid_invert: false
   battery_invert: false
   switched_loads: []
@@ -22,6 +25,9 @@ options:
 schema:
   analysis_time: match(^([01][0-9]|2[0-3]):[0-5][0-9]$)
   backfill_days: int(0,365)
+  half_life_days: int(1,365)
+  report_retention_days: int(7,3650)
+  peak_window_days: int(1,365)
   grid_entity: str?
   grid_export_entity: str?
   grid_invert: bool

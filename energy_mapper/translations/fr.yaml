@@ -7,6 +7,24 @@ configuration:
     description: >-
       Nombre de jours passés à analyser s'ils n'ont pas encore de rapport
       (dans la limite de ce que l'enregistreur conserve).
+  half_life_days:
+    name: Demi-vie de la mémoire (jours)
+    description: >-
+      Âge auquel une utilisation passée compte pour moitié dans
+      l'apprentissage des signatures sur plusieurs jours. Plus court oublie
+      plus vite un appareil remplacé, plus long garde plus longtemps les
+      appareils rares.
+  report_retention_days:
+    name: Conservation des rapports complets (jours)
+    description: >-
+      Durée de conservation des rapports quotidiens avec leur courbe minute
+      par minute. Les résumés des jours sont gardés tant qu'ils comptent
+      encore pour les signatures.
+  peak_window_days:
+    name: Fenêtre des pics (jours)
+    description: >-
+      Le seuil des pics est relatif à la puissance la plus haute de ce
+      nombre de jours passés, pour suivre les saisons.
   grid_entity:
     name: Capteur de puissance du réseau
     description: >-
@@ -43,7 +61,9 @@ configuration:
     description: Plus petite variation de puissance prise pour un appareil qui s'allume ou s'éteint. 300 W par défaut.
   peak_threshold_w:
     name: Seuil des pics (W)
-    description: Seuil fixe des pics. Par défaut 80 % du maximum de la journée.
+    description: >-
+      Seuil fixe des pics. Par défaut 80 % de la puissance la plus haute de
+      la fenêtre des pics (ou du jour, si elle est plus haute).
   log_level:
     name: Niveau de journalisation
     description: Niveau de détail du journal de l'add-on.

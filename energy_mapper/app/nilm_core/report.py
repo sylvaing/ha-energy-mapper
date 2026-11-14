@@ -38,9 +38,11 @@ class AnalysisConfig:
     # unit factors to W, per entity (1000 for kW sensors); missing = 1
     scales: dict[str, float] = field(default_factory=dict)
     step_threshold_w: float = 300.0
-    # None: relative to the period's maximum (peak_relative x max)
+    # None: relative (peak_relative) to the highest of the period's maximum
+    # and peak_reference_w, the maximum of the previous days (see registry)
     peak_threshold_w: float | None = None
     peak_relative: float = 0.8
+    peak_reference_w: float | None = None
     top_peaks: int = 5
     curve_resolution_s: int = 60
     context_s: int = 3 * 3600  # history read before the period (loads already on)
@@ -120,7 +122,10 @@ def analyze(
     signatures = cluster(acts, local_hour=local_hour)
 
     curve, totals = _curve(samples, config, known, acts, start, end)
-    peaks = _peaks(samples, config, known, acts, start, end)
+    houses = [s.house for s in samples if start <= s.ts < end and s.house is not None]
+    max_house = max(houses) if houses else None
+    threshold = peak_threshold(config, max_house)
+    peaks = _peaks(samples, config, known, acts, start, end, threshold)
 
     in_period = [s for s in samples if start <= s.ts < end]
     pv_unknown_s = 0.0
@@ -135,6 +140,8 @@ def analyze(
         "end": end,
         "generated_at": time.time(),
         "energy_kwh": totals,
+        "max_house_w": round(max_house) if max_house is not None else None,
+        "peak_threshold_w": round(threshold) if threshold is not None else None,
         "curve": curve,
         "peaks": peaks,
         "signatures": [s.to_dict() for s in signatures],
@@ -158,6 +165,8 @@ def analyze(
                 "power_w": round(a.power_w),
                 "cycling": a.cycling,
                 "duty": a.duty,
+                "on_s": a.on_s,
+                "period_s": a.period_s,
                 "signature": a.signature,
             }
             for a in acts
@@ -268,14 +277,20 @@ def _curve(samples, config, known, acts, start, end):
     return rows, totals
 
 
-def _peaks(samples, config, known, acts, start, end):
+def peak_threshold(config: AnalysisConfig, period_max_w: float | None) -> float | None:
+    """The fixed threshold, else ``peak_relative`` x the highest of the
+    period's maximum and the reference of the previous days."""
+    if config.peak_threshold_w is not None:
+        return config.peak_threshold_w
+    ref = max((x for x in (period_max_w, config.peak_reference_w) if x is not None), default=None)
+    return None if ref is None else config.peak_relative * ref
+
+
+def _peaks(samples, config, known, acts, start, end, threshold):
     """Episodes above the threshold, with what was running at the maximum."""
     period = [s for s in samples if start <= s.ts < end and s.house is not None]
-    if not period:
+    if not period or threshold is None:
         return []
-    threshold = config.peak_threshold_w
-    if threshold is None:
-        threshold = config.peak_relative * max(s.house for s in period)
     episodes = []
     cur = None
     for s in period:

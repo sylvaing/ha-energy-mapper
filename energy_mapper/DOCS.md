@@ -17,8 +17,11 @@ changes your configuration.
    `backfill_days`, as long as the recorder still holds the whole day.
 2. Every day at `analysis_time` it analyses the previous day (and catches up
    any day missed while it was stopped).
-3. Each report is stored in `/data/reports/YYYY-MM-DD.json`. The folder is
+3. Each report is stored, gzip-compressed, in `/data/reports`. The folder is
    part of the add-on backups.
+4. After each analysis the **signature registry** is updated: the
+   activations of all the stored days are clustered together to learn the
+   appliances of the home across days (see below), and old data is pruned.
 
 Days run from midnight to midnight in the time zone of Home Assistant.
 
@@ -36,6 +39,9 @@ dashboard or when the automatic choice is wrong:
 |---|---|---|
 | `analysis_time` | `04:30` | Local time of the nightly analysis. |
 | `backfill_days` | `30` | Past days analysed when they have no report yet. |
+| `half_life_days` | `30` | Age at which a past use counts half in the signature registry. |
+| `report_retention_days` | `90` | How long the full daily reports (with the curve) are kept. |
+| `peak_window_days` | `30` | The peak threshold is relative to the highest power of this many past days. |
 | `grid_entity` | Energy dashboard | Grid power sensor (W or kW), positive when importing. |
 | `grid_export_entity` | Energy dashboard | Export power sensor, for meters that report import and export separately. |
 | `grid_invert` | `false` | The grid sensor is positive when exporting. |
@@ -45,7 +51,7 @@ dashboard or when the automatic choice is wrong:
 | `submeters` | Energy dashboard | Power sensors of measured appliances, subtracted before the analysis. |
 | `switched_loads` | Energy dashboard | Appliances driven by a switch. |
 | `step_threshold_w` | `300` | Smallest power change considered as an appliance switching. |
-| `peak_threshold_w` | 80 % of the maximum | Fixed threshold of the peaks (for example the subscribed power). |
+| `peak_threshold_w` | 80 % of the recent maximum | Fixed threshold of the peaks (for example the subscribed power). |
 | `log_level` | `info` | `debug`, `info`, `warning` or `error`. |
 
 Example of manual settings:
@@ -74,14 +80,77 @@ Each report is a JSON document with:
 - `day`, `start`, `end`, `time_zone`: the analysed period;
 - `energy_kwh`: house, grid import and export, solar, sub-metered, base load,
   known loads, signatures and the unexplained rest;
+- `max_house_w`, `peak_threshold_w`: the highest house power of the day and
+  the threshold used for its peaks;
 - `curve`: the stacked breakdown of the house load, one point per minute;
 - `known_loads`: switch-driven appliances with their measured power;
-- `signatures`, `activations`: recurring appliances found in the curve;
-- `peaks`: the biggest peaks and what was running;
+- `signatures`, `activations`: the appliances found in the curve that day.
+  Their `signature` is a daily cluster id; the API adds `registry_id`, the
+  long-lived id of the signature registry;
+- `peaks`: the biggest peaks and what was running (`registry_id` on the
+  signature parts);
 - `quality`: number of samples, longest gap, computing time;
 - `config`: the sensors used, derived from the Energy dashboard;
 - `findings`: what is worth checking (sensor without power sensor,
   unavailable device, estimated device far from what was measured...).
+
+## Signature registry
+
+An appliance used once a day is an isolated case in each daily report: it
+only becomes recognisable across days. The registry clusters the activations
+of all the stored days together, each one weighted by its age with an
+exponential decay: with the default half-life of 30 days, a use from 30 days
+ago counts half, 60 days a quarter, and so on. Recent habits dominate, a
+replaced appliance fades out within weeks, and a rare appliance (used once a
+week or a few times a year) stays known as long as its weight is meaningful.
+
+Each signature keeps:
+
+| Field | Description |
+|---|---|
+| `id` | Stable identity, for example `short-2000w` (steady, under 10 min), `medium-...` (10 to 60 min), `long-...` (over 1 h) or `cyc-1400w` (cycling session). |
+| `kind`, `band` | `steady` or `cycling`; `short`, `medium`, `long` or `session`. |
+| `label` | Name given by the user (`null` for now). A named signature is never forgotten. |
+| `power_w`, `duration_s` | Typical power and duration (weighted medians). |
+| `on_s`, `period_s`, `duty` | Typical cycle of a cycling session (`null` for steady loads). |
+| `weight` | Weighted number of uses (each use counts 1 when new, 0.5 after one half-life). |
+| `count`, `days_seen` | Raw number of uses and of days with a use, over the stored history. |
+| `per_week` | Weighted uses per week. |
+| `first_seen`, `last_seen` | First and last day with a use. |
+| `hours` | Weighted uses per local hour (24 values). |
+| `energy_kwh`, `weighted_energy_kwh` | Energy of the stored uses, raw and weighted. |
+| `examples` | The most recent uses: `day`, `start`, `end` (unix time), `power_w`. |
+| `created_at` | When the id was given (unix time). |
+
+The id stays the same from one night to the next as long as the cluster is
+still there: the clusters of the night are matched to the signatures of the
+previous registry by kind, duration band and power (within 12 %). A new
+cluster gets a new id. The daily reports keep their own daily cluster ids
+(`signature`); the API adds the matching registry id (`registry_id`).
+
+The registry also remembers the **switched loads** (power and polarity
+learned on the days with transitions, with the same decay; a day without
+transitions keeps the last known values, and the learned power is used when
+a day has nothing to measure it) and the **peak threshold**: 80 % of the
+highest power of the last `peak_window_days` days, or of the day itself when
+higher, to follow the seasons. During the first days it is simply 80 % of the
+day's maximum; the days of the first backfill, analysed newest first, only
+know the days stored before them.
+
+## Storage
+
+Everything is kept in `/data` (included in the add-on backups) and stays
+bounded, whatever the age of the installation:
+
+| Kept | Retention | Order of size |
+|---|---|---|
+| Full daily report, with the per-minute curve (`reports/`, gzip) | `report_retention_days` (90 days) | ~2 MB |
+| Day summary: everything but the curve (`summaries/`, gzip) | until the weight of its activations falls below 1 % (~200 days with a 30-day half-life) | ~1 MB |
+| Signature registry (`registry.json`) | while a signature's weight is above 1 %; forever once it is named | tens of KB |
+
+Pruning runs after each nightly analysis. The registry is rebuilt from the
+day summaries if it is missing or unreadable. Reports stored as plain JSON
+by version 0.1 are compressed on start.
 
 ## Internal API
 
@@ -91,10 +160,48 @@ announces itself to Home Assistant through Supervisor discovery.
 
 | Request | Answer |
 |---|---|
-| `GET /api/health` | `{"status": "ok", "version": "0.1.0", "last_run": <unix time or null>, "days": <number of reports>}` |
-| `GET /api/days` | `{"days": ["YYYY-MM-DD", ...]}`, oldest first |
-| `GET /api/report/YYYY-MM-DD` | The report, or 404 |
+| `GET /api/health` | `{"status": "ok", "version": "0.2.0", "last_run": <unix time or null>, "days": <number of full reports>, "signatures": <registry size>, "storage_bytes": <size of /data>}` |
+| `GET /api/days` | `{"days": [...], "summary_days": [...]}`: days with a full report, and older days with only a summary, oldest first |
+| `GET /api/report/YYYY-MM-DD` | The report with the registry ids, or 404. For a day with only a summary: `curve` is empty and `curve_pruned` is `true` |
+| `GET /api/signatures` | The signature registry (below) |
 | `POST /api/analyze?day=YYYY-MM-DD` | Analyses that day now: `{"day": "...", "ok": true}`, or `{"day": "...", "ok": false, "error": "<code>", "message": "..."}` |
+
+`GET /api/signatures` answers:
+
+```json
+{
+  "version": 1,
+  "updated_at": 1800000000.0,
+  "half_life_days": 30,
+  "power_tol": 0.12,
+  "days": 120,
+  "first_day": "2027-01-10",
+  "last_day": "2027-05-09",
+  "signatures": [
+    {
+      "id": "short-2000w", "kind": "steady", "band": "short", "label": null,
+      "power_w": 2010, "duration_s": 150, "on_s": null, "period_s": null, "duty": null,
+      "weight": 21.4, "count": 118, "days_seen": 97, "per_week": 6.9,
+      "first_seen": "2027-01-10", "last_seen": "2027-05-09",
+      "hours": [0, 0, 0, 0, 0, 0, 0, 4.1, 3.2, 0.5, 0, 0, 0, 0, 0, 0, 0, 0, 1.2, 2.6, 0.8, 0, 0, 0],
+      "energy_kwh": 9.9, "weighted_energy_kwh": 1.8,
+      "examples": [{"day": "2027-05-09", "start": 1810000000.0, "end": 1810000150.0, "power_w": 2004}],
+      "created_at": 1789000000.0
+    }
+  ],
+  "switched_loads": [
+    {
+      "entity_id": "switch.water_heater", "name": "Water heater", "power_w": 2400,
+      "inverted": false, "on_states": ["on"], "weight": 18.2, "days_seen": 95,
+      "first_seen": "2027-01-10", "last_seen": "2027-05-09"
+    }
+  ],
+  "peak": {"window_days": 30, "relative": 0.8, "reference_w": 7200, "threshold_w": 5760, "days": 30}
+}
+```
+
+Signatures are sorted by decreasing weight. Before the first analysis the
+lists are empty and `peak` is `null`.
 
 Error codes: `invalid_day` (400: not a date, or a day that is not over),
 `no_grid` (422: no grid power sensor found), `no_data` (422: no grid data in

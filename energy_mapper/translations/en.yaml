@@ -7,6 +7,22 @@ configuration:
     description: >-
       How many past days to analyse when they have no report yet (limited by
       what the recorder still holds).
+  half_life_days:
+    name: Memory half-life (days)
+    description: >-
+      Age at which a past use counts half when the signatures are learned
+      across days. Shorter forgets replaced appliances faster, longer keeps
+      rare ones known longer.
+  report_retention_days:
+    name: Full report retention (days)
+    description: >-
+      How long the daily reports with their per-minute curve are kept. The
+      day summaries are kept as long as they still count for the signatures.
+  peak_window_days:
+    name: Peak window (days)
+    description: >-
+      The peak threshold is relative to the highest power of this many past
+      days, to follow the seasons.
   grid_entity:
     name: Grid power sensor
     description: >-
@@ -43,7 +59,9 @@ configuration:
     description: Smallest power change considered as an appliance switching. Default 300 W.
   peak_threshold_w:
     name: Peak threshold (W)
-    description: Fixed peak threshold. Default 80 % of the day's maximum.
+    description: >-
+      Fixed peak threshold. Default 80 % of the highest power of the peak
+      window (or of the day, when higher).
   log_level:
     name: Log level
     description: Verbosity of the add-on log.

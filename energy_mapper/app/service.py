@@ -13,12 +13,17 @@ from const import VERSION
 from energy_config import DerivedConfig, derive, tracking_gaps
 from ha_client import HAError
 from nilm_core import analyze, parse_numeric
+from nilm_core.registry import RegistryConfig, day_max_w, forget_after_days, peak_reference
+from nilm_core.registry import update as update_registry
 from storage import ReportStore
 
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_ANALYSIS_TIME = "04:30"
 DEFAULT_BACKFILL_DAYS = 30
+DEFAULT_HALF_LIFE_DAYS = 30
+DEFAULT_REPORT_RETENTION_DAYS = 90
+DEFAULT_PEAK_WINDOW_DAYS = 30
 # the first grid reading must be at most this late after midnight, otherwise
 # the recorder no longer holds the whole day (purged) and the day is skipped
 MAX_START_GAP_S = 3600
@@ -137,6 +142,14 @@ class Analyzer:
         self.clock = clock
         self.lock = threading.Lock()
         self.tz: dt.tzinfo = local_tz(None)
+        self._maxima: dict[str, float | None] = {}  # daily maxima already read
+
+    def _int_option(self, key: str, default: int) -> int:
+        try:
+            value = int(self.options.get(key) or default)
+        except (TypeError, ValueError):
+            return default
+        return value if value > 0 else default
 
     @property
     def backfill_days(self) -> int:
@@ -144,6 +157,17 @@ class Analyzer:
             return int(self.options.get("backfill_days", DEFAULT_BACKFILL_DAYS))
         except (TypeError, ValueError):
             return DEFAULT_BACKFILL_DAYS
+
+    @property
+    def registry_config(self) -> RegistryConfig:
+        return RegistryConfig(
+            half_life_days=self._int_option("half_life_days", DEFAULT_HALF_LIFE_DAYS),
+            peak_window_days=self._int_option("peak_window_days", DEFAULT_PEAK_WINDOW_DAYS),
+        )
+
+    @property
+    def report_retention_days(self) -> int:
+        return self._int_option("report_retention_days", DEFAULT_REPORT_RETENTION_DAYS)
 
     def today(self) -> dt.date:
         return dt.datetime.fromtimestamp(self.clock(), self.tz).date()
@@ -159,7 +183,26 @@ class Analyzer:
             )
         entities = list(derived.config.entities())
         entities += [t.energy_entity for t in derived.tracked if t.role == "switched"]
+        # switched loads: the power learned on previous days is used when a
+        # day has no transition to measure it
+        memory = {x["entity_id"]: x for x in (self.store.load_registry() or {}).get("switched_loads", [])}
+        for load in derived.config.switched_loads:
+            learned = memory.get(load.entity_id, {}).get("power_w")
+            if learned and not load.power_w:
+                load.power_w = float(learned)
         return Context(derived, self.tz, list(dict.fromkeys(entities)))
+
+    def _day_max(self, day: str) -> float | None:
+        if day not in self._maxima:
+            summary = self.store.load_summary(day)
+            self._maxima[day] = day_max_w(summary) if summary else None
+        return self._maxima[day]
+
+    def peak_reference(self, day: dt.date) -> float | None:
+        """Highest maximum of the stored days of the peak window before ``day``."""
+        window = self.registry_config.peak_window_days
+        days = [(day - dt.timedelta(days=i)).isoformat() for i in range(1, window + 1)]
+        return peak_reference({d: self._day_max(d) for d in days}, day.isoformat(), window)
 
     def _run_day(self, day: dt.date, ctx: Context) -> dict:
         cfg = ctx.derived.config
@@ -172,6 +215,7 @@ class Analyzer:
         if min(grid) > start + MAX_START_GAP_S:
             raise AnalysisError("partial_day", f"{day}: the recorder history starts after midnight")
         tz = ctx.tz
+        cfg.peak_reference_w = self.peak_reference(day)
         report = analyze(
             histories, cfg, start, end, local_hour=lambda ts: dt.datetime.fromtimestamp(ts, tz).hour
         )
@@ -186,6 +230,7 @@ class Analyzer:
             }
         )
         self.store.save(day.isoformat(), report)
+        self._maxima[day.isoformat()] = day_max_w(report)
         self.store.set_state(last_run=self.clock())
         _LOGGER.info(
             "%s analysed: house %.1f kWh, base %d W, %d signatures, %d known loads",
@@ -203,7 +248,67 @@ class Analyzer:
             ctx = self.prepare()
             if day >= self.today():
                 raise AnalysisError("invalid_day", f"{day} is not over yet")
-            return self._run_day(day, ctx)
+            report = self._run_day(day, ctx)
+            self._maintain_safely()
+            return report
+
+    # -- registry and retention ----------------------------------------------
+    def _summary_tz(self, summaries: dict[str, dict]) -> dt.tzinfo:
+        for day in sorted(summaries, reverse=True):
+            name = summaries[day].get("time_zone")
+            if name:
+                return local_tz(name)
+        return self.tz
+
+    def maintain(self) -> dict:
+        with self.lock:
+            return self._maintain()
+
+    def _maintain(self) -> dict:
+        """Prune the storage, then update the signature registry from the
+        stored summaries (rebuilt from them when missing or corrupt)."""
+        today = self.today()
+        config = self.registry_config
+        removed = self.store.prune(
+            today, self.report_retention_days, forget_after_days(config.half_life_days, config.forget_weight)
+        )
+        for day in removed["summaries"]:
+            self._maxima.pop(day, None)
+        t0 = time.perf_counter()
+        previous = self.store.load_registry()
+        if previous is None and self.store.registry_path.exists():
+            _LOGGER.warning("signature registry unreadable, rebuilding it from the day summaries")
+        summaries = self.store.summaries_all()
+        tz = self._summary_tz(summaries)
+        now = dt.datetime.combine(today, dt.time(0), tzinfo=tz).timestamp()
+        registry = update_registry(
+            previous, summaries, now, config, local_hour=lambda ts: dt.datetime.fromtimestamp(ts, tz).hour
+        )
+        self.store.save_registry(registry)
+        self.store.set_state(last_maintenance=today.isoformat())
+        _LOGGER.info(
+            "registry %s: %d signature(s) from %d day(s) in %.2f s; pruned %d report(s), %d summary(ies)",
+            "updated" if previous else "rebuilt",
+            len(registry["signatures"]),
+            len(summaries),
+            time.perf_counter() - t0,
+            len(removed["reports"]),
+            len(removed["summaries"]),
+        )
+        return {"registry": registry, "removed": removed}
+
+    def _maintain_safely(self) -> None:
+        """Maintenance after an analysis: its failure must not lose the reports."""
+        try:
+            self._maintain()
+        except Exception:
+            _LOGGER.exception("registry update or pruning failed")
+
+    def _needs_maintenance(self) -> bool:
+        return (
+            self.store.state().get("last_maintenance") != self.today().isoformat()
+            or self.store.load_registry() is None
+        ) and bool(self.store.summary_days())
 
     def catch_up(self) -> dict:
         """Analyse yesterday and the missing days of the backfill window,
@@ -212,13 +317,15 @@ class Analyzer:
         Raises ``HAError`` and ``AnalysisError('no_grid')``: nothing can be
         done before they are fixed. Any other failure only skips its day."""
         with self.lock:
-            missing = days_to_analyze(self.today(), set(self.store.days()), self.backfill_days)
+            missing = days_to_analyze(self.today(), set(self.store.summary_days()), self.backfill_days)
             done, failed = [], []
             if not missing:
+                if self._needs_maintenance():
+                    self._maintain_safely()
                 return {"analysed": done, "failed": failed}
             ctx = self.prepare()
             # the time zone may have changed with prepare()
-            missing = days_to_analyze(self.today(), set(self.store.days()), self.backfill_days)
+            missing = days_to_analyze(self.today(), set(self.store.summary_days()), self.backfill_days)
             empty = 0
             for day in missing:
                 try:
@@ -240,6 +347,8 @@ class Analyzer:
                 except Exception:
                     _LOGGER.exception("analysis of %s failed", day)
                     failed.append(day.isoformat())
+            if done or self._needs_maintenance():
+                self._maintain_safely()
             return {"analysed": done, "failed": failed}
 
 
