@@ -9,7 +9,7 @@ from itertools import pairwise
 
 from .activations import find_cycling_sessions, pair_steps, validate_activations
 from .known import KnownLoad, SwitchedLoadConfig, resolve_switched_load
-from .signal import build_samples, parse_numeric, scaled
+from .signal import build_samples, parse_numeric, scaled, sum_series
 from .signatures import cluster
 from .steps import detect_steps
 
@@ -28,6 +28,9 @@ class AnalysisConfig:
     grid_export_entity: str | None = None
     grid_invert: bool = False  # the meter reports + for export
     pv_entity: str | None = None
+    # more meters of the same kind, summed (one per phase, several inverters...)
+    extra_grid_entities: list[str] = field(default_factory=list)
+    extra_pv_entities: list[str] = field(default_factory=list)
     battery_entity: str | None = None  # + discharge
     battery_invert: bool = False
     submeters: list[SubmeterConfig] = field(default_factory=list)
@@ -43,7 +46,7 @@ class AnalysisConfig:
     context_s: int = 3 * 3600  # history read before the period (loads already on)
 
     def entities(self) -> list[str]:
-        ids = [self.grid_entity]
+        ids = [self.grid_entity, *self.extra_grid_entities, *self.extra_pv_entities]
         for e in (self.grid_export_entity, self.pv_entity, self.battery_entity):
             if e:
                 ids.append(e)
@@ -90,8 +93,13 @@ def analyze(
         return scaled(parse_numeric(histories.get(entity, [])), config.scales.get(entity, 1.0), invert)
 
     samples = build_samples(
-        grid=series(config.grid_entity, config.grid_invert),
-        pv=series(config.pv_entity),
+        grid=sum_series(
+            [series(config.grid_entity, config.grid_invert)]
+            + [series(e, config.grid_invert) for e in config.extra_grid_entities]
+        ),
+        pv=sum_series([series(config.pv_entity)] + [series(e) for e in config.extra_pv_entities])
+        if config.pv_entity
+        else None,
         submeters=[series(s.entity_id) for s in config.submeters],
         grid_export=series(config.grid_export_entity),
         battery=series(config.battery_entity, config.battery_invert),
@@ -137,6 +145,8 @@ def analyze(
                 "power_w": round(k.power_w),
                 "transitions": k.transitions,
                 "matched": k.matched,
+                "on_states": list(k.on_states),
+                "inverted": k.inverted,
                 "on_s": round(sum(max(0, min(b, end) - max(a, start)) for a, b in k.intervals)),
             }
             for k in known

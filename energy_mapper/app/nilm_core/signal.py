@@ -147,3 +147,23 @@ def build_samples(
         residual = house - sub if house is not None else None
         out.append(Sample(ts, g, p, b, sub, house, residual))
     return out
+
+
+def sum_series(
+    series: Sequence[Sequence[tuple[float, float | None]] | None],
+) -> list[tuple[float, float | None]]:
+    """Sum several meters of the same kind (one per phase, several inverters)
+    on the union of their timestamps. The sum is unknown while one is."""
+    parts = [s for s in series if s]
+    if len(parts) <= 1:
+        return list(parts[0]) if parts else []
+    steps = [StepSeries(p) for p in parts]
+    out: list[tuple[float, float | None]] = []
+    for t in sorted({t for p in parts for t, _ in p}):
+        values = [s.value_at(t) for s in steps]
+        if any(v is None for v in values):
+            # before a meter's first reading, or while it is unavailable
+            out.append((t, None))
+        else:
+            out.append((t, sum(values)))
+    return out

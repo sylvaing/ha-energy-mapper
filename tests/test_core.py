@@ -217,6 +217,25 @@ class ReportTests(unittest.TestCase):
         self.assertAlmostEqual(k["on_s"], 2.5 * HOUR, delta=120)
         self.assertAlmostEqual(r["energy_kwh"]["known"]["Water heater"], 1.85 * 2.5, delta=0.3)
 
+    def test_inverted_relay_is_detected(self):
+        # pilot-wire radiator: heats (900 W) while its relay is OFF
+        heat = [(DAY0 + 6 * HOUR, DAY0 + 8 * HOUR), (DAY0 + 17 * HOUR, DAY0 + 19 * HOUR)]
+        house = House(base_w=250, loads=[Steady(a, b, 900) for a, b in heat])
+        hist = house.histories(DAY0 - 3 * HOUR, DAY0 + 24 * HOUR, dt=5)
+        relay = [(DAY0 - 3 * HOUR, "on")]
+        for a, b in heat:
+            relay += [(a, "off"), (b, "on")]
+        hist["switch.radiator"] = relay
+        cfg = AnalysisConfig(
+            grid_entity="sensor.grid_power",
+            switched_loads=[SwitchedLoadConfig("switch.radiator", "Radiator")],  # configured as "on"
+        )
+        k = analyze(hist, cfg, DAY0, DAY0 + 24 * HOUR, local_hour=UTC_HOUR)["known_loads"][0]
+        self.assertTrue(k["inverted"])
+        self.assertEqual(k["on_states"], ["off"])
+        self.assertAlmostEqual(k["power_w"], 900, delta=50)
+        self.assertAlmostEqual(k["on_s"], 4 * HOUR, delta=120)
+
     def test_signatures(self):
         r = self.day()
         sigs = {s["id"]: s for s in r["signatures"]}
