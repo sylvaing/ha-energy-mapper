@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Energy Mapper panel (dev harness)</title>
+    <!--
+      Dev harness, not shipped: mounts the built panel with a fake `hass` whose
+      callWS answers from the SYNTHETIC sample data of dev/sample/.
+      From the repository root:
+        (cd frontend && npm run build) && python3 -m http.server 8765
+      then open http://localhost:8765/frontend/dev/index.html
+      The HA elements (ha-card, ha-alert...) are not defined here: the panel's
+      own fallbacks are what you see.
+    -->
+    <style>
+      /* default theme of Home Assistant (approximation) */
+      html {
+        --primary-color: #009ac7;
+        --accent-color: #ff9800;
+        --primary-background-color: #fafafa;
+        --secondary-background-color: #e5e5e5;
+        --card-background-color: #ffffff;
+        --primary-text-color: #212121;
+        --secondary-text-color: #727272;
+        --text-primary-color: #ffffff;
+        --disabled-text-color: #bdbdbd;
+        --disabled-color: #bdbdbd;
+        --divider-color: rgba(0, 0, 0, 0.12);
+        --error-color: #db4437;
+        --warning-color: #ffa600;
+        --success-color: #43a047;
+        --info-color: #039be5;
+        --energy-solar-color: #ff9800;
+        --app-header-background-color: var(--primary-color);
+        --app-header-text-color: #ffffff;
+        --ha-card-border-radius: 12px;
+        --ha-card-border-color: #e0e0e0;
+        color-scheme: light;
+      }
+      html.dark {
+        --primary-background-color: #111111;
+        --secondary-background-color: #282828;
+        --card-background-color: #1c1c1c;
+        --primary-text-color: #e1e1e1;
+        --secondary-text-color: #9b9b9b;
+        --disabled-text-color: #6f6f6f;
+        --disabled-color: #6f6f6f;
+        --divider-color: rgba(225, 225, 225, 0.12);
+        --app-header-background-color: #101e24;
+        --app-header-text-color: #e1e1e1;
+        --ha-card-border-color: rgba(225, 225, 225, 0.12);
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        font-family: Roboto, Noto, sans-serif;
+        background: var(--primary-background-color);
+      }
+      #dev {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+        padding: 6px 12px;
+        font: 12px monospace;
+        background: #333;
+        color: #eee;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="dev">
+      <label>theme <select id="theme"><option>light</option><option>dark</option></select></label>
+      <label>language <select id="language"><option>en</option><option>fr</option></select></label>
+      <label>numbers
+        <select id="number_format">
+          <option>language</option><option>comma_decimal</option><option>decimal_comma</option>
+          <option>space_comma</option><option>none</option>
+        </select>
+      </label>
+      <label>time <select id="time_format"><option>language</option><option>12</option><option>24</option></select></label>
+      <label>scenario
+        <select id="scenario">
+          <option value="ok">add-on running</option>
+          <option value="unavailable">add-on unavailable</option>
+          <option value="not_configured">not configured</option>
+          <option value="empty">no report yet</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="admin" checked /> admin</label>
+    </div>
+    <energy-mapper-panel></energy-mapper-panel>
+
+    <script type="module">
+      import "../../custom_components/energy_mapper/frontend/energy-mapper-panel.js";
+
+      const $ = (id) => document.getElementById(id);
+      const params = new URLSearchParams(location.search);
+      for (const id of ["theme", "language", "number_format", "time_format", "scenario"]) {
+        if (params.has(id)) $(id).value = params.get(id);
+      }
+      if (params.get("admin") === "0") $("admin").checked = false;
+
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const sample = async (name) => (await fetch(`sample/${name}.json`)).json();
+
+      async function callWS(msg) {
+        const scenario = $("scenario").value;
+        await sleep(150);
+        switch (msg.type) {
+          case "energy_mapper/status": {
+            const configured = scenario !== "not_configured";
+            const available = configured && scenario !== "unavailable";
+            return {
+              configured,
+              state: configured ? (available ? "loaded" : "setup_retry") : null,
+              url: configured ? "http://local-energy-mapper:8099" : null,
+              available,
+              health: available
+                ? { status: "ok", version: "0.3.0", last_run: null, days: 3, signatures: 8, storage_bytes: 1 }
+                : null,
+              error: available || !configured ? null : "Cannot connect to host local-energy-mapper:8099",
+              settings: {},
+            };
+          }
+          case "energy_mapper/days":
+            return scenario === "empty" ? { days: [], summary_days: [] } : sample("days");
+          case "energy_mapper/signatures":
+            return scenario === "empty"
+              ? { signatures: [], switched_loads: [], peak: null }
+              : sample("signatures");
+          case "energy_mapper/report":
+            try {
+              return await sample(`report-${msg.day}`);
+            } catch {
+              throw { code: "not_found", message: `no report for ${msg.day}` };
+            }
+          case "energy_mapper/analyze":
+            await sleep(1500);
+            return { day: msg.day, ok: true };
+          default:
+            throw { code: "unknown_command", message: msg.type };
+        }
+      }
+
+      const panel = document.querySelector("energy-mapper-panel");
+      function hass() {
+        const dark = $("theme").value === "dark";
+        document.documentElement.classList.toggle("dark", dark);
+        return {
+          language: $("language").value,
+          locale: {
+            language: $("language").value,
+            number_format: $("number_format").value,
+            time_format: $("time_format").value,
+            time_zone: "server",
+          },
+          config: { time_zone: "Europe/Berlin" },
+          user: { is_admin: $("admin").checked, name: "Dev" },
+          themes: { theme: "default", darkMode: dark },
+          callWS,
+        };
+      }
+      const mql = matchMedia("(max-width: 870px)");
+      function update() {
+        panel.hass = hass();
+        panel.narrow = mql.matches;
+      }
+      mql.addEventListener("change", update);
+      for (const el of document.querySelectorAll("#dev select, #dev input")) {
+        el.addEventListener("change", () => {
+          if (el.id === "scenario") {
+            // reload: the panel reads the status once
+            const p = new URLSearchParams(location.search);
+            p.set("scenario", el.value);
+            location.search = p.toString();
+          } else update();
+        });
+      }
+      window.addEventListener("hass-toggle-menu", () => console.log("hass-toggle-menu"));
+      update();
+    </script>
+  </body>
+</html>
