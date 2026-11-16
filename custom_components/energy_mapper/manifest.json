@@ -4,7 +4,7 @@
   "after_dependencies": ["hassio"],
   "codeowners": ["@sylvaing"],
   "config_flow": true,
-  "dependencies": ["websocket_api"],
+  "dependencies": ["frontend", "http", "panel_custom", "websocket_api"],
   "documentation": "https://github.com/sylvaing/ha-energy-mapper",
   "integration_type": "service",
   "iot_class": "local_polling",

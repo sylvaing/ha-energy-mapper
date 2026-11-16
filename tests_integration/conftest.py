@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMocker
 
@@ -52,6 +53,14 @@ def addon_settings(settings: dict[str, Any] | None = None) -> dict[str, Any]:
 def auto_enable_custom_integrations(enable_custom_integrations):
     """Load the integration from custom_components/."""
     return
+
+
+@pytest.fixture(autouse=True)
+def frontend_loaded(hass: HomeAssistant) -> None:
+    """Mark ``frontend`` as set up: the real one needs the built frontend
+    (``hass_frontend``), which the test environment does not ship. The panel
+    registry it owns (``hass.data``) works without it."""
+    hass.config.components.add("frontend")
 
 
 @pytest.fixture

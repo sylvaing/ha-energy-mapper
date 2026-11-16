@@ -15,6 +15,7 @@ from homeassistant.helpers.typing import ConfigType
 from .api import EnergyMapperClient
 from .const import CONF_URL, DOMAIN
 from .coordinator import EnergyMapperConfigEntry, EnergyMapperCoordinator, EnergyMapperData
+from .panel import async_register_panel, async_unregister_panel
 from .websocket import async_register_commands
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -33,12 +34,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: EnergyMapperConfigEntry)
     # raises ConfigEntryNotReady when the add-on does not answer
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = EnergyMapperData(client=client, coordinator=coordinator)
-    # TODO(#7): register the sidebar panel (panel_custom) serving the bundle
-    # of custom_components/energy_mapper/frontend/ here, and remove it in
-    # async_unload_entry.
+    await async_register_panel(hass)
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: EnergyMapperConfigEntry) -> bool:
-    """Nothing to unload: no platform, the websocket commands stay registered."""
+    """Remove the panel; no platform, the websocket commands stay registered."""
+    async_unregister_panel(hass)
     return True
