@@ -1,0 +1,28 @@
+{
+  "name": "energy-mapper-panel",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Sidebar panel of the Energy Mapper integration for Home Assistant",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit -p .",
+    "test": "node --test \"test/*.test.ts\"",
+    "dev": "node build.mjs --watch",
+    "sample": "python3 dev/make_sample.py"
+  },
+  "dependencies": {
+    "@mdi/js": "7.4.47",
+    "echarts": "6.1.0",
+    "lit": "3.3.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
