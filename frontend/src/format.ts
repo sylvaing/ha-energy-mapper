@@ -129,3 +129,52 @@ export function previousDay(ts: number, timeZone: string): string {
   const date = new Date(Date.UTC(get("year"), get("month") - 1, get("day") - 1));
   return date.toISOString().slice(0, 10);
 }
+
+// -- days and dates in a time zone ---------------------------------------------
+
+/** "YYYY-MM-DD" of an instant (ms, or Date) in ``timeZone``. */
+export function dayOf(instant: number | Date, timeZone: string): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(instant);
+}
+
+/** The day ``n`` days after ``day`` (negative: before). */
+export function addDays(day: string, n: number): string {
+  const [y, m, d] = day.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
+}
+
+/** Offset (ms) of ``timeZone`` from UTC at the instant ``ms``. */
+function offsetAt(ms: number, timeZone: string): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(ms);
+  const get = (type: string) => Number(parts.find((p) => p.type === type)?.value);
+  const wall = Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"), get("second"));
+  return wall - Math.floor(ms / 1000) * 1000;
+}
+
+/** Instant (ms) of the start of ``day`` in ``timeZone``. */
+export function startOfDay(day: string, timeZone: string): number {
+  const [y, m, d] = day.split("-").map(Number);
+  const utc = Date.UTC(y, m - 1, d);
+  let t = utc - offsetAt(utc, timeZone);
+  t = utc - offsetAt(t, timeZone);
+  return t;
+}
+
+/** [start, end] of ``day`` in ``timeZone`` (end: the last millisecond of the day). */
+export function dayRange(day: string, timeZone: string): [Date, Date] {
+  return [new Date(startOfDay(day, timeZone)), new Date(startOfDay(addDays(day, 1), timeZone) - 1)];
+}

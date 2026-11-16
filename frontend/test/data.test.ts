@@ -5,12 +5,15 @@ import { test } from "node:test";
 import {
   assignColors,
   dayEntries,
+  dayPresets,
+  type DayStats,
   hourProfile,
   neighbourDay,
   peakWindow,
   seriesValue,
   signatureNames,
   stackSeries,
+  statsDays,
   summary,
   unexplainedShare,
 } from "../src/data.ts";
@@ -176,4 +179,35 @@ test("the synthetic sample report is consistent with the stack", () => {
     // the stack explains the house load (sub-meters can exceed it by noise)
     assert.ok(Math.abs(total - Math.max(p.house, p.submetered)) <= stack.length, `${p.t}: ${total} vs ${p.house}`);
   }
+});
+
+test("stats days: the available days of the last 30, before today", () => {
+  const entries = dayEntries({ days: ["2027-03-09", "2027-03-10"], summary_days: ["2027-01-02", "2027-02-10"] });
+  assert.deepEqual(statsDays(entries, "2027-03-10"), ["2027-03-09", "2027-02-10"]);
+});
+
+test("day picker presets", () => {
+  const s = (house_kwh: number, notable_peaks = 0): DayStats => ({
+    house_kwh,
+    max_house_w: null,
+    notable_peaks,
+    last_notable: null,
+  });
+  const stats = {
+    "2027-01-01": s(99, 3), // older than 30 days
+    "2027-03-01": s(30, 1),
+    "2027-03-05": s(25, 2),
+    "2027-03-08": s(12),
+    "2027-03-10": s(80, 1), // today: not over
+  };
+  assert.deepEqual(dayPresets("2027-03-10", stats), [
+    { key: "yesterday", day: "2027-03-09" },
+    { key: "day_before_yesterday", day: "2027-03-08" },
+    { key: "highest_consumption", day: "2027-03-01" },
+    { key: "last_notable_peak", day: "2027-03-05" },
+  ]);
+  assert.deepEqual(
+    dayPresets("2027-03-10", {}).map((p) => p.key),
+    ["yesterday", "day_before_yesterday"],
+  );
 });

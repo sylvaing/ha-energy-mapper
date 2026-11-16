@@ -10,8 +10,9 @@
       From the repository root:
         (cd frontend && npm run build) && python3 -m http.server 8765
       then open http://localhost:8765/frontend/dev/index.html
-      The HA elements (ha-card, ha-alert...) are not defined here: the panel's
-      own fallbacks are what you see.
+      The HA elements (ha-alert, ha-date-range-nav...) are not defined here:
+      the panel's own fallbacks are what you see (a native date input instead
+      of HA's date picker).
     -->
     <style>
       /* default theme of Home Assistant (approximation) */
@@ -95,6 +96,11 @@
     <script type="module">
       import "../../custom_components/energy_mapper/frontend/energy-mapper-panel.js";
 
+      // the synthetic days are in March 2027: the harness lives on the day after them
+      const offset = Date.UTC(2027, 2, 10, 11) - Date.now();
+      const realNow = Date.now;
+      Date.now = () => realNow() + offset;
+
       const $ = (id) => document.getElementById(id);
       const params = new URLSearchParams(location.search);
       for (const id of ["theme", "language", "number_format", "time_format", "scenario"]) {
@@ -136,6 +142,21 @@
             } catch {
               throw { code: "not_found", message: `no report for ${msg.day}` };
             }
+          case "energy_mapper/day_stats": {
+            const out = {};
+            for (const day of msg.days) {
+              const r = await sample(`report-${day}`).catch(() => null);
+              if (!r) continue;
+              const notable = r.peaks.filter((p) => p.notable);
+              out[day] = {
+                house_kwh: r.energy_kwh.house,
+                max_house_w: r.max_house_w,
+                notable_peaks: notable.length,
+                last_notable: notable.length ? Math.max(...notable.map((p) => p.max_ts)) : null,
+              };
+            }
+            return { days: out };
+          }
           case "energy_mapper/analyze":
             await sleep(1500);
             return { day: msg.day, ok: true };

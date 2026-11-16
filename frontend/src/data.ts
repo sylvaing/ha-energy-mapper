@@ -200,3 +200,49 @@ export function hourProfile(hours: number[] | undefined): number[] {
   const max = Math.max(...h);
   return max > 0 ? h.map((v) => v / max) : h;
 }
+
+/** Totals of one day (websocket command energy_mapper/day_stats). */
+export interface DayStats {
+  house_kwh: number | null;
+  max_house_w: number | null;
+  notable_peaks: number;
+  last_notable: number | null;
+}
+
+export type PresetKey = "yesterday" | "day_before_yesterday" | "highest_consumption" | "last_notable_peak";
+
+/** Days to ask energy_mapper/day_stats for: the available ones of the last ``window`` days. */
+export function statsDays(entries: DayEntry[], today: string, window = 30): string[] {
+  const from = shiftDay(today, -window);
+  return entries.map((e) => e.day).filter((d) => d >= from && d < today);
+}
+
+function shiftDay(day: string, n: number): string {
+  const [y, m, d] = day.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
+}
+
+/** The presets of the day picker, in display order; those that cannot be
+ * computed (no data) are left out. ``today`` is the current day of Home Assistant. */
+export function dayPresets(
+  today: string,
+  stats: Record<string, DayStats>,
+  window = 30,
+): { key: PresetKey; day: string }[] {
+  const out: { key: PresetKey; day: string }[] = [
+    { key: "yesterday", day: shiftDay(today, -1) },
+    { key: "day_before_yesterday", day: shiftDay(today, -2) },
+  ];
+  const from = shiftDay(today, -window);
+  const recent = Object.entries(stats)
+    .filter(([day]) => day >= from && day < today)
+    .sort(([a], [b]) => (a < b ? -1 : 1));
+  let highest: [string, number] | null = null;
+  for (const [day, s] of recent) {
+    if (s.house_kwh != null && (!highest || s.house_kwh > highest[1])) highest = [day, s.house_kwh];
+  }
+  if (highest) out.push({ key: "highest_consumption", day: highest[0] });
+  const notable = recent.filter(([, s]) => s.notable_peaks > 0).pop();
+  if (notable) out.push({ key: "last_notable_peak", day: notable[0] });
+  return out;
+}

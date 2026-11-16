@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  addDays,
+  dayOf,
+  dayRange,
   formatDay,
   formatDuration,
   formatEnergy,
@@ -10,6 +13,7 @@ import {
   formatTime,
   localeInfo,
   previousDay,
+  startOfDay,
 } from "../src/format.ts";
 import { translator } from "../src/i18n.ts";
 
@@ -68,4 +72,29 @@ test("translations: language, fallback, parameters", () => {
   assert.equal(translator("fr-CA")("peaks"), "Pics");
   assert.equal(translator("de")("peaks"), "Peaks");
   assert.equal(translator("en")("of_house", { share: "12 %" }), "12 % of the house");
+});
+
+test("days of instants and day arithmetic", () => {
+  const ts = Date.UTC(2027, 2, 9, 23, 30);
+  assert.equal(dayOf(ts, "Europe/Berlin"), "2027-03-10");
+  assert.equal(dayOf(new Date(ts), "America/New_York"), "2027-03-09");
+  assert.equal(addDays("2027-03-01", -1), "2027-02-28");
+  assert.equal(addDays("2027-12-31", 1), "2028-01-01");
+});
+
+test("day range in a time zone, across daylight saving changes", () => {
+  assert.equal(startOfDay("2027-03-09", "Europe/Berlin"), Date.UTC(2027, 2, 8, 23));
+  assert.equal(startOfDay("2027-07-01", "Europe/Berlin"), Date.UTC(2027, 5, 30, 22));
+  assert.equal(startOfDay("2027-03-09", "UTC"), Date.UTC(2027, 2, 9));
+  // 23-hour day (spring forward on 2027-03-28 in Europe)
+  const [a, b] = dayRange("2027-03-28", "Europe/Berlin");
+  assert.equal(b.getTime() + 1 - a.getTime(), 23 * 3600 * 1000);
+  assert.equal(dayOf(a, "Europe/Berlin"), "2027-03-28");
+  assert.equal(dayOf(b, "Europe/Berlin"), "2027-03-28");
+  // 25-hour day
+  const [c, d] = dayRange("2027-10-31", "Europe/Berlin");
+  assert.equal(d.getTime() + 1 - c.getTime(), 25 * 3600 * 1000);
+  // another zone
+  const [e] = dayRange("2027-03-14", "America/New_York");
+  assert.equal(e.getTime(), Date.UTC(2027, 2, 14, 5));
 });

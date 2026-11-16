@@ -67,6 +67,19 @@ export const panelStyles = css`
     flex-wrap: wrap;
     gap: var(--ha-space-1, 4px);
   }
+  /* HA's picker sizes its popover from its own width: room for the presets */
+  .ha-day-picker {
+    display: block;
+    flex: 0 1 600px;
+    min-width: 0;
+  }
+  .no-report-day {
+    color: var(--primary-text-color);
+    font-size: var(--ha-font-size-l, 16px);
+    font-weight: var(--ha-font-weight-medium, 500);
+    margin-bottom: 8px;
+  }
+  .day-input,
   .day-select {
     font: inherit;
     font-size: var(--ha-font-size-l, 16px);
@@ -79,6 +92,7 @@ export const panelStyles = css`
     max-width: 100%;
     cursor: pointer;
   }
+  .day-input:focus-visible,
   .day-select:focus-visible {
     outline: 2px solid var(--primary-color);
     outline-offset: 1px;

@@ -17,8 +17,8 @@ The `energy_mapper` integration (in `custom_components/`) connects Home
 Assistant to the add-on: it is discovered automatically once the add-on runs
 (or set up with the add-on address), keeps the analysis settings in its
 options, and adds the **Energy Mapper panel** to the sidebar: the daily report
-(consumption breakdown chart, energy summary, peaks with what was running,
-things to check) and the signatures learned across days. The panel follows
+(day picker of Home Assistant with presets, consumption breakdown chart,
+energy summary, peaks with what was running, things to check) and the signatures learned across days. The panel follows
 the Home Assistant theme (light and dark), language (English, French) and
 number and time formats. It creates no entity yet. Install it with [HACS](https://hacs.xyz) as a custom repository
 (category *Integration*), or copy `custom_components/energy_mapper` into the
@@ -45,7 +45,8 @@ cd .. && python3 -m http.server 8765               # then open http://localhost:
 
 The dev page mounts the panel with a fake `hass` (light/dark theme, English/
 French, number and time formats, add-on states) answering from the synthetic
-data of `frontend/dev/sample/`.
+data of `frontend/dev/sample/`. HA's own elements are not available there: the
+panel shows its fallbacks (a native date input instead of HA's date picker).
 
 The add-on service also runs outside Home Assistant, against any instance:
 

@@ -4,6 +4,7 @@
 
 import { mdiArrowExpandHorizontal, mdiChevronLeft, mdiChevronRight, mdiMenu, mdiRefresh } from "@mdi/js";
 import { html, LitElement, nothing, type PropertyValues, type TemplateResult } from "lit";
+import { html as staticHtml, unsafeStatic } from "lit/static-html.js";
 
 import "./chart.ts";
 import type { ChartModel, EnergyMapperChart } from "./chart.ts";
@@ -11,16 +12,21 @@ import {
   assignColors,
   dayEntries,
   type DayEntry,
+  dayPresets,
+  type DayStats,
   hourProfile,
   neighbourDay,
   peakWindow,
   registryIdOf,
   type StackSeries,
   stackSeries,
+  statsDays,
   summary,
   unexplainedShare,
 } from "./data.ts";
 import {
+  dayOf,
+  dayRange,
   formatDay,
   formatDuration,
   formatEnergy,
@@ -32,6 +38,7 @@ import {
   localeInfo,
   previousDay,
 } from "./format.ts";
+import { adaptCalendar, definedPicker, type HaPickerTag, loadHaDatePicker } from "./ha-date-picker.ts";
 import { type StringKey, type Translate, translator } from "./i18n.ts";
 import { panelStyles } from "./styles.ts";
 import { BASE_INDEX, chartTheme, type ChartTheme, SERIES_INDEXES, SUBMETERED_INDEX } from "./theme.ts";
@@ -74,6 +81,8 @@ export class EnergyMapperPanel extends LitElement {
     _showAllSignatures: { state: true },
     _themeKey: { state: true },
     _single: { state: true },
+    _picker: { state: true },
+    _stats: { state: true },
   };
 
   static override styles = panelStyles;
@@ -94,6 +103,9 @@ export class EnergyMapperPanel extends LitElement {
   declare _showAllSignatures: boolean;
   declare _themeKey: string;
   declare _single: boolean;
+  /** HA's date picker element, once loaded (null: native date input) */
+  declare _picker: HaPickerTag | null;
+  declare _stats: Record<string, DayStats>;
 
   private started = false;
   private requestId = 0;
@@ -117,6 +129,8 @@ export class EnergyMapperPanel extends LitElement {
     this._showAllSignatures = false;
     this._themeKey = "";
     this._single = false;
+    this._picker = definedPicker();
+    this._stats = {};
     // HA elements loaded later (lazily) replace the fallbacks
     for (const tag of ["ha-menu-button", "ha-icon-button", "ha-button", "ha-alert"]) {
       if (!defined(tag)) customElements.whenDefined(tag).then(() => this.requestUpdate());
@@ -196,6 +210,7 @@ export class EnergyMapperPanel extends LitElement {
       if (!this.started) {
         this.started = true;
         void this.load();
+        if (!this._picker) void loadHaDatePicker().then((tag) => (this._picker = tag));
       }
     }
   }
@@ -217,8 +232,9 @@ export class EnergyMapperPanel extends LitElement {
       this._days = days;
       this._registry = registry;
       const entries = dayEntries(days);
+      void this.loadStats(entries);
       const wanted = day ?? this._day ?? new URLSearchParams(location.search).get("day");
-      const chosen = entries.find((e) => e.day === wanted)?.day ?? entries[0]?.day ?? null;
+      const chosen = wanted && /^\d{4}-\d{2}-\d{2}$/.test(wanted) ? wanted : (entries[0]?.day ?? null);
       if (chosen) await this.selectDay(chosen);
       else this._report = null;
     } catch (err) {
@@ -228,10 +244,26 @@ export class EnergyMapperPanel extends LitElement {
     }
   }
 
+  /** Today in Home Assistant's time zone (the days of the reports). */
+  private get today(): string {
+    return dayOf(Date.now(), this.hass?.config?.time_zone ?? "UTC");
+  }
+
+  /** Totals of the recent days, for the presets of the day picker (optional). */
+  private async loadStats(entries: DayEntry[]): Promise<void> {
+    const days = statsDays(entries, this.today);
+    if (!days.length) return;
+    try {
+      const result = await this.ws<{ days: Record<string, DayStats> }>({ type: "energy_mapper/day_stats", days });
+      this._stats = result.days ?? {};
+    } catch {
+      this._stats = {}; // the presets that need them are left out
+    }
+  }
+
   private async selectDay(day: string): Promise<void> {
     const id = ++this.requestId;
     this._day = day;
-    this._loading = true;
     this._error = null;
     this._notice = null;
     try {
@@ -241,6 +273,13 @@ export class EnergyMapperPanel extends LitElement {
     } catch {
       // not in a browser page that allows it
     }
+    if (!dayEntries(this._days).some((e) => e.day === day)) {
+      // no report: nothing to ask the add-on, the panel says so
+      this._report = null;
+      this._loading = false;
+      return;
+    }
+    this._loading = true;
     try {
       const report = await this.ws<Report>({ type: "energy_mapper/report", day });
       if (id === this.requestId) this._report = report;
@@ -385,7 +424,10 @@ export class EnergyMapperPanel extends LitElement {
       ${this._error ? this.alert("error", this._error, t("error")) : nothing}
       ${this._notice ? this.alert("success", this._notice) : nothing}
       ${entries.length === 0 ? this.renderNoReport(t) : nothing}
-      ${this._report ? this.renderReport(this._report, t) : nothing}
+      ${entries.length > 0 && this._day && !entries.some((e) => e.day === this._day)
+        ? this.renderNoReportDay(this._day, entries, t)
+        : nothing}
+      ${this._report && this._report.day === this._day ? this.renderReport(this._report, t) : nothing}
       ${this.renderRegistry(t)}
     `;
   }
@@ -402,32 +444,107 @@ export class EnergyMapperPanel extends LitElement {
     </div>`;
   }
 
+  private renderNoReportDay(day: string, entries: DayEntry[], t: Translate): TemplateResult {
+    const info = this.info;
+    const past = day < this.today;
+    const days = entries.map((e) => e.day).sort();
+    const outside = day < days[0] || day > days[days.length - 1];
+    return html`<div class="card">
+      <div class="message">
+        <div class="no-report-day">${formatDay(day, info)}</div>
+        ${!past ? t("day_not_over") : this.isAdmin ? t("no_report_day_admin") : t("no_report_day")}
+        ${outside
+          ? html`<div class="secondary">
+              ${t("outside_range", { first: formatDay(days[0], info, "short"), last: formatDay(days[days.length - 1], info, "short") })}
+            </div>`
+          : nothing}
+      </div>
+      ${past && this.isAdmin
+        ? html`<div class="more">
+            ${this.textButton(this._analyzing ? t("analyzing") : t("analyze"), () => void this.analyze(day), this._analyzing)}
+          </div>`
+        : nothing}
+    </div>`;
+  }
+
+  // the picker's dates, rebuilt only when their inputs change
+  private pickerCache: { key: string; range: [Date, Date]; presets: Record<string, [Date, Date]> } | null = null;
+
+  private pickerDates(day: string, t: Translate): { range: [Date, Date]; presets: Record<string, [Date, Date]> } {
+    const tz = this.info.time_zone;
+    const today = this.today;
+    const key = JSON.stringify([day, tz, today, this.hass?.language, this._stats]);
+    if (this.pickerCache?.key !== key) {
+      const presets: Record<string, [Date, Date]> = {};
+      for (const p of dayPresets(today, this._stats)) presets[t(`preset_${p.key}` as StringKey)] = dayRange(p.day, tz);
+      this.pickerCache = { key, range: dayRange(day, tz), presets };
+    }
+    return this.pickerCache;
+  }
+
+  private pickerChanged = (ev: Event) => {
+    const value = (ev as CustomEvent<{ value?: { startDate?: Date } }>).detail?.value;
+    if (!value?.startDate) return;
+    // one day: the first day of the selected range
+    const day = dayOf(value.startDate, this.info.time_zone);
+    if (day !== this._day) void this.selectDay(day);
+  };
+
+  private pickerOpened = (ev: Event) => {
+    const days = dayEntries(this._days).map((e) => e.day).sort();
+    if (days.length) adaptCalendar(ev.currentTarget as Element, days[0], days[days.length - 1]);
+  };
+
+  private renderDayPicker(entries: DayEntry[], t: Translate): TemplateResult {
+    const day = this._day ?? entries[0].day;
+    if (this._picker) {
+      const { range, presets } = this.pickerDates(day, t);
+      const tag = unsafeStatic(this._picker);
+      return staticHtml`<${tag}
+        class="ha-day-picker"
+        .hass=${this.hass}
+        .startDate=${range[0]}
+        .endDate=${range[1]}
+        .ranges=${presets}
+        @value-changed=${this.pickerChanged}
+        @click=${this.pickerOpened}
+        @keydown=${this.pickerOpened}
+      ></${tag}>`;
+    }
+    // outside Home Assistant (or the picker could not be loaded): a native
+    // date input, and arrows that go to the previous/next day with a report
+    const days = entries.map((e) => e.day).sort();
+    const prev = neighbourDay(entries, day, -1);
+    const next = neighbourDay(entries, day, 1);
+    return html`${this.iconButton(mdiChevronLeft, t("previous_day"), () => prev && void this.selectDay(prev), !prev)}
+      <input
+        type="date"
+        class="day-input"
+        aria-label=${t("day")}
+        .value=${day}
+        min=${days[0]}
+        max=${days[days.length - 1]}
+        @change=${(ev: Event) => {
+          const value = (ev.target as HTMLInputElement).value;
+          if (value) void this.selectDay(value);
+        }}
+      />
+      ${this.iconButton(mdiChevronRight, t("next_day"), () => next && void this.selectDay(next), !next)}`;
+  }
+
   private renderDayBar(entries: DayEntry[], t: Translate): TemplateResult | typeof nothing {
     if (!entries.length) return nothing;
-    const info = this.info;
-    const prev = neighbourDay(entries, this._day, -1);
-    const next = neighbourDay(entries, this._day, 1);
+    const day = this._day;
+    const hasReport = entries.some((e) => e.day === day);
+    const summaryOnly = entries.find((e) => e.day === day)?.summary;
     return html`<div class="daybar">
-      ${this.iconButton(mdiChevronLeft, t("previous_day"), () => prev && void this.selectDay(prev), !prev)}
-      <select
-        class="day-select"
-        aria-label=${t("day")}
-        .value=${this._day ?? ""}
-        @change=${(ev: Event) => void this.selectDay((ev.target as HTMLSelectElement).value)}
-      >
-        ${entries.map(
-          (e) =>
-            html`<option value=${e.day} ?selected=${e.day === this._day}>
-              ${formatDay(e.day, info)}${e.summary ? ` (${t("summary_only")})` : ""}
-            </option>`,
-        )}
-      </select>
-      ${this.iconButton(mdiChevronRight, t("next_day"), () => next && void this.selectDay(next), !next)}
+      ${this.renderDayPicker(entries, t)}
+      ${summaryOnly ? html`<span class="badge neutral">${t("summary_only")}</span>` : nothing}
       <div class="spacer"></div>
-      ${this.isAdmin && this._day
+      ${this.isAdmin && day && hasReport
         ? this.textButton(
             this._analyzing ? t("analyzing") : t("analyze"),
-            () => this._day && void this.analyze(this._day),
+            () => void this.analyze(day),
             this._analyzing || this._loading,
           )
         : nothing}
