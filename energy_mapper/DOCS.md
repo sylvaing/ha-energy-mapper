@@ -9,7 +9,18 @@ was running.
 
 The add-on only **reads** Home Assistant: states, entity registry, Energy
 dashboard settings and recorder history. It never calls a service and never
-changes your configuration.
+changes your configuration. Everything stays local: no cloud service, no
+telemetry.
+
+The reports are shown by the **Energy Mapper integration** (installed with
+HACS), which finds this add-on automatically and adds the Energy Mapper panel
+to the sidebar. Installation, configuration and how to read the panel: see
+the [README](https://github.com/sylvaing/ha-energy-mapper#readme). How the
+analysis works: see the
+[design document](https://github.com/sylvaing/ha-energy-mapper/blob/main/docs/design.md).
+
+Results are **estimates** from one meter, not measurements: only the
+sub-meters are measured.
 
 ## How it works
 
@@ -268,16 +279,20 @@ after midnight), `ha_error` (502: Home Assistant unreachable), `internal`
 
 ## Running outside the Supervisor
 
-The same image runs on Home Assistant Container or Core installations with a
-long-lived access token:
+Home Assistant Container and Core are not supported yet: no standalone image
+is published (planned in
+[#19](https://github.com/sylvaing/ha-energy-mapper/issues/19)). For
+development, the service runs against any Home Assistant instance with a
+long-lived access token, from a clone of the repository:
 
 ```sh
-docker run -d -p 8099:8099 -v /path/to/data:/data \
-  -e HA_URL=http://homeassistant.local:8123 -e HA_TOKEN=<token> \
-  <image>
+cd energy_mapper/app
+HA_URL=http://homeassistant.local:8123 HA_TOKEN=<token> \
+  DATA_DIR=/tmp/energy_mapper PORT=8099 python3 main.py
 ```
 
-Options are then read from `/data/options.json` (same keys as above).
+Options are then read from `$DATA_DIR/options.json` (same keys as above), and
+the integration is set up with the address of the service.
 
 ## Limits
 
@@ -285,3 +300,8 @@ Options are then read from `/data/options.json` (same keys as above).
   reports every 10 seconds is much better than one every minute.
 - The analysis needs the full history of the grid power sensor: do not
   exclude it from the recorder.
+- Appliances below `step_threshold_w`, loads whose power varies continuously
+  (EV chargers, inverter heat pumps) and multi-phase appliances (one signature
+  per heating phase) are not recognised well yet. See the
+  [README](https://github.com/sylvaing/ha-energy-mapper#limits) for the full
+  list and the roadmap.
