@@ -103,3 +103,57 @@ async def test_not_set_up(hass: HomeAssistant, hass_ws_client: WebSocketGenerato
     assert msg["error"]["code"] == "not_loaded"
     msg = await _call(client, type="energy_mapper/status")
     assert msg["result"]["configured"] is False
+
+
+async def test_day_stats(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    addon: AiohttpClientMocker,
+    entry: MockConfigEntry,
+) -> None:
+    report = {
+        "day": "2027-03-08",
+        "energy_kwh": {"house": 15.2},
+        "max_house_w": 6100,
+        "curve": [{"t": 1}],
+        "peaks": [
+            {"max_ts": 1800000100.0, "house_w": 6100, "notable": True},
+            {"max_ts": 1800000900.0, "house_w": 5000, "notable": True},
+            {"max_ts": 1800005000.0, "house_w": 4000, "notable": False},
+        ],
+    }
+    addon.get(f"{URL}/api/report/2027-03-08", json=report)
+    await _setup(hass, entry)
+    client = await hass_ws_client(hass)
+
+    days = ["2027-03-08", "2027-03-09", "2027-03-01"]
+    msg = await _call(client, type="energy_mapper/day_stats", days=days)
+    assert msg["result"] == {
+        "days": {
+            "2027-03-08": {
+                "house_kwh": 15.2,
+                "max_house_w": 6100,
+                "notable_peaks": 2,
+                "last_notable": 1800000900.0,
+            },
+            # REPORT: no peak
+            "2027-03-09": {"house_kwh": 12.3, "max_house_w": None, "notable_peaks": 0, "last_notable": None},
+        }
+    }
+
+    def reads() -> int:
+        return sum(1 for call in addon.mock_calls if "/api/report/" in str(call[1]))
+
+    # the totals are remembered: only the day without report is asked again
+    before = reads()
+    msg = await _call(client, type="energy_mapper/day_stats", days=days)
+    assert set(msg["result"]["days"]) == {"2027-03-08", "2027-03-09"}
+    assert reads() == before + 1
+
+    # an analysis forgets the totals of its day
+    await _call(client, type="energy_mapper/analyze", day="2027-03-09")
+    await _call(client, type="energy_mapper/day_stats", days=["2027-03-09"])
+    assert reads() == before + 2
+
+    msg = await _call(client, type="energy_mapper/day_stats", days=["2027-03-08"] * 63)
+    assert msg["error"]["code"] == "invalid_format"

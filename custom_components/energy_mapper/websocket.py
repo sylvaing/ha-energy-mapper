@@ -9,6 +9,7 @@ Errors: ``not_loaded`` (no entry, or the entry is not set up), ``addon_unavailab
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -23,6 +24,11 @@ from .coordinator import EnergyMapperConfigEntry
 
 DAY = vol.Match(r"^\d{4}-\d{2}-\d{2}$")
 
+# day_stats: days per request, reports read at once, days kept in memory
+MAX_STATS_DAYS = 62
+STATS_CONCURRENCY = 4
+MAX_CACHED_STATS = 400
+
 ERR_NOT_LOADED = "not_loaded"
 ERR_ADDON_UNAVAILABLE = "addon_unavailable"
 
@@ -30,7 +36,7 @@ ERR_ADDON_UNAVAILABLE = "addon_unavailable"
 @callback
 def async_register_commands(hass: HomeAssistant) -> None:
     """Register the commands of the panel."""
-    for handler in (ws_status, ws_days, ws_report, ws_analyze, ws_signatures, ws_settings):
+    for handler in (ws_status, ws_days, ws_report, ws_analyze, ws_day_stats, ws_signatures, ws_settings):
         websocket_api.async_register_command(hass, handler)
 
 
@@ -131,7 +137,63 @@ async def ws_analyze(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Analyse one past day now (admin only; may take a minute)."""
-    await _relay(hass, connection, msg, lambda client: client.analyze(msg["day"]))
+
+    async def analyze(client: EnergyMapperClient) -> dict[str, Any]:
+        try:
+            return await client.analyze(msg["day"])
+        finally:
+            # the day's report changes (or appears)
+            if (entry := _entry(hass)) is not None and entry.state is ConfigEntryState.LOADED:
+                entry.runtime_data.day_stats.pop(msg["day"], None)
+
+    await _relay(hass, connection, msg, analyze)
+
+
+def day_stats(report: dict[str, Any]) -> dict[str, Any]:
+    """The totals of a report used by the presets of the panel's day picker."""
+    notable = [p for p in report.get("peaks") or [] if p.get("notable")]
+    return {
+        "house_kwh": (report.get("energy_kwh") or {}).get("house"),
+        "max_house_w": report.get("max_house_w"),
+        "notable_peaks": len(notable),
+        "last_notable": max((p["max_ts"] for p in notable if p.get("max_ts") is not None), default=None),
+    }
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "energy_mapper/day_stats",
+        vol.Required("days"): vol.All([DAY], vol.Length(max=MAX_STATS_DAYS)),
+    }
+)
+@websocket_api.async_response
+async def ws_day_stats(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Totals of some days, without their curve: the integration reads the
+    reports from the add-on (and remembers the totals) so the browser does not
+    download whole reports. Days without a report are left out."""
+    entry = _entry(hass)
+
+    async def stats(client: EnergyMapperClient) -> dict[str, Any]:
+        cache: dict[str, dict[str, Any]] = entry.runtime_data.day_stats if entry else {}
+        semaphore = asyncio.Semaphore(STATS_CONCURRENCY)
+
+        async def one(day: str) -> None:
+            if day in cache:
+                return
+            async with semaphore:
+                try:
+                    cache[day] = day_stats(await client.report(day))
+                except EnergyMapperApiError:
+                    return  # no report for that day
+
+        await asyncio.gather(*(one(day) for day in dict.fromkeys(msg["days"])))
+        for day in sorted(cache)[: max(len(cache) - MAX_CACHED_STATS, 0)]:
+            del cache[day]
+        return {"days": {day: cache[day] for day in msg["days"] if day in cache}}
+
+    await _relay(hass, connection, msg, stats)
 
 
 @websocket_api.websocket_command({vol.Required("type"): "energy_mapper/signatures"})

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -24,6 +24,8 @@ class EnergyMapperData:
 
     client: EnergyMapperClient
     coordinator: EnergyMapperCoordinator
+    # totals of the days already read (websocket energy_mapper/day_stats)
+    day_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 class EnergyMapperCoordinator(DataUpdateCoordinator[dict[str, Any]]):
