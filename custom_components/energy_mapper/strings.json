@@ -1,0 +1,108 @@
+{
+  "config": {
+    "flow_title": "{addon}",
+    "step": {
+      "user": {
+        "title": "Connect to the Energy Mapper add-on",
+        "description": "The add-on is usually found automatically. Enter its address only if it was not, or if it runs outside the Supervisor.",
+        "data": {
+          "url": "Add-on address"
+        },
+        "data_description": {
+          "url": "Address of the add-on API, for example http://local-energy-mapper:8099."
+        }
+      },
+      "hassio_confirm": {
+        "title": "Energy Mapper add-on found",
+        "description": "Connect Home Assistant to the {addon} add-on?"
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot reach the add-on. Check that it is started and that the address is right.",
+      "invalid_response": "Something answers at this address, but it is not the Energy Mapper add-on.",
+      "invalid_url": "Enter an address starting with http:// or https://."
+    },
+    "abort": {
+      "already_configured": "Energy Mapper is already set up."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Energy Mapper settings",
+        "description": "The fields are pre-filled with what the add-on uses: the Energy dashboard, then the add-on options. Change only what is wrong; a field left as found keeps following the Energy dashboard.",
+        "sections": {
+          "sensors": {
+            "name": "Sensors",
+            "data": {
+              "grid_entity": "Grid power",
+              "grid_invert": "Grid sensor is positive when exporting",
+              "grid_export_entity": "Grid export power",
+              "pv_entity": "Solar power",
+              "battery_entity": "Battery power",
+              "battery_invert": "Battery sensor is positive when charging",
+              "submeters": "Sub-meters"
+            },
+            "data_description": {
+              "grid_entity": "Power sensor of the whole-house meter, positive when importing.",
+              "grid_export_entity": "Only for meters that report import and export as two sensors.",
+              "pv_entity": "Power of the solar production.",
+              "battery_entity": "Power of the home battery, positive when discharging.",
+              "submeters": "Power sensors of measured appliances: their power is subtracted before the analysis."
+            }
+          },
+          "loads": {
+            "name": "Switched appliances",
+            "data": {
+              "switched_loads": "Appliances driven by a switch"
+            },
+            "data_description": {
+              "switched_loads": "Appliances whose state tells when they run. Those of the Energy dashboard are always included; an entry here adds one or changes it. On-states: the states in which it runs (default on; off for a pilot-wire radiator relay)."
+            }
+          },
+          "thresholds": {
+            "name": "Thresholds",
+            "data": {
+              "step_threshold_w": "Smallest appliance",
+              "peak_threshold_w": "Fixed peak threshold"
+            },
+            "data_description": {
+              "step_threshold_w": "Smallest power change considered as an appliance switching.",
+              "peak_threshold_w": "Peaks above this power are notable (for example the subscribed power). Empty: 80 % of the recent maximum."
+            }
+          },
+          "analysis": {
+            "name": "Analysis and storage",
+            "data": {
+              "analysis_time": "Time of the nightly analysis",
+              "backfill_days": "Past days analysed on start",
+              "half_life_days": "Signature half-life (days)",
+              "report_retention_days": "Keep full reports (days)",
+              "peak_window_days": "Peak reference window (days)"
+            },
+            "data_description": {
+              "analysis_time": "A new time applies after the next analysis.",
+              "half_life_days": "Age at which a past use counts half in the signature registry."
+            }
+          }
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot reach the add-on. The settings were not saved.",
+      "invalid_settings": "The add-on refused the settings: {error}"
+    },
+    "abort": {
+      "cannot_connect": "Cannot reach the add-on: start it, then open the settings again."
+    }
+  },
+  "selector": {
+    "switched_loads": {
+      "fields": {
+        "entity_id": "Entity",
+        "name": "Name",
+        "on_states": "On-states"
+      }
+    }
+  }
+}

@@ -33,7 +33,11 @@ from it, and finds the power sensor (W) that goes with each energy sensor
 (kWh) of the dashboard.
 
 All other options are manual overrides, for installations without an Energy
-dashboard or when the automatic choice is wrong:
+dashboard or when the automatic choice is wrong. With the **Energy Mapper
+integration**, set them in its options instead (Settings → Devices & services
+→ Energy Mapper → Configure): the integration keeps them in Home Assistant and
+sends them to the add-on, where they take precedence over the add-on options
+below (see `PUT /api/settings`).
 
 | Option | Default | Description |
 |---|---|---|
@@ -164,11 +168,13 @@ announces itself to Home Assistant through Supervisor discovery.
 
 | Request | Answer |
 |---|---|
-| `GET /api/health` | `{"status": "ok", "version": "0.2.0", "last_run": <unix time or null>, "days": <number of full reports>, "signatures": <registry size>, "storage_bytes": <size of /data>}` |
+| `GET /api/health` | `{"status": "ok", "version": "0.3.0", "last_run": <unix time or null>, "days": <number of full reports>, "signatures": <registry size>, "storage_bytes": <size of /data>}` |
 | `GET /api/days` | `{"days": [...], "summary_days": [...]}`: days with a full report, and older days with only a summary, oldest first |
 | `GET /api/report/YYYY-MM-DD` | The report with the registry ids, or 404. For a day with only a summary: `curve` is empty and `curve_pruned` is `true` |
 | `GET /api/signatures` | The signature registry (below) |
 | `POST /api/analyze?day=YYYY-MM-DD` | Analyses that day now: `{"day": "...", "ok": true}`, or `{"day": "...", "ok": false, "error": "<code>", "message": "..."}` |
+| `GET /api/settings` | The settings pushed by the integration and what applies without them (below) |
+| `PUT /api/settings` | Replaces the settings (JSON object, below): `{"settings": {...}}` as stored, or 400 `invalid_settings` |
 
 `GET /api/signatures` answers:
 
@@ -206,6 +212,53 @@ announces itself to Home Assistant through Supervisor discovery.
 
 Signatures are sorted by decreasing weight. Before the first analysis the
 lists are empty and `peak` is `null`.
+
+### Settings
+
+The integration keeps the user's settings in Home Assistant and pushes them
+with `PUT /api/settings` (on save and when it starts). They are stored in
+`/data/settings.json` and take precedence, key by key, over the add-on
+options; a key that is absent falls back to the add-on option, then to the
+default (or, for the sensors, to the Energy dashboard). `PUT {}` removes them
+all, and the add-on then behaves exactly as configured by its options.
+
+Accepted keys (all optional; `null`, `""` and `[]` mean "absent"):
+
+| Key | Value |
+|---|---|
+| `grid_entity`, `grid_export_entity`, `pv_entity`, `battery_entity` | A `sensor.` entity id |
+| `grid_invert`, `battery_invert` | `true` or `false` |
+| `submeters` | List of `sensor.` entity ids (replaces those of the Energy dashboard) |
+| `switched_loads` | List of `{"entity_id", "name"?, "on_states"?: [...]}` (added to, or replacing, those of the Energy dashboard) |
+| `step_threshold_w` | 50 to 10000 |
+| `peak_threshold_w` | 100 to 100000 |
+| `analysis_time` | `HH:MM` (or `HH:MM:SS`, stored as `HH:MM`); applies after the next analysis |
+| `backfill_days` | 0 to 365 |
+| `half_life_days`, `peak_window_days` | 1 to 365 |
+| `report_retention_days` | 7 to 3650 |
+
+An unknown key or an invalid value refuses the whole request (400,
+`{"error": "invalid_settings", "message": "<key>: ..."}`); the body is limited
+to 64 KB. `GET /api/settings` answers:
+
+```json
+{
+  "settings": {"pv_entity": "sensor.solar_power"},
+  "options": {"backfill_days": 30},
+  "defaults": {"analysis_time": "04:30", "backfill_days": 30, "half_life_days": 30,
+               "report_retention_days": 90, "peak_window_days": 30, "grid_invert": false,
+               "battery_invert": false, "step_threshold_w": 300.0, "peak_threshold_w": null},
+  "automatic": {"grid_entity": "sensor.grid_power", "grid_export_entity": null,
+                "pv_entity": null, "battery_entity": null, "submeters": [],
+                "switched_loads": [{"entity_id": "switch.water_heater", "name": "Water heater", "on_states": ["on"]}]}
+}
+```
+
+`options` are the add-on options among these keys, `defaults` the values of
+the scalar keys without settings (add-on option, else default), and
+`automatic` the sensors the analysis uses without settings (Energy dashboard
+and add-on options), read live from Home Assistant (`null` when it cannot be
+read).
 
 Error codes: `invalid_day` (400: not a date, or a day that is not over),
 `no_grid` (422: no grid power sensor found), `no_data` (422: no grid data in

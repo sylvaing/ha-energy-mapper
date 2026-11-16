@@ -1,0 +1,14 @@
+{
+  "domain": "energy_mapper",
+  "name": "Energy Mapper",
+  "after_dependencies": ["hassio"],
+  "codeowners": ["@sylvaing"],
+  "config_flow": true,
+  "dependencies": ["websocket_api"],
+  "documentation": "https://github.com/sylvaing/ha-energy-mapper",
+  "integration_type": "service",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/sylvaing/ha-energy-mapper/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

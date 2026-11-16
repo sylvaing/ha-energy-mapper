@@ -32,6 +32,7 @@ from service import (  # noqa: E402
     next_run,
     parse_hhmm,
 )
+from settings import SettingsError, defaults, validate  # noqa: E402
 from storage import ReportStore, parse_day  # noqa: E402
 from synth import House, Steady  # noqa: E402
 from ws_client import OP_TEXT, encode_frame, read_frame  # noqa: E402
@@ -361,6 +362,133 @@ class OptionsTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# settings pushed by the integration
+# ---------------------------------------------------------------------------
+class SettingsTests(unittest.TestCase):
+    def test_validate_normalises(self):
+        self.assertEqual(validate({}), {})
+        out = validate(
+            {
+                "grid_entity": " sensor.grid_power ",
+                "pv_entity": None,
+                "battery_entity": "",
+                "grid_invert": True,
+                "submeters": ["sensor.pump_power", "sensor.pump_power", "sensor.ev_power"],
+                "switched_loads": [
+                    {"entity_id": "switch.heater", "name": " Heater ", "on_states": ["on", " on "]},
+                    {"entity_id": "switch.radiator", "name": "", "on_states": ["off"]},
+                    {"entity_id": "input_boolean.kettle", "on_states": []},
+                ],
+                "step_threshold_w": 250,
+                "backfill_days": 10.0,
+                "analysis_time": "03:15:00",
+            }
+        )
+        self.assertEqual(
+            out,
+            {
+                "grid_entity": "sensor.grid_power",
+                "grid_invert": True,
+                "submeters": ["sensor.pump_power", "sensor.ev_power"],
+                "switched_loads": [
+                    {"entity_id": "switch.heater", "name": "Heater", "on_states": ["on"]},
+                    {"entity_id": "switch.radiator", "on_states": ["off"]},
+                    {"entity_id": "input_boolean.kettle"},
+                ],
+                "step_threshold_w": 250.0,
+                "backfill_days": 10,
+                "analysis_time": "03:15",
+            },
+        )
+        self.assertEqual(validate({"submeters": [], "switched_loads": []}), {})
+
+    def test_validate_rejects(self):
+        bad = [
+            [],
+            {"nope": 1},
+            {"grid_entity": "switch.grid"},
+            {"grid_entity": "not an entity"},
+            {"grid_entity": 3},
+            {"grid_invert": "yes"},
+            {"step_threshold_w": 10},
+            {"step_threshold_w": True},
+            {"step_threshold_w": float("nan")},
+            {"backfill_days": 1.5},
+            {"report_retention_days": 1},
+            {"analysis_time": "25:00"},
+            {"submeters": "sensor.a"},
+            {"submeters": ["switch.a"]},
+            {"switched_loads": ["switch.a"]},
+            {"switched_loads": [{"name": "x"}]},
+            {"switched_loads": [{"entity_id": "switch.a", "power": 3}]},
+            {"switched_loads": [{"entity_id": "switch.a", "on_states": [""]}]},
+            {"switched_loads": [{"entity_id": "switch.a"}, {"entity_id": "switch.a"}]},
+            {"submeters": [f"sensor.s{i}" for i in range(101)]},
+        ]
+        for data in bad:
+            with self.subTest(data=data), self.assertRaises(SettingsError):
+                validate(data)
+
+    def test_defaults_follow_the_options(self):
+        out = defaults({"backfill_days": 7, "step_threshold_w": 200, "analysis_time": ""})
+        self.assertEqual(
+            (out["backfill_days"], out["step_threshold_w"], out["analysis_time"], out["peak_threshold_w"]),
+            (7, 200, "04:30", None),
+        )
+
+    def test_settings_win_over_options_and_persist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            analyzer, store = make_analyzer(tmp, FakeHA(0), {"backfill_days": 30, "grid_entity": "sensor.a"})
+            self.assertEqual(analyzer.options["backfill_days"], 30)
+            analyzer.set_settings({"backfill_days": 3, "pv_entity": "sensor.pv"})
+            self.assertEqual(analyzer.backfill_days, 3)
+            self.assertEqual(
+                (analyzer.options["grid_entity"], analyzer.options["pv_entity"]), ("sensor.a", "sensor.pv")
+            )
+            again, _ = make_analyzer(tmp, FakeHA(0), {"backfill_days": 30})
+            self.assertEqual(again.settings, {"backfill_days": 3, "pv_entity": "sensor.pv"})
+            again.set_settings({})
+            self.assertFalse(store.settings_path.exists())
+            self.assertEqual(again.backfill_days, 30)
+
+    def test_corrupt_or_invalid_settings_file_is_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ReportStore(tmp)
+            store.settings_path.write_text("{not json")
+            self.assertEqual(Analyzer(FakeHA(0), store, {}).settings, {})
+            store.settings_path.write_text('{"backfill_days": -1}')
+            self.assertEqual(Analyzer(FakeHA(0), store, {}).settings, {})
+
+    def test_settings_drive_the_analysis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ha = FakeHA(data_start=midnight(TODAY) - 3 * 86400, prefs=False)
+            analyzer, _ = make_analyzer(tmp, ha)
+            with self.assertRaises(AnalysisError):
+                analyzer.analyze_day(TODAY - dt.timedelta(days=1))
+            analyzer.set_settings({"grid_entity": "sensor.grid_power"})
+            report = analyzer.analyze_day(TODAY - dt.timedelta(days=1))
+            self.assertEqual(report["config"]["grid_entity"], "sensor.grid_power")
+
+    def test_scheduler_time_follows_the_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            analyzer, _ = make_analyzer(tmp, FakeHA(0))
+            sched = Scheduler(analyzer, "04:30")
+            self.assertEqual(sched.at, dt.time(4, 30))
+            analyzer.set_settings({"analysis_time": "02:05"})
+            self.assertEqual(sched.at, dt.time(2, 5))
+
+    def test_automatic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            analyzer, _ = make_analyzer(tmp, FakeHA(0))
+            analyzer.set_settings({"grid_entity": "sensor.other_power"})
+            auto = analyzer.automatic()  # ignores the settings
+            self.assertEqual(auto["grid_entity"], "sensor.grid_power")
+            self.assertEqual((auto["pv_entity"], auto["submeters"], auto["switched_loads"]), (None, [], []))
+            analyzer, _ = make_analyzer(tmp, FakeHA(0, prefs=False))
+            self.assertIsNone(analyzer.automatic()["grid_entity"])
+
+
+# ---------------------------------------------------------------------------
 # storage
 # ---------------------------------------------------------------------------
 class StorageTests(unittest.TestCase):
@@ -529,8 +657,8 @@ class ApiTests(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def call(self, method, target):
-        return route(self.analyzer, self.store, method, target)
+    def call(self, method, target, body=b""):
+        return route(self.analyzer, self.store, method, target, body)
 
     def test_health_and_days(self):
         status, body = self.call("GET", "/api/health")
@@ -576,6 +704,38 @@ class ApiTests(unittest.TestCase):
         status, body = self.call("POST", "/api/analyze?day=2027-03-09")
         self.assertEqual((status, body["error"]), (502, "ha_error"))
 
+    def test_settings(self):
+        status, body = self.call("GET", "/api/settings")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["settings"], {})
+        self.assertEqual(body["options"], {"backfill_days": 30})
+        self.assertEqual(body["defaults"]["backfill_days"], 30)
+        self.assertEqual(body["defaults"]["step_threshold_w"], 300.0)
+        self.assertEqual(body["automatic"]["grid_entity"], "sensor.grid_power")
+
+        data = json.dumps({"backfill_days": 5, "grid_entity": "sensor.grid_power", "pv_entity": None})
+        status, body = self.call("PUT", "/api/settings", data.encode())
+        self.assertEqual(
+            (status, body), (200, {"settings": {"backfill_days": 5, "grid_entity": "sensor.grid_power"}})
+        )
+        self.assertEqual(self.analyzer.backfill_days, 5)
+        self.assertEqual(self.call("GET", "/api/settings")[1]["settings"]["backfill_days"], 5)
+
+        status, body = self.call("PUT", "/api/settings", b'{"backfill_days": 999}')
+        self.assertEqual((status, body["error"]), (400, "invalid_settings"))
+        self.assertIn("backfill_days", body["message"])
+        self.assertEqual(self.call("PUT", "/api/settings", b"{")[1]["error"], "invalid_json")
+        self.assertEqual(self.analyzer.backfill_days, 5)  # unchanged by the refused requests
+
+        self.assertEqual(self.call("PUT", "/api/settings", b"{}"), (200, {"settings": {}}))
+        self.assertEqual(self.analyzer.backfill_days, 30)
+        self.assertEqual(self.call("POST", "/api/settings")[0], 405)
+
+    def test_settings_without_home_assistant(self):
+        self.ha.fail = True
+        status, body = self.call("GET", "/api/settings")
+        self.assertEqual((status, body["automatic"]), (200, None))
+
     def test_unknown(self):
         self.assertEqual(self.call("GET", "/nope")[0], 404)
         self.assertEqual(self.call("POST", "/api/health")[0], 405)
@@ -596,6 +756,19 @@ class ApiTests(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError) as cm:
                 urllib.request.urlopen(base + "/api/report/2027-03-01", timeout=10)
             self.assertEqual(cm.exception.code, 404)
+            cm.exception.close()
+            req = urllib.request.Request(
+                base + "/api/settings",
+                method="PUT",
+                data=b'{"half_life_days": 20}',
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                self.assertEqual(json.load(resp), {"settings": {"half_life_days": 20}})
+            req = urllib.request.Request(base + "/api/settings", method="PUT", data=b"x" * (65 * 1024))
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                urllib.request.urlopen(req, timeout=10)
+            self.assertEqual(cm.exception.code, 413)
             cm.exception.close()
         finally:
             server.shutdown()

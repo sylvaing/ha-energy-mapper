@@ -1,0 +1,108 @@
+{
+  "config": {
+    "flow_title": "{addon}",
+    "step": {
+      "user": {
+        "title": "Connexion au module complémentaire Energy Mapper",
+        "description": "Le module complémentaire est en général trouvé tout seul. Saisissez son adresse seulement s'il ne l'a pas été, ou s'il tourne hors du Superviseur.",
+        "data": {
+          "url": "Adresse du module complémentaire"
+        },
+        "data_description": {
+          "url": "Adresse de l'API du module complémentaire, par exemple http://local-energy-mapper:8099."
+        }
+      },
+      "hassio_confirm": {
+        "title": "Module complémentaire Energy Mapper trouvé",
+        "description": "Connecter Home Assistant au module complémentaire {addon} ?"
+      }
+    },
+    "error": {
+      "cannot_connect": "Impossible de joindre le module complémentaire. Vérifiez qu'il est démarré et que l'adresse est juste.",
+      "invalid_response": "Quelque chose répond à cette adresse, mais ce n'est pas le module complémentaire Energy Mapper.",
+      "invalid_url": "Saisissez une adresse qui commence par http:// ou https://."
+    },
+    "abort": {
+      "already_configured": "Energy Mapper est déjà configuré."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Réglages d'Energy Mapper",
+        "description": "Les champs reprennent ce qu'utilise le module complémentaire : le tableau Énergie, puis ses options. Ne changez que ce qui est faux ; un champ laissé tel quel continue de suivre le tableau Énergie.",
+        "sections": {
+          "sensors": {
+            "name": "Capteurs",
+            "data": {
+              "grid_entity": "Puissance du réseau",
+              "grid_invert": "Le capteur du réseau est positif en injection",
+              "grid_export_entity": "Puissance injectée sur le réseau",
+              "pv_entity": "Puissance solaire",
+              "battery_entity": "Puissance de la batterie",
+              "battery_invert": "Le capteur de la batterie est positif en charge",
+              "submeters": "Sous-compteurs"
+            },
+            "data_description": {
+              "grid_entity": "Capteur de puissance du compteur général, positif quand la maison consomme.",
+              "grid_export_entity": "Seulement pour les compteurs qui donnent soutirage et injection en deux capteurs.",
+              "pv_entity": "Puissance de la production solaire.",
+              "battery_entity": "Puissance de la batterie de la maison, positive en décharge.",
+              "submeters": "Capteurs de puissance d'appareils mesurés : leur puissance est retirée avant l'analyse."
+            }
+          },
+          "loads": {
+            "name": "Appareils pilotés",
+            "data": {
+              "switched_loads": "Appareils pilotés par un interrupteur"
+            },
+            "data_description": {
+              "switched_loads": "Appareils dont l'état indique quand ils fonctionnent. Ceux du tableau Énergie sont toujours repris ; une ligne ici en ajoute un ou le modifie. États de marche : les états dans lesquels il fonctionne (on par défaut ; off pour le relais du fil pilote d'un radiateur)."
+            }
+          },
+          "thresholds": {
+            "name": "Seuils",
+            "data": {
+              "step_threshold_w": "Plus petit appareil",
+              "peak_threshold_w": "Seuil fixe des pics"
+            },
+            "data_description": {
+              "step_threshold_w": "Plus petite variation de puissance considérée comme un appareil qui s'allume ou s'éteint.",
+              "peak_threshold_w": "Les pics au-dessus de cette puissance sont signalés (par exemple la puissance souscrite). Vide : 80 % du maximum récent."
+            }
+          },
+          "analysis": {
+            "name": "Analyse et stockage",
+            "data": {
+              "analysis_time": "Heure de l'analyse de nuit",
+              "backfill_days": "Jours passés analysés au démarrage",
+              "half_life_days": "Demi-vie des signatures (jours)",
+              "report_retention_days": "Conservation des rapports complets (jours)",
+              "peak_window_days": "Fenêtre de référence des pics (jours)"
+            },
+            "data_description": {
+              "analysis_time": "Une nouvelle heure s'applique après la prochaine analyse.",
+              "half_life_days": "Âge auquel une utilisation passée compte pour moitié dans le registre des signatures."
+            }
+          }
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Impossible de joindre le module complémentaire. Les réglages n'ont pas été enregistrés.",
+      "invalid_settings": "Le module complémentaire a refusé les réglages : {error}"
+    },
+    "abort": {
+      "cannot_connect": "Impossible de joindre le module complémentaire : démarrez-le, puis rouvrez les réglages."
+    }
+  },
+  "selector": {
+    "switched_loads": {
+      "fields": {
+        "entity_id": "Entité",
+        "name": "Nom",
+        "on_states": "États de marche"
+      }
+    }
+  }
+}

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0
+
+- Settings pushed by the Energy Mapper integration: new endpoints
+  `GET /api/settings` and `PUT /api/settings`, stored in
+  `/data/settings.json`. They take precedence over the add-on options; with
+  no settings pushed, the add-on options work as before.
+
 ## 0.2.0
 
 - Signature registry learned across days, with progressive forgetting

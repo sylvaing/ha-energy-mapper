@@ -15,6 +15,9 @@ from ha_client import HAError
 from nilm_core import analyze, parse_numeric
 from nilm_core.registry import RegistryConfig, day_max_w, forget_after_days, peak_reference
 from nilm_core.registry import update as update_registry
+from settings import SettingsError
+from settings import merge as merge_settings
+from settings import validate as validate_settings
 from storage import ReportStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -138,11 +141,61 @@ class Analyzer:
     ):
         self.client = client
         self.store = store
-        self.options = options
+        # add-on options, and the settings pushed by the integration on top
+        self.base_options = options
+        try:
+            self.settings = validate_settings(store.load_settings())
+        except SettingsError as err:
+            _LOGGER.warning("stored settings ignored: %s", err)
+            self.settings = {}
+        if self.settings:
+            _LOGGER.info("settings from the integration: %s", ", ".join(sorted(self.settings)))
         self.clock = clock
         self.lock = threading.Lock()
         self.tz: dt.tzinfo = local_tz(None)
         self._maxima: dict[str, float | None] = {}  # daily maxima already read
+
+    @property
+    def options(self) -> dict:
+        """The effective options: the add-on options with the settings on top."""
+        return merge_settings(self.base_options, self.settings)
+
+    @options.setter
+    def options(self, value: dict) -> None:
+        self.base_options = value
+
+    def set_settings(self, settings: dict) -> None:
+        """Store already validated settings; the next analysis uses them."""
+        self.store.save_settings(settings)
+        self.settings = settings
+        _LOGGER.info("settings updated: %s", ", ".join(sorted(settings)) or "none (add-on options)")
+
+    def automatic(self) -> dict:
+        """The sensors the analysis would use without the settings: the
+        Energy dashboard and the add-on options. Reads Home Assistant (HAError)."""
+        snap = self.client.snapshot()
+        derived = derive(snap["prefs"], snap["states"], snap["registry"], derive_options(self.base_options))
+        cfg = derived.config
+        if cfg is None:  # no grid meter found
+            return {
+                "grid_entity": None,
+                "grid_export_entity": None,
+                "pv_entity": None,
+                "battery_entity": None,
+                "submeters": [],
+                "switched_loads": [],
+            }
+        return {
+            "grid_entity": cfg.grid_entity,
+            "grid_export_entity": cfg.grid_export_entity,
+            "pv_entity": cfg.pv_entity,
+            "battery_entity": cfg.battery_entity,
+            "submeters": [m.entity_id for m in cfg.submeters],
+            "switched_loads": [
+                {"entity_id": x.entity_id, "name": x.name, "on_states": list(x.on_states)}
+                for x in cfg.switched_loads
+            ],
+        }
 
     def _int_option(self, key: str, default: int) -> int:
         try:
@@ -359,9 +412,16 @@ class Scheduler:
 
     def __init__(self, analyzer: Analyzer, analysis_time: str | None):
         self.analyzer = analyzer
-        self.at = parse_hhmm(analysis_time)
+        self._at = parse_hhmm(analysis_time)
         self.stop = threading.Event()
         self._failures = 0
+
+    @property
+    def at(self) -> dt.time:
+        """Time of the nightly analysis (a pushed setting wins; it applies
+        from the next pass)."""
+        value = self.analyzer.settings.get("analysis_time")
+        return parse_hhmm(value) if value else self._at
 
     def run_once(self) -> float:
         """One pass; returns the number of seconds to wait before the next."""

@@ -1,0 +1,2 @@
+# Integration tests: a local Home Assistant test environment (no real instance)
+pytest-homeassistant-custom-component==0.13.375
