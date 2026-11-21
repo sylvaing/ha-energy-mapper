@@ -338,6 +338,10 @@ learned polarity. A load id missing from it is matched against the current entit
 corrects). Both sides build ids with the same function (`energy_mapper:<load|signature>_<slug>_energy`,
 Home Assistant's `slugify`), checked by the integration tests. A device whose
 `included_in_stat` is such a statistic is `nested`; a statistic nested in another device too.
+The appliances declared by the integration (§ 8.2) are applied last and win: their statistic
+keeps its id across renames, re-links and merges, so its entry names the appliance and its
+current relay or signature, and is never `unknown_statistic`. A relay listed in
+`excluded_switched_loads` is not measured, even from its statistic.
 When the same relay is behind both an estimate and a statistic, it is measured once, with the
 learned polarity.
 
