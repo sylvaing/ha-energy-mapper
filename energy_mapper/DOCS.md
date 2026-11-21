@@ -145,6 +145,7 @@ Each signature keeps:
 | `examples` | The most recent uses: `day`, `start`, `end` (unix time), `power_w`. |
 | `created_at` | When the id was given (unix time). |
 | `expected` | `true` for a signature declared by the user before it is seen ("Kettle, 2000 W"): no use yet; the first cluster of its group within 12 % of its power takes its id and name. |
+| `review` | The user's decision in the review of the panel, when there is one (see [Review](#review)). |
 
 The id stays the same from one night to the next as long as the cluster is
 still there: the clusters of the night are matched to the signatures of the
@@ -172,7 +173,7 @@ bounded, whatever the age of the installation:
 |---|---|---|
 | Full daily report, with the per-minute curve (`reports/`, gzip) | `report_retention_days` (90 days) | ~2 MB |
 | Day summary: everything but the curve (`summaries/`, gzip) | until the weight of its activations falls below 1 % (~200 days with a 30-day half-life) | ~1 MB |
-| Signature registry (`registry.json`) | while a signature's weight is above 1 %; forever once it is named | tens of KB |
+| Signature registry (`registry.json`) | while a signature's weight is above 1 %; forever once it is named; the 100 most recently ignored ones after they fade out | tens of KB |
 | Energy Mapper statistic id of each published appliance (`statistic_ids.json`) | forever | a few KB |
 | The user's appliances, pushed by the integration (`appliances.json`) | until replaced | a few KB |
 
@@ -188,7 +189,7 @@ announces itself to Home Assistant through Supervisor discovery.
 
 | Request | Answer |
 |---|---|
-| `GET /api/health` | `{"status": "ok", "version": "0.5.0", "last_run": <unix time or null>, "days": <number of full reports>, "signatures": <registry size>, "storage_bytes": <size of /data>}` |
+| `GET /api/health` | `{"status": "ok", "version": "0.6.0", "last_run": <unix time or null>, "days": <number of full reports>, "signatures": <registry size>, "storage_bytes": <size of /data>}` |
 | `GET /api/days` | `{"days": [...], "summary_days": [...], "generated": {"YYYY-MM-DD": <unix time>}}`: days with a full report, and older days with only a summary, oldest first; `generated` tells when each full report was made |
 | `GET /api/report/YYYY-MM-DD` | The report with the registry ids, or 404. For a day with only a summary: `curve` is empty and `curve_pruned` is `true` |
 | `GET /api/hourly/YYYY-MM-DD` | The energy of each appliance per hour of that day (below), or 404 when the day has no per-minute curve |
@@ -198,6 +199,8 @@ announces itself to Home Assistant through Supervisor discovery.
 | `PUT /api/settings` | Replaces the settings (JSON object, below): `{"settings": {...}}` as stored, or 400 `invalid_settings` |
 | `GET /api/appliances` | The user's appliances: `{"appliances": [...]}` (below) |
 | `PUT /api/appliances` | Replaces them: `{"appliances": [...]}` as stored, or 400 `invalid_appliances` |
+| `GET /api/review` | The signatures to review, waiting and ignored (below) |
+| `POST /api/review` | `{"id", "action": "validate", "wait", "ignore" or "restore", "appliance"?}`: records a decision: `{"signature": {...}}` with its `review_state`; 404 `not_found`, 400 `invalid_review` |
 | `POST /api/signatures` | `{"kind": "steady" or "cycling", "band": "short", "medium" or "long", "power_w", "label"}`: the signature of an appliance not seen yet: `{"signature": {...}, "created": true}`; an existing unnamed signature at that power is returned as is (`created: false`); 409 `conflict` when it already belongs to another appliance |
 
 `GET /api/signatures` answers:
@@ -291,6 +294,8 @@ Accepted keys (all optional; `null`, `""` and `[]` mean "absent"):
 | `backfill_days` | 0 to 365 |
 | `half_life_days`, `peak_window_days` | 1 to 365 |
 | `report_retention_days` | 7 to 3650 |
+| `review_min_uses`, `review_min_days` | 2 to 1000 and 1 to 365: a signature is proposed for review once seen this many times on this many different days (5 and 3) |
+| `review_wait_days`, `review_wait_factor` | 1 to 365 and 1.2 to 10: a signature put on hold comes back after this many days, or once its uses reached this multiple of the number it had (14 and 2) |
 
 An unknown key or an invalid value refuses the whole request (400,
 `{"error": "invalid_settings", "message": "<key>: ..."}`); the body is limited
@@ -302,7 +307,8 @@ to 64 KB. `GET /api/settings` answers:
   "options": {"backfill_days": 30},
   "defaults": {"analysis_time": "04:30", "backfill_days": 30, "half_life_days": 30,
                "report_retention_days": 90, "peak_window_days": 30, "grid_invert": false,
-               "battery_invert": false, "step_threshold_w": 300.0, "peak_threshold_w": null},
+               "battery_invert": false, "step_threshold_w": 300.0, "peak_threshold_w": null,
+               "review_min_uses": 5, "review_min_days": 3, "review_wait_days": 14, "review_wait_factor": 2.0},
   "automatic": {"grid_entity": "sensor.grid_power", "grid_export_entity": null,
                 "pv_entity": null, "battery_entity": null, "submeters": [],
                 "switched_loads": [{"entity_id": "switch.water_heater", "name": "Water heater", "on_states": ["on"]}]}
@@ -347,6 +353,43 @@ applies it:
 An appliance with several sources is the result of a merge: the integration
 adds their energy. A source belongs to one appliance only; the keys are
 unique; at most 200 appliances of 20 sources.
+
+### Review
+
+The Energy Mapper panel asks the user about the signatures seen often enough
+to be an appliance (`review_min_uses` uses on `review_min_days` different
+days). Each signature of the registry is in one review state:
+
+| `review_state` | When |
+|---|---|
+| `proposed` | Seen often enough, no decision: shown in the *To review* section |
+| `waiting` | Put on hold: until its uses reach `review_wait_factor` times the number at the decision, or `review_wait_days` days later |
+| `ignored` | Never proposed again, until restored. Also a signature validated for an appliance that was deleted since |
+| `validated` | Named (a signature source of an appliance), or validated by linking it to a switch or a power sensor of an appliance that still exists |
+| `immature` | Not seen enough yet |
+
+The decision is stored in the registry signature as `review`
+(`{"state": "waiting", "at", "count", "until_count", "until"}`,
+`{"state": "ignored", "at"}` or `{"state": "validated", "at", "appliance"}`)
+and follows its id from night to night. An ignored signature is kept after it
+fades out (the 100 most recently ignored), so that the same appliance seen
+again later keeps the decision. `GET /api/review` answers the signatures
+`proposed` (most energy first), `waiting` and `ignored`, each with its
+`review_state`:
+
+```json
+{
+  "criteria": {"min_uses": 5, "min_days": 3, "wait_days": 14, "wait_factor": 2.0},
+  "now": 1810000000.0,
+  "counts": {"proposed": 2, "waiting": 1, "ignored": 0, "validated": 4},
+  "signatures": [{"id": "medium-2100w", "review_state": "proposed", "...": "registry fields"}]
+}
+```
+
+`POST /api/review` with `"action": "validate"` needs the key of the
+appliance (`appliance`) the integration created for it: the add-on only
+records the decision, the appliance itself is pushed with
+`PUT /api/appliances`.
 
 Error codes: `invalid_day` (400: not a date, or a day that is not over),
 `no_grid` (422: no grid power sensor found), `no_data` (422: no grid data in

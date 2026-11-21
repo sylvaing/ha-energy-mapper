@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.0
+
+- Review of the signatures in the Energy Mapper panel (#10), with the
+  integration 0.4.0: new endpoints `GET /api/review` (the signatures seen
+  often enough to be an appliance, waiting and ignored, with their
+  `review_state`) and `POST /api/review` (`validate`, `wait`, `ignore`,
+  `restore`). Decisions are stored in the registry (`review` of a signature)
+  and follow its id; a waiting signature comes back after twice as many uses
+  or 14 days; an ignored one is kept after it fades out (the 100 most recent)
+  so that it is not proposed again.
+- New settings `review_min_uses` (5), `review_min_days` (3),
+  `review_wait_days` (14) and `review_wait_factor` (2).
+
 ## 0.5.0
 
 - The user's appliances, managed in Home Assistant by the Energy Mapper

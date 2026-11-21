@@ -24,6 +24,10 @@ from nilm_core.registry import (
     peak_reference,
 )
 from nilm_core.registry import update as update_registry
+from review import Criteria
+from review import annotated as annotated_review
+from review import decide as decide_review
+from review import listing as review_listing
 from settings import SettingsError
 from settings import merge as merge_settings
 from settings import validate as validate_settings
@@ -218,6 +222,48 @@ class Analyzer:
             self.store.save_registry(registry)
             return sig, True
 
+    @property
+    def review_criteria(self) -> Criteria:
+        options = self.options
+        base = Criteria()
+
+        def value(key, default, kind):
+            try:
+                v = kind(options.get(key) or default)
+            except (TypeError, ValueError):
+                return default
+            return v if v > 0 else default
+
+        return Criteria(
+            min_uses=value("review_min_uses", base.min_uses, int),
+            min_days=value("review_min_days", base.min_days, int),
+            wait_days=value("review_wait_days", base.wait_days, int),
+            wait_factor=value("review_wait_factor", base.wait_factor, float),
+        )
+
+    def _appliance_keys(self) -> set[str]:
+        return {a["key"] for a in self.appliances}
+
+    def review(self) -> dict:
+        """The signatures to review (review.py)."""
+        registry = self.store.load_registry() or empty_registry(self.registry_config)
+        return review_listing(registry, self.clock(), self.review_criteria, self._appliance_keys())
+
+    def decide(self, sid: str, action: str, appliance: str | None = None) -> dict | None:
+        """Record a review decision on a registry signature; returns it with
+        its ``review_state``, or None when there is no such signature.
+        Raises ``review.ReviewError``."""
+        with self._registry_lock:
+            registry = self.store.load_registry()
+            sig = next((s for s in (registry or {}).get("signatures") or [] if s.get("id") == sid), None)
+            if sig is None:
+                return None
+            now = self.clock()
+            decide_review(sig, action, now, self.review_criteria, appliance)
+            self.store.save_registry(registry)
+        _LOGGER.info("signature %s: %s", sid, action)
+        return annotated_review(sig, now, self.review_criteria, self._appliance_keys())
+
     def automatic(self) -> dict:
         """The sensors the analysis would use without the settings: the
         Energy dashboard and the add-on options. Reads Home Assistant (HAError)."""
@@ -411,6 +457,15 @@ class Analyzer:
             previous, summaries, now, config, local_hour=lambda ts: dt.datetime.fromtimestamp(ts, tz).hour
         )
         with self._registry_lock:
+            # review decisions taken during the update win over those it carried
+            stored = self.store.load_registry()
+            reviews = {s.get("id"): s.get("review") for s in (stored or {}).get("signatures") or []}
+            for sig in registry["signatures"]:
+                if sig["id"] in reviews:
+                    if reviews[sig["id"]]:
+                        sig["review"] = reviews[sig["id"]]
+                    else:
+                        sig.pop("review", None)
             # the appliances may have changed during the update
             apply_to_registry(registry, self.appliances, now)
             self.store.save_registry(registry)

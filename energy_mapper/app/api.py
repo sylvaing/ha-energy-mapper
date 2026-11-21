@@ -15,6 +15,10 @@ GET  /api/appliances          {"appliances": [...]}: the user's appliances (appl
 PUT  /api/appliances          replaces them: {"appliances": <as stored>}
 POST /api/signatures          {"kind", "band", "power_w", "label"}: the signature of an
                               appliance expected before it is seen: {"signature", "created"}
+GET  /api/review              {"criteria", "now", "counts", "signatures"}: the signatures to
+                              review, waiting and ignored (review.py)
+POST /api/review              {"id", "action": validate|wait|ignore|restore, "appliance"?}:
+                              {"signature": <with its review_state>}
 """
 
 from __future__ import annotations
@@ -30,6 +34,8 @@ from const import VERSION
 from ha_client import HAError
 from nilm_core.hourly import hourly_breakdown
 from nilm_core.registry import GROUPS, annotate_report, empty_registry
+from review import ACTIONS as REVIEW_ACTIONS
+from review import ReviewError
 from service import AnalysisError, Analyzer
 from settings import KEYS as SETTINGS_KEYS
 from settings import SettingsError
@@ -87,6 +93,34 @@ def _expect_signature(analyzer: Analyzer, body: bytes) -> tuple[int, dict]:
             "id": str(err),
         }
     return 200, {"signature": sig, "created": created}
+
+
+def _review_decision(analyzer: Analyzer, body: bytes) -> tuple[int, dict]:
+    try:
+        data = json.loads(body or b"null")
+    except ValueError:
+        return 400, {"error": "invalid_json", "message": "the body is not JSON"}
+    if not isinstance(data, dict) or set(data) - {"id", "action", "appliance"}:
+        return 400, {"error": "invalid_review", "message": 'expected {"id", "action", "appliance"?}'}
+    sid, action, appliance = data.get("id"), data.get("action"), data.get("appliance")
+    if not isinstance(sid, str) or not sid or len(sid) > 64:
+        return 400, {"error": "invalid_review", "message": "id: expected a signature id"}
+    if action not in REVIEW_ACTIONS:
+        return 400, {
+            "error": "invalid_review",
+            "message": f"action: expected one of {', '.join(REVIEW_ACTIONS)}",
+        }
+    if appliance is not None and (
+        not isinstance(appliance, str) or not appliance.strip() or len(appliance) > 200
+    ):
+        return 400, {"error": "invalid_review", "message": "appliance: expected an appliance key"}
+    try:
+        sig = analyzer.decide(sid, action, appliance.strip() if appliance else None)
+    except ReviewError as err:
+        return 400, {"error": "invalid_review", "message": str(err)}
+    if sig is None:
+        return 404, {"error": "not_found", "message": f"no signature {sid}"}
+    return 200, {"signature": sig}
 
 
 def route(
@@ -205,6 +239,12 @@ def route(
     if path == "/api/signatures" and method == "POST":
         return _expect_signature(analyzer, body)
 
+    if path == "/api/review" and method == "GET":
+        return 200, analyzer.review()
+
+    if path == "/api/review" and method == "POST":
+        return _review_decision(analyzer, body)
+
     known = {
         "/api/health",
         "/api/days",
@@ -212,6 +252,7 @@ def route(
         "/api/signatures",
         "/api/settings",
         "/api/appliances",
+        "/api/review",
     }
     if path in known or path.startswith(("/api/report/", "/api/hourly/")):
         return 405, {"error": "method_not_allowed"}

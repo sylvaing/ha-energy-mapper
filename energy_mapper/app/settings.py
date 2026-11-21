@@ -29,6 +29,11 @@ NUMBER_KEYS = {
     "half_life_days": (1, 365, True),
     "report_retention_days": (7, 3650, True),
     "peak_window_days": (1, 365, True),
+    # the review of the signatures in the panel (#10, review.py)
+    "review_min_uses": (2, 1000, True),
+    "review_min_days": (1, 365, True),
+    "review_wait_days": (1, 365, True),
+    "review_wait_factor": (1.2, 10, False),
 }
 KEYS = (
     *SENSOR_KEYS,
@@ -53,6 +58,10 @@ DEFAULTS: dict = {
     "battery_invert": False,
     "step_threshold_w": 300.0,
     "peak_threshold_w": None,
+    "review_min_uses": 5,
+    "review_min_days": 3,
+    "review_wait_days": 14,
+    "review_wait_factor": 2.0,
 }
 
 

@@ -46,6 +46,10 @@ REGISTRY_VERSION = 1
 DAY_S = 86400.0
 # a weight below this is forgotten: day summaries, signatures, switched loads
 FORGET_WEIGHT = 0.01
+# signatures the user ignored are kept after they fade out (below the forget
+# weight), so that they are not proposed again; at most this many such ones,
+# the most recently ignored first
+MAX_FADED_IGNORED = 100
 # clusters whose centers are closer than this fraction of the tolerance are
 # merged (a unimodal power distribution is one appliance), farther ones are
 # kept apart; below 1 so that a merge does not push members out of reach
@@ -318,7 +322,7 @@ def update(
             sid = ids.get(i) or _new_id(g, members, used_ids)
             used_ids.add(sid)
             sig = _stats(sid, g, members, prev_sigs.get(sid), now, days_w, config, local_hour)
-            if sig["weight"] >= config.forget_weight:
+            if sig["weight"] >= config.forget_weight or is_ignored(sig):
                 out.append(sig)
         # previous signatures without a cluster: carried forward, decaying,
         # when nothing is left near their power; merged into a neighbour
@@ -328,8 +332,11 @@ def update(
                 continue
             absorbed = any(abs(c - s["power_w"]) <= tol * s["power_w"] for c in centers)
             sig = _carried(s, carry, days_w)
-            if sig.get("label") or (not absorbed and sig["weight"] >= config.forget_weight):
+            if sig.get("label") or (
+                not absorbed and (sig["weight"] >= config.forget_weight or is_ignored(sig))
+            ):
                 out.append(sig)
+    out = _cap_faded_ignored(out, config.forget_weight)
     out.sort(key=lambda s: (-s["weight"], s["id"]))
 
     registry = empty_registry(config)
@@ -354,6 +361,22 @@ def update(
         "days": sum(1 for d in maxima if _in_window(d, today, config.peak_window_days)),
     }
     return registry
+
+
+def is_ignored(sig: Mapping) -> bool:
+    """The user ignored this signature in the review (never proposed again)."""
+    return (sig.get("review") or {}).get("state") == "ignored"
+
+
+def _cap_faded_ignored(sigs: list[dict], forget_weight: float) -> list[dict]:
+    """Bound the ignored signatures kept after fading out: the most recently
+    ignored ``MAX_FADED_IGNORED`` stay."""
+    faded = [s for s in sigs if not s.get("label") and s["weight"] < forget_weight and is_ignored(s)]
+    if len(faded) <= MAX_FADED_IGNORED:
+        return sigs
+    faded.sort(key=lambda s: -float((s.get("review") or {}).get("at") or 0))
+    drop = {id(s) for s in faded[MAX_FADED_IGNORED:]}
+    return [s for s in sigs if id(s) not in drop]
 
 
 def _midday(summary: Mapping, default: float) -> float:
@@ -394,7 +417,7 @@ def _stats(sid, group, members, old, now, days_w, config, local_hour) -> dict:
     first = min(seen[0], old["first_seen"]) if old and old.get("first_seen") else seen[0]
     recent = sorted(members, key=lambda a: -a.start)[: config.examples]
     cycling = kind == "cycling"
-    return {
+    sig = {
         "id": sid,
         "kind": kind,
         "band": band,
@@ -418,6 +441,10 @@ def _stats(sid, group, members, old, now, days_w, config, local_hour) -> dict:
         ],
         "created_at": (old or {}).get("created_at") or now,
     }
+    if old and old.get("review"):
+        # the user's decision in the review (#10) follows the identity
+        sig["review"] = old["review"]
+    return sig
 
 
 def _carried(old, carry, days_w) -> dict:
