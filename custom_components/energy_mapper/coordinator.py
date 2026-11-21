@@ -151,6 +151,9 @@ class EnergyMapperCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.appliances_api: bool | None = None
         # keys of renamed appliances whose statistic name must follow
         self._renamed: set[str] = set()
+        # keys of appliances whose stored days must be imported again (a
+        # signature merged into them, #43)
+        self._reimport: set[str] = set()
         self._sync_lock = asyncio.Lock()
         self._sync_again = False
         self._sync_scheduled = False
@@ -166,6 +169,7 @@ class EnergyMapperCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.last_seen = dict(data.get("last_seen") or {})
         self.powers = dict(data.get("powers") or {})
         self.declared = bool(data.get("declared"))
+        self._reimport = set(data.get("reimport") or [])
         self._known = self.appliances_by_subentry()
         self.appliances = {a.key: a for a in self._known.values()}
 
@@ -177,6 +181,7 @@ class EnergyMapperCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "last_seen": self.last_seen,
                 "powers": self.powers,
                 "declared": self.declared,
+                "reimport": sorted(self._reimport),
             }
         )
 
@@ -393,6 +398,44 @@ class EnergyMapperCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self.async_update_review()
         return appliance
 
+    async def async_merge_signature(self, sid: str, key: str) -> Appliance:
+        """Validate a signature of the review as a part of an existing
+        appliance (#43): the signature becomes one more source of the
+        appliance with this key, like a merge (#38): its energy is added to
+        the appliance's from now on, and the stored days are imported again
+        so that the appliance's hourly statistic includes it for them too.
+        The appliance keeps its name, key and statistic; the add-on records
+        the decision with its key."""
+        registry = await self.client.signatures()
+        sig = next((s for s in registry.get("signatures") or [] if s.get("id") == sid), None)
+        if sig is None:
+            raise ReviewError("not_found", f"no signature {sid}")
+        source = signature(sig)
+        entry = self.config_entry
+        async with self._sync_lock:
+            current = self.appliances_by_subentry()
+            target_id = next((i for i, a in current.items() if a.key == key), None)
+            if target_id is None:
+                raise ReviewError("not_found", f"no appliance {key}")
+            owner = next((a for a in current.values() if a.has(source)), None)
+            if owner is not None:
+                raise ReviewError("already_linked", f"{sid} is already linked to {owner.name}")
+            target = current[target_id]
+            merged = Appliance(
+                target.key, target.name, target.statistic_id, (*target.sources, source), target_id
+            )
+            self._reimport.add(target.key)
+            self.hass.config_entries.async_update_subentry(
+                entry, appliance_subentries(entry)[target_id], data=merged.subentry_data()
+            )
+            await self._async_save()
+        _LOGGER.info("Signature %s merged into %s", sid, target.name)
+        # the add-on must know the new source before the decision names the appliance
+        await self._async_push(self.appliances_by_subentry().values())
+        await self.client.review_decision(sid, "validate", target.key)
+        await self.async_update_review()
+        return merged
+
     async def async_review_decision(self, sid: str, action: str) -> dict[str, Any]:
         """Wait, ignore or restore a signature (recorded by the add-on)."""
         answer = await self.client.review_decision(sid, action)
@@ -591,6 +634,8 @@ class EnergyMapperCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         stored_ids = await async_statistic_ids(self.hass)
         new = {k for k, a in current.items() if a.estimated and a.statistic_id not in stored_ids}
+        # appliances with a merged signature: every stored day again (#43)
+        new |= {k for k in self._reimport if k in current and current[k].estimated}
         if new:
             await self._async_fetch(payloads, days)  # backfill: every day with a curve
         # hours shared with a neighbouring day (half-hour time zones)
@@ -621,6 +666,7 @@ class EnergyMapperCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if ends:
                 self.last_seen[key] = max(ends)
         self._renamed.clear()
+        self._reimport.clear()
 
         if latest_day in payloads:
             p = payloads[latest_day]

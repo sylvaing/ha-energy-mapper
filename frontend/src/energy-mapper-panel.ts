@@ -42,15 +42,19 @@ import { adaptCalendar, definedPicker, type HaPickerTag, loadHaDatePicker } from
 import { type StringKey, type Translate, translator } from "./i18n.ts";
 import {
   bestSuggestion,
+  drivesLoad,
   entityChoices,
   exampleWindow,
   formatHours,
+  formForSuggestion,
   hasReview,
   initialForm,
   type LinkMode,
   linkDomains,
   linkable,
+  type ReviewForm,
   reviewGroups,
+  suggestionLabel,
   usualHours,
   validateMessage,
 } from "./review.ts";
@@ -131,7 +135,7 @@ export class EnergyMapperPanel extends LitElement {
   /** the review of the signatures (administrators; null: not available) */
   declare _review: ReviewListing | null;
   /** the validation form open in the review */
-  declare _reviewForm: { id: string; mode: LinkMode; name: string; entity: string; missing?: string } | null;
+  declare _reviewForm: ReviewForm | null;
   declare _reviewBusy: string | null;
   declare _reviewError: string | null;
   declare _showIgnored: boolean;
@@ -319,7 +323,14 @@ export class EnergyMapperPanel extends LitElement {
   private async validate(sig: ReviewSignature): Promise<void> {
     const form = this._reviewForm;
     if (!form || form.id !== sig.id) return;
-    const built = validateMessage(sig, form.mode, form.name, form.entity, this.hass?.states?.[form.entity]?.attributes);
+    const built = validateMessage(
+      sig,
+      form.mode,
+      form.name,
+      form.entity,
+      this.hass?.states?.[form.entity]?.attributes,
+      form.appliance,
+    );
     if ("missing" in built) {
       this._reviewForm = { ...form, missing: built.missing };
       return;
@@ -329,7 +340,10 @@ export class EnergyMapperPanel extends LitElement {
     try {
       await this.ws(built.msg);
       this._reviewForm = null;
-      this._notice = this.t("review_validated", { name: String(built.msg.name) });
+      this._notice =
+        form.mode === "merge"
+          ? this.t("review_merged", { name: this.applianceName(form.appliance) })
+          : this.t("review_validated", { name: String(built.msg.name) });
       const [registry] = await Promise.all([
         this.ws<Registry>({ type: "energy_mapper/signatures" }),
         this.loadReview(),
@@ -340,6 +354,21 @@ export class EnergyMapperPanel extends LitElement {
     } finally {
       this._reviewBusy = null;
     }
+  }
+
+  /** Merge a signature into the appliance its best suggestion belongs to (#43). */
+  private async mergeInto(sig: ReviewSignature, key: string): Promise<void> {
+    this._reviewForm = { id: sig.id, mode: "merge", name: "", entity: "", appliance: key };
+    await this.validate(sig);
+  }
+
+  /** The name of an appliance of the review listing. */
+  private applianceName(key: string): string {
+    const fromListing = this._review?.appliances?.find((a) => a.key === key)?.name;
+    const fromSuggestion = this._review?.signatures
+      .flatMap((s) => s.suggestions ?? [])
+      .find((c) => c.appliance?.key === key)?.appliance?.name;
+    return fromListing ?? fromSuggestion ?? key;
   }
 
   /** Show one use of a signature on the chart: its day, zoomed on it. */
@@ -1092,7 +1121,21 @@ export class EnergyMapperPanel extends LitElement {
       ${form
         ? this.renderValidateForm(s, form, t)
         : html`<div class="review-actions">
-            ${this.textButton(t("review_validate"), () => (this._reviewForm = initialForm(s, (e) => this.friendlyName(e))), busy, "accent")}
+            ${bestSuggestion(s)?.appliance
+              ? this.textButton(
+                  t("review_merge_into", { name: bestSuggestion(s)?.appliance?.name ?? "" }),
+                  () => void this.mergeInto(s, bestSuggestion(s)?.appliance?.key ?? ""),
+                  busy,
+                  "accent",
+                  t("review_merge_hint"),
+                )
+              : nothing}
+            ${this.textButton(
+              t("review_validate"),
+              () => (this._reviewForm = initialForm(s, (e) => this.friendlyName(e))),
+              busy,
+              bestSuggestion(s)?.appliance ? "plain" : "accent",
+            )}
             ${this.textButton(t("review_wait"), () => void this.decide(s, "wait"), busy, "plain", t("review_wait_hint"))}
             ${this.textButton(t("review_ignore"), () => void this.decide(s, "ignore"), busy, "plain", t("review_ignore_hint"))}
           </div>`}
@@ -1110,38 +1153,61 @@ export class EnergyMapperPanel extends LitElement {
     const best = bestSuggestion(s);
     if (!best) return nothing;
     const info = this.info;
-    const hint = t("review_probably_hint", {
-      matches: formatNumber(best.matches, info),
-      steps: formatNumber(best.steps, info),
-      days: formatNumber(best.days, info),
-    });
-    return html`<div class="probably" title=${`${best.entity_id} · ${hint}`}>
-      ${t("review_probably", {
-        name: this.friendlyName(best.entity_id) ?? best.entity_id,
-        score: formatPercent(best.score, info),
-      })}
+    const hint = drivesLoad(best)
+      ? t("review_probably_hint", {
+          matches: formatNumber(best.matches, info),
+          steps: formatNumber(best.steps ?? 0, info),
+          days: formatNumber(best.days, info),
+        })
+      : t("review_contained_hint", {
+          states: best.on_states.join(", "),
+          matches: formatNumber(best.matches, info),
+          sessions: formatNumber(best.sessions ?? best.matches, info),
+          days: formatNumber(best.days, info),
+          share: formatPercent(best.time_share ?? 0, info),
+        });
+    const name = suggestionLabel(best, (e) => this.friendlyName(e));
+    const score = formatPercent(best.score, info);
+    const ident = best.attribute ? `${best.entity_id} · ${best.attribute}` : best.entity_id;
+    return html`<div class="probably" title=${`${ident} · ${hint}`}>
+      ${best.appliance
+        ? t("review_probably_part", { appliance: best.appliance.name, name, score })
+        : t("review_probably", { name, score })}
     </div>`;
   }
 
   /** The suggested entities in the validation form: one click links one. */
-  private renderSuggested(s: ReviewSignature, form: NonNullable<EnergyMapperPanel["_reviewForm"]>, t: Translate): TemplateResult | typeof nothing {
+  private renderSuggested(s: ReviewSignature, form: ReviewForm, t: Translate): TemplateResult | typeof nothing {
     if (!s.suggestions?.length) return nothing;
     const info = this.info;
+    const friendly = (e: string) => this.friendlyName(e);
     return html`<div class="chips">
       <span class="secondary">${t("review_suggested")}</span>
       ${s.suggestions.map((c) => {
-        const selected = form.mode === "switch" && form.entity === c.entity_id;
+        const picked = formForSuggestion(s.id, c, friendly);
+        const selected =
+          form.mode === picked.mode &&
+          (picked.mode === "merge"
+            ? form.appliance === picked.appliance
+            : picked.mode === "switch"
+              ? form.entity === picked.entity
+              : form.name === picked.name);
+        const label = suggestionLabel(c, friendly);
         return html`<button
           type="button"
           class="chip link ${selected ? "selected" : ""}"
           aria-pressed=${selected ? "true" : "false"}
-          title=${c.entity_id}
+          title=${c.appliance ? `${c.entity_id} → ${c.appliance.name}` : c.entity_id}
           @click=${() => {
-            this.setForm({ mode: "switch" });
-            this.pickEntity(c.entity_id);
+            if (picked.mode === "switch") {
+              this.setForm({ mode: "switch" });
+              this.pickEntity(c.entity_id);
+            } else {
+              this.setForm({ mode: picked.mode, appliance: picked.appliance, name: picked.name || form.name, entity: "" });
+            }
           }}
         >
-          ${this.friendlyName(c.entity_id) ?? c.entity_id}<span class="chip-value">${formatPercent(c.score, info)}</span>
+          ${c.appliance ? `${c.appliance.name} · ${label}` : label}<span class="chip-value">${formatPercent(c.score, info)}</span>
         </button>`;
       })}
     </div>`;
@@ -1159,7 +1225,7 @@ export class EnergyMapperPanel extends LitElement {
     </li>`;
   }
 
-  private setForm(patch: Partial<NonNullable<EnergyMapperPanel["_reviewForm"]>>): void {
+  private setForm(patch: Partial<ReviewForm>): void {
     if (this._reviewForm) this._reviewForm = { ...this._reviewForm, ...patch, missing: undefined };
   }
 
@@ -1172,7 +1238,7 @@ export class EnergyMapperPanel extends LitElement {
     this.setForm({ entity, name: typed || name === undefined ? form.name : name });
   }
 
-  private renderEntityPicker(form: NonNullable<EnergyMapperPanel["_reviewForm"]>, t: Translate): TemplateResult {
+  private renderEntityPicker(form: ReviewForm, t: Translate): TemplateResult {
     if (defined("ha-entity-picker")) {
       return html`<ha-entity-picker
         .hass=${this.hass}
@@ -1202,11 +1268,13 @@ export class EnergyMapperPanel extends LitElement {
 
   private renderValidateForm(
     s: ReviewSignature,
-    form: NonNullable<EnergyMapperPanel["_reviewForm"]>,
+    form: ReviewForm,
     t: Translate,
   ): TemplateResult {
     const busy = this._reviewBusy === s.id;
+    const appliances = this._review?.appliances ?? [];
     const modes: LinkMode[] = ["new", "switch", "sensor"];
+    if (appliances.length || form.mode === "merge") modes.push("merge");
     return html`<form
       class="review-form"
       @submit=${(ev: Event) => {
@@ -1230,24 +1298,42 @@ export class EnergyMapperPanel extends LitElement {
       </fieldset>
       ${this.renderSuggested(s, form, t)}
       <div class="secondary">${t(`review_mode_${form.mode}_hint` as StringKey)}</div>
-      ${form.mode !== "new" ? this.renderEntityPicker(form, t) : nothing}
-      <label class="field">
-        <span>${t("review_name")}</span>
-        <input
-          class="text-input"
-          maxlength="100"
-          .value=${form.name}
-          @input=${(ev: Event) => this.setForm({ name: (ev.target as HTMLInputElement).value })}
-          @keydown=${(ev: KeyboardEvent) => {
-            if (ev.key === "Enter") {
-              ev.preventDefault();
-              void this.validate(s);
-            }
-          }}
-        />
-      </label>
+      ${form.mode === "switch" || form.mode === "sensor" ? this.renderEntityPicker(form, t) : nothing}
+      ${form.mode === "merge"
+        ? html`<label class="field">
+            <span>${t("review_appliance")}</span>
+            <select
+              class="text-input"
+              .value=${form.appliance}
+              @change=${(ev: Event) => this.setForm({ appliance: (ev.target as HTMLSelectElement).value })}
+            >
+              <option value="" ?selected=${!form.appliance}></option>
+              ${appliances.map((a) => html`<option value=${a.key} ?selected=${a.key === form.appliance}>${a.name}</option>`)}
+            </select>
+          </label>`
+        : html`<label class="field">
+            <span>${t("review_name")}</span>
+            <input
+              class="text-input"
+              maxlength="100"
+              .value=${form.name}
+              @input=${(ev: Event) => this.setForm({ name: (ev.target as HTMLInputElement).value })}
+              @keydown=${(ev: KeyboardEvent) => {
+                if (ev.key === "Enter") {
+                  ev.preventDefault();
+                  void this.validate(s);
+                }
+              }}
+            />
+          </label>`}
       ${form.missing
-        ? html`<div class="field-error">${form.missing === "name" ? t("review_missing_name") : t("review_missing_entity")}</div>`
+        ? html`<div class="field-error">
+            ${form.missing === "name"
+              ? t("review_missing_name")
+              : form.missing === "appliance"
+                ? t("review_missing_appliance")
+                : t("review_missing_entity")}
+          </div>`
         : nothing}
       <div class="review-actions">
         ${this.textButton(t("review_cancel"), () => (this._reviewForm = null), busy)}

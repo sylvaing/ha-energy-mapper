@@ -47,6 +47,7 @@ def async_register_commands(hass: HomeAssistant) -> None:
         ws_settings,
         ws_review,
         ws_validate,
+        ws_merge_signature,
         ws_wait,
         ws_ignore,
         ws_restore,
@@ -261,11 +262,20 @@ async def ws_review(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """The signatures to review, waiting and ignored (``GET /api/review``),
-    and whether the Repairs notice is on."""
+    whether the Repairs notice is on, and the appliances a signature can be
+    merged into (#43)."""
 
     async def review(coordinator: EnergyMapperCoordinator) -> dict[str, Any]:
         listing = await coordinator.async_review()
-        return {**listing, "repair": coordinator.config_entry.options.get(OPT_REVIEW_REPAIR, True)}
+        appliances = sorted(
+            ({"key": a.key, "name": a.name} for a in coordinator.appliances_by_subentry().values()),
+            key=lambda a: (a["name"].casefold(), a["key"]),
+        )
+        return {
+            **listing,
+            "repair": coordinator.config_entry.options.get(OPT_REVIEW_REPAIR, True),
+            "appliances": appliances,
+        }
 
     await _review(hass, connection, msg, review)
 
@@ -302,6 +312,35 @@ async def ws_validate(
         }
 
     await _review(hass, connection, msg, validate)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "energy_mapper/merge_signature",
+        vol.Required("signature_id"): SIGNATURE_ID,
+        # the key of the appliance (its subentry's unique id)
+        vol.Required("appliance"): vol.All(str, vol.Length(min=1, max=200)),
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_merge_signature(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Validate a signature as a part of an existing appliance (#43): the
+    signature joins its sources and its energy is added to the appliance's."""
+
+    async def merge(coordinator: EnergyMapperCoordinator) -> dict[str, Any]:
+        appliance = await coordinator.async_merge_signature(msg["signature_id"], msg["appliance"])
+        return {
+            "appliance": {
+                "key": appliance.key,
+                "name": appliance.name,
+                "sources": [s.as_dict() for s in appliance.sources],
+            }
+        }
+
+    await _review(hass, connection, msg, merge)
 
 
 def _decision(action: str):

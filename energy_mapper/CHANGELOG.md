@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.8.0
+
+- Entity suggestions compare attributes too (#43): `hvac_action` of climate
+  entities and `action` of humidifiers, read as if they were states (a
+  thermostat stays `heat` all winter; `hvac_action` tells when it heats).
+  Their history is read in a separate, bounded request with attributes.
+- Containment scoring (#43): an entity that stays in a state for long
+  periods while the load cycles inside them is suggested when the signature
+  only runs in that state (`match: "containment"`: share of its on-time
+  inside, sessions inside, chance level, share of the entity's on periods
+  used). Random entities and entities "on" most of the time stay rejected.
+- The switched loads and the entities linked to an appliance are candidates:
+  a suggestion that belongs to an appliance (one of its sources, or the same
+  Home Assistant device) carries `appliance`, and the panel of the
+  integration 0.6.0 proposes to merge the signature into it.
+- Changes files version 2 (with the state at midnight and the attributes);
+  the files of the last 30 days written before are read again once.
+- `GET /api/review`: `attribute_candidates` in `suggest`; suggestions have
+  `match`, `attribute` and `appliance`.
+
 ## 0.7.0
 
 - Entity suggestions for the signatures to review (#41), with the integration

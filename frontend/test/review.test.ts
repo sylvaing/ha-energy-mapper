@@ -4,13 +4,17 @@ import { test } from "node:test";
 import { translator } from "../src/i18n.ts";
 import {
   bestSuggestion,
+  drivesLoad,
   entityChoices,
   exampleWindow,
   formatHours,
   hasReview,
+  formForSuggestion,
   initialForm,
   linkable,
   reviewGroups,
+  suggestionLabel,
+  suggestionMode,
   usualHours,
   validateMessage,
 } from "../src/review.ts";
@@ -153,14 +157,14 @@ function suggestion(entity_id: string, score: number, on_states = ["on"]): Entit
 test("suggested entities pre-fill the validation form (#41)", () => {
   const plain = sig("a", "proposed");
   assert.equal(bestSuggestion(plain), undefined);
-  assert.deepEqual(initialForm(plain), { id: "a", mode: "new", name: "", entity: "" });
+  assert.deepEqual(initialForm(plain), { id: "a", mode: "new", name: "", entity: "", appliance: "" });
   const s = { ...plain, suggestions: [suggestion("fan.attic", 0.92), suggestion("switch.pilot", 0.85, ["off"])] };
   assert.equal(bestSuggestion(s)?.entity_id, "fan.attic");
   assert.deepEqual(
     initialForm(s, (e) => (e === "fan.attic" ? "Attic fan" : undefined)),
-    { id: "a", mode: "switch", name: "Attic fan", entity: "fan.attic" },
+    { id: "a", mode: "switch", name: "Attic fan", entity: "fan.attic", appliance: "" },
   );
-  assert.deepEqual(initialForm(s), { id: "a", mode: "switch", name: "", entity: "fan.attic" });
+  assert.deepEqual(initialForm(s), { id: "a", mode: "switch", name: "", entity: "fan.attic", appliance: "" });
 });
 
 test("validate message: the on-states of a suggested entity", () => {
@@ -203,4 +207,67 @@ test("suggestion strings exist in French", () => {
   const fr = translator("fr");
   assert.equal(fr("review_probably", { name: "Ventilateur", score: "92 %" }), "Probablement : Ventilateur (92 %)");
   assert.notEqual(fr("review_unrecorded", { domains: "x" }), translator("en")("review_unrecorded", { domains: "x" }));
+});
+
+function contained(entity_id: string, extra: Partial<EntitySuggestion> = {}): EntitySuggestion {
+  return {
+    entity_id,
+    attribute: "hvac_action",
+    match: "containment",
+    score: 0.97,
+    matches: 80,
+    sessions: 80,
+    time_share: 0.3,
+    used: 0.8,
+    chance: 1e-30,
+    days: 20,
+    on_states: ["heating"],
+    inverted: false,
+    ...extra,
+  };
+}
+
+test("attribute and containment suggestions name an appliance or merge it (#43)", () => {
+  const friendly = (e: string) => (e === "climate.room" ? "Room" : undefined);
+  const attr = contained("climate.room");
+  assert.equal(drivesLoad(attr), false);
+  assert.equal(drivesLoad(suggestion("fan.attic", 0.9)), true);
+  assert.equal(drivesLoad({ ...suggestion("switch.pilot", 0.9), match: "containment" }), false);
+  assert.equal(suggestionLabel(attr, friendly), "Room (heating)");
+  assert.equal(suggestionLabel(suggestion("fan.attic", 0.9), friendly), "fan.attic");
+  // not linked to an appliance: a new appliance named after it
+  assert.equal(suggestionMode(attr), "new");
+  assert.deepEqual(initialForm({ id: "a", suggestions: [attr] }, friendly), {
+    id: "a",
+    mode: "new",
+    name: "Room",
+    entity: "",
+    appliance: "",
+  });
+  // part of an appliance: merge into it
+  const part = contained("climate.room", { appliance: { key: "load:switch.radiator", name: "Radiator", via: "device" } });
+  assert.equal(suggestionMode(part), "merge");
+  assert.deepEqual(formForSuggestion("a", part, friendly), {
+    id: "a",
+    mode: "merge",
+    name: "Room",
+    entity: "",
+    appliance: "load:switch.radiator",
+  });
+  // an attribute is never sent as the on-states of a switch
+  const s = { id: "a", suggestions: [contained("switch.pilot", { attribute: undefined, on_states: ["off"] })] };
+  assert.deepEqual(validateMessage(s, "switch", "Pilot", "switch.pilot"), {
+    msg: { type: "energy_mapper/validate", signature_id: "a", name: "Pilot", entity_id: "switch.pilot" },
+  });
+});
+
+test("merge message (#43)", () => {
+  const s = { id: "a", suggestions: [] };
+  assert.deepEqual(validateMessage(s, "merge", "", "", undefined, "load:switch.radiator"), {
+    msg: { type: "energy_mapper/merge_signature", signature_id: "a", appliance: "load:switch.radiator" },
+  });
+  assert.deepEqual(validateMessage(s, "merge", "x", "", undefined, ""), { missing: "appliance" });
+  const fr = translator("fr");
+  assert.equal(fr("review_merge_into", { name: "Radiateur" }), "Fusionner dans Radiateur");
+  assert.notEqual(fr("review_mode_merge"), translator("en")("review_mode_merge"));
 });

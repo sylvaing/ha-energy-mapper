@@ -161,21 +161,43 @@ export interface SignatureExample {
 
 export type ReviewState = "proposed" | "waiting" | "ignored" | "validated" | "immature";
 
-/** An entity whose state changes coincide with a signature's steps (#41). */
+/** An entity whose state changes coincide with a signature's steps (#41),
+ * or whose state contains its uses (#43). */
 export interface EntitySuggestion {
   entity_id: string;
-  /** share of the signature's steps matched (0..1) */
+  /** an attribute read as the state (climate: hvac_action), add-on 0.8.0+ */
+  attribute?: string;
+  /** "edge": changes at the steps (a ground truth); "containment": the
+   * signature only runs in those states (add-on 0.8.0+; absent: edge) */
+  match?: "edge" | "containment";
+  /** edge: share of the signature's steps matched; containment: share of
+   * its on-time inside the on states (0..1) */
   score: number;
-  on_share: number | null;
-  off_share: number | null;
-  /** share of the entity's changes near a step */
-  explained: number;
+  on_share?: number | null;
+  off_share?: number | null;
+  /** edge: share of the entity's changes near a step */
+  explained?: number;
+  /** edge: steps matched; containment: sessions inside */
   matches: number;
-  steps: number;
+  steps?: number;
+  /** containment: the signature's sessions, the entity's time in the on
+   * states, the share of its on periods with a use, the chance level */
+  sessions?: number;
+  time_share?: number;
+  used?: number;
+  chance?: number;
   days: number;
   /** the states in which the appliance runs */
   on_states: string[];
   inverted: boolean;
+  /** the appliance the entity already belongs to: merge into it (#43) */
+  appliance?: { key: string; name: string; via: "entity" | "device" };
+}
+
+/** An appliance a signature can be merged into (energy_mapper/review). */
+export interface ApplianceRef {
+  key: string;
+  name: string;
 }
 
 export interface ReviewSignature extends RegistrySignature {
@@ -200,11 +222,14 @@ export interface ReviewListing {
   counts: Record<string, number>;
   signatures: ReviewSignature[];
   repair?: boolean;
+  /** the appliances (integration 0.6.0+) */
+  appliances?: ApplianceRef[];
   /** the entity suggestions of the nightly run (add-on 0.7.0+) */
   suggest?: {
     computed_at: number | null;
     days: number;
     candidates: number;
+    attribute_candidates?: number;
     min_score: number | null;
     /** candidate domains none of whose entities is recorded */
     unrecorded_domains: string[];

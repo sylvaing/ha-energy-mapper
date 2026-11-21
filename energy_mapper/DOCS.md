@@ -194,7 +194,7 @@ announces itself to Home Assistant through Supervisor discovery.
 
 | Request | Answer |
 |---|---|
-| `GET /api/health` | `{"status": "ok", "version": "0.7.0", "last_run": <unix time or null>, "days": <number of full reports>, "signatures": <registry size>, "storage_bytes": <size of /data>}` |
+| `GET /api/health` | `{"status": "ok", "version": "0.8.0", "last_run": <unix time or null>, "days": <number of full reports>, "signatures": <registry size>, "storage_bytes": <size of /data>}` |
 | `GET /api/days` | `{"days": [...], "summary_days": [...], "generated": {"YYYY-MM-DD": <unix time>}}`: days with a full report, and older days with only a summary, oldest first; `generated` tells when each full report was made |
 | `GET /api/report/YYYY-MM-DD` | The report with the registry ids, or 404. For a day with only a summary: `curve` is empty and `curve_pruned` is `true` |
 | `GET /api/hourly/YYYY-MM-DD` | The energy of each appliance per hour of that day (below), or 404 when the day has no per-minute curve |
@@ -393,8 +393,16 @@ again later keeps the decision. `GET /api/review` answers the signatures
                   "suggestions": [{"entity_id": "fan.attic", "score": 0.92, "on_share": 1.0,
                                    "off_share": 0.83, "explained": 0.9, "matches": 11, "steps": 12,
                                    "days": 5, "days_compared": 6, "on_states": ["on"],
-                                   "inverted": false}]}],
-  "suggest": {"computed_at": 1810000000.0, "days": 30, "candidates": 42, "min_score": 0.8,
+                                   "inverted": false, "match": "edge"},
+                                  {"entity_id": "climate.room", "attribute": "hvac_action",
+                                   "match": "containment", "score": 0.97, "contained": 0.97,
+                                   "time_share": 0.3, "used": 0.8, "matches": 40, "sessions": 41,
+                                   "days": 20, "days_compared": 20, "chance": 1e-20,
+                                   "on_states": ["heating"], "inverted": false,
+                                   "appliance": {"key": "load:switch.radiator", "name": "Radiator",
+                                                 "via": "device"}}]}],
+  "suggest": {"computed_at": 1810000000.0, "days": 30, "candidates": 42, "attribute_candidates": 3,
+              "min_score": 0.8,
               "unrecorded_domains": ["media_player"], "unrecorded_entities": 3}
 }
 ```
@@ -408,31 +416,59 @@ records the decision, the appliance itself is pushed with
 
 Every night, after the registry update, the add-on compares the signatures
 `proposed` and `waiting` (at most 50) with the state changes of the
-**candidate entities**: lights, switches, input booleans, fans, climate and
-water heater entities (their state: the HVAC or operation mode), media
-players, binary sensors, and sensors of the `enum` device class (an
-operation state). Diagnostic and configuration entities, Energy Mapper's own
-entities, the entities the analysis already uses, those linked to an
-appliance and the excluded switched loads are left out (at most 500).
+**candidate entities**: lights, switches, input booleans, fans, climate,
+humidifier and water heater entities (their state: the HVAC or operation
+mode), media players, binary sensors, and sensors of the `enum` device class
+(an operation state). Diagnostic and configuration entities, Energy Mapper's
+own entities, the meters and sub-meters the analysis uses and the excluded
+switched loads are left out (at most 500). The switched loads and the
+entities linked to an appliance are compared too: a signature matching one
+is probably a part of that appliance.
 
-The changes of a day are read once from the recorder (right after the day is
-analysed; the days of the last 30 analysed before are read at the next
-nightly run) and kept 31 days in `/data/changes`. An entity changing more
-than 100 times a day is not compared that day.
+Two **attributes** are compared as if they were states, for their domain
+only (at most 50 entities): `hvac_action` of `climate` entities (`heating`,
+`idle`... while the state stays `heat`) and `action` of `humidifier`
+entities. A suggestion of an attribute has `attribute`.
 
-For each signature and entity, over the last 30 days: each start (*on*
-step) and end (*off* step) of the signature's activations is matched when
-the entity changes within twice the meter's sampling interval (60 to 300 s)
-into one of its *on states* (the states it enters more often at on steps
-than at off steps; *off* for a pilot-wire relay) for an on step, or into
-another state for an off step. `score` is the share of the steps matched,
-`on_share` and `off_share` the same per kind of step, and `explained` the
-share of the entity's own changes that happen near a step. An entity is
-suggested when `score` is at least `review_suggest_score` (80 %), at least 5
-steps are matched on 3 different days, and `explained` is at least 30 % (an
-entity that changes all the time is never suggested); the best 3 are kept.
-`suggest.unrecorded_domains` lists the candidate domains none of whose
-entities is recorded (recorder exclusions).
+The changes of a day, and the state at midnight, are read once from the
+recorder (right after the day is analysed; the days of the last 30 analysed
+before, or before 0.8.0, are read at the next nightly run; attributes in a
+separate request with attributes) and kept 31 days in `/data/changes`. An
+entity changing more than 100 times a day (300 for an attribute) is not
+compared that day.
+
+For each signature and entity, over the last 30 days, two tests:
+
+- **Edge** (`match: "edge"`): each start (*on* step) and end (*off* step) of
+  the signature's activations is matched when the entity changes within
+  twice the meter's sampling interval (60 to 300 s) into one of its *on
+  states* (the states it enters more often at on steps than at off steps;
+  *off* for a pilot-wire relay) for an on step, or into another state for an
+  off step. `score` is the share of the steps matched, `on_share` and
+  `off_share` the same per kind of step, and `explained` the share of the
+  entity's own changes that happen near a step. Suggested when `score` is at
+  least `review_suggest_score` (80 %), at least 5 steps are matched on 3
+  different days, and `explained` is at least 30 % (an entity that changes
+  all the time is never suggested).
+- **Containment** (`match: "containment"`), for an entity that stays in a
+  state for long periods while the load runs inside them (a thermostat
+  heating for an hour while its radiator cycles): the on states are those
+  holding a larger share of the signature's on-time than of the entity's
+  time; `score` (`contained`) is the share of the signature's on-time spent
+  in them, `time_share` the share of the entity's time in them, `sessions`
+  the signature's uses grouped when less than 30 minutes apart, `matches`
+  those spent mostly inside, `chance` the probability of that many sessions
+  inside by chance (binomial, with `time_share`), and `used` the share of the
+  entity's on periods with a use. Suggested when `contained` is at least
+  `review_suggest_score`, at least 5 sessions are inside on 3 different days,
+  `used` is at least 30 % and `chance` at most 10⁻⁴ (an entity that is on
+  most of the time is never suggested).
+
+The edge matches come first, then by score; the best 3 are kept. A
+suggested entity that belongs to an appliance (one of its sources, or in the
+same Home Assistant device as one) has `appliance`: the panel proposes to
+merge the signature into it. `suggest.unrecorded_domains` lists the
+candidate domains none of whose entities is recorded (recorder exclusions).
 
 Error codes: `invalid_day` (400: not a date, or a day that is not over),
 `no_grid` (422: no grid power sensor found), `no_data` (422: no grid data in

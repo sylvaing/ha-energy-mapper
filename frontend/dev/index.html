@@ -169,6 +169,12 @@
             decisions[msg.signature_id] = { state: "validated", at: NOW, appliance: msg.entity_id ?? msg.signature_id };
             labels[msg.signature_id] = msg.entity_id ? null : msg.name.trim();
             return { appliance: { key: `signature:${msg.signature_id}`, name: msg.name.trim(), sources: [] } };
+          case "energy_mapper/merge_signature": {
+            const a = APPLIANCES.find((x) => x.key === msg.appliance);
+            if (!a) throw { code: "not_found", message: `no appliance ${msg.appliance}` };
+            decisions[msg.signature_id] = { state: "validated", at: NOW, appliance: a.key };
+            return { appliance: { key: a.key, name: a.name, sources: [] } };
+          }
           case "energy_mapper/wait":
           case "energy_mapper/ignore":
           case "energy_mapper/restore": {
@@ -224,6 +230,7 @@
           counts,
           signatures: sigs,
           repair: true,
+          appliances: APPLIANCES,
           suggest: {
             computed_at: NOW,
             days: 7,
@@ -246,7 +253,31 @@
         on_states,
         inverted: on_states[0] === "off",
       });
+      // appliances a signature can be merged into (#43)
+      const APPLIANCES = [
+        { key: "load:switch.radiator_bedroom", name: "Bedroom radiator" },
+        { key: "load:switch.water_heater", name: "Water heater" },
+      ];
+      // a thermostat whose hvac_action contains the uses, in the radiator's device (#43)
+      const contained = {
+        entity_id: "climate.bedroom",
+        attribute: "hvac_action",
+        match: "containment",
+        score: 0.97,
+        contained: 0.97,
+        time_share: 0.31,
+        used: 0.8,
+        matches: 38,
+        sessions: 39,
+        chance: 1e-15,
+        days: 14,
+        days_compared: 14,
+        on_states: ["heating"],
+        inverted: false,
+        appliance: { ...APPLIANCES[0], via: "device" },
+      };
       const SUGGESTIONS = [
+        [contained, suggestion("fan.attic", 0.92)],
         [suggestion("fan.attic", 0.92), suggestion("switch.dishwasher_plug", 0.83)],
         [suggestion("sensor.washer_state", 0.88, ["running"])],
       ];
@@ -255,6 +286,7 @@
         [
           ["switch.water_heater", "Water heater", null],
           ["switch.radiator_bedroom", "Bedroom radiator (pilot wire)", null],
+          ["climate.bedroom", "Bedroom", null],
           ["switch.dishwasher_plug", "Dishwasher plug", null],
           ["sensor.dishwasher_plug_power", "Dishwasher plug power", "power"],
           ["sensor.heat_pump_power", "Heat pump power", "power"],

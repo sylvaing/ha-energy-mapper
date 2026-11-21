@@ -94,8 +94,8 @@ thermostat), which are grouped into one session with their duty cycle.
   **aarch64** (Raspberry Pi 4/5 included: a day is analysed in a few seconds at most).
   Home Assistant Container and Core are not supported yet: a standalone image is planned in
   [#19](https://github.com/sylvaing/ha-energy-mapper/issues/19).
-- **Home Assistant 2025.10 or later** for the integration, add-on **0.7.0 or later** for the
-  entity suggestions (0.6.0 for the review of the signatures, 0.5.0 for the appliance
+- **Home Assistant 2025.10 or later** for the integration, add-on **0.8.0 or later** for the
+  attribute suggestions and merges (0.7.0 for the entity suggestions, 0.6.0 for the review of the signatures, 0.5.0 for the appliance
   management, 0.4.0 for the appliance statistics; developed and tested on 2026.10 and
   2026.11; the panel uses Home Assistant's own date picker when available, and a plain date
   field otherwise).
@@ -212,7 +212,14 @@ and number and time formats, and adapts to narrow screens (mobile app).
   - **Probably: Attic fan (92 %)**: the entity whose state changes when the signature starts
     and stops, found by Energy Mapper (see below). *Validate…* then opens with it already
     picked and named after it; the other suggested entities are one click away, and any other
-    entity can still be chosen;
+    entity can still be chosen. A thermostat found by its *heating* periods is shown as
+    **Living room (heating)**: it names a new appliance, it is not linked as a switch;
+  - **Probably part of Radiator: …** and **Merge into Radiator**: the entity found already
+    belongs to an appliance (it is one of its switches or sensors, or in the same device), so
+    the signature is probably a part of it, such as a radiator cycling on its own thermostat
+    while its pilot-wire relay allows heating. Merging adds the signature to the appliance:
+    its energy is added to the appliance's, past days included. *Validate…* also offers
+    **A part of an existing appliance** for any appliance;
   - **Wait**: hide it until there is clearly more data (twice as many uses, or 14 days later);
   - **Ignore**: never propose it again. The *Ignored* list below brings one back (*Restore*).
     A signature whose appliance you deleted is listed there too.
@@ -223,16 +230,23 @@ and number and time formats, and adapts to narrow screens (mobile app).
 
   **Entity suggestions.** Every night, for each signature to review, the add-on compares its
   starts and stops of the last 30 days with the state changes of your entities that may tell
-  when an appliance runs: lights, switches, input booleans, fans, climate and water heater
-  entities (their mode), media players, binary sensors, and sensors reporting an operation
-  state (`enum` device class, such as a washing machine's programme state). An entity is
+  when an appliance runs: lights, switches, input booleans, fans, climate, humidifier and water
+  heater entities (their mode), media players, binary sensors, and sensors reporting an
+  operation state (`enum` device class, such as a washing machine's programme state), plus
+  what thermostats and humidifiers are doing (their `hvac_action` and `action` attributes:
+  *heating*, *idle*…). An entity is
   suggested when its state changes within a minute or two (twice the meter's reporting
   interval) of at least 80 % of the starts and stops, at least 5 times on 3 different days,
   and when at least 30 % of its own changes happen at those times (an entity that changes all
   the time is never suggested). The states it is in while the appliance runs are learned too:
   a pilot-wire relay that is *off* while its radiator heats, or a washing machine reporting
-  *running*, is linked with the right states. Entities already linked to an appliance or used
-  as a switched load are not compared. The first suggestions appear after the first nightly
+  *running*, is linked with the right states. An entity that stays in a state for long
+  periods while the appliance runs inside them (a thermostat *heating* for an hour while its
+  radiator switches on and off) is suggested when at least 80 % of the signature's running
+  time falls in that state, on enough separate uses that chance cannot explain it, and when
+  the appliance runs in at least 30 % of those periods (an entity that is on most of the time
+  is never suggested). Entities already linked to an appliance are compared too: they lead to
+  a merge. The first suggestions appear after the first nightly
   analysis following the update (the past days are then read once from the recorder).
   Entities the recorder does not keep cannot be compared: the section says which kinds of
   entities are not recorded at all. Lights and small devices below the step threshold
@@ -346,8 +360,12 @@ on/off states come with real-time detection
 - Three-phase installations are analysed on the sum of the phases (per-phase analysis:
   [#18](https://github.com/sylvaing/ha-energy-mapper/issues/18)).
 - The texts of *Things to check* come from the add-on in English.
-- Entity suggestions compare the **state** of the entities only: a climate entity is compared
-  by its mode, not by its `hvac_action` attribute (attributes are not read).
+- Entity suggestions compare the **state** of the entities and two attributes only
+  (`hvac_action` of thermostats, `action` of humidifiers). A suggestion found by its long
+  periods (containment) or by an attribute names an appliance or leads to a merge; it is not
+  used as a switch that measures the appliance. An entity that follows the same daily schedule
+  as an appliance without driving it (a daytime sensor and a pool pump) may be suggested:
+  ignore it.
 
 ## Roadmap
 
@@ -516,8 +534,9 @@ regroupés en une seule session avec leur rapport cyclique.
   **aarch64** (Raspberry Pi 4/5 compris : une journée s'analyse en quelques secondes au plus).
   Home Assistant Container et Core ne sont pas encore pris en charge : une image autonome est
   prévue dans [#19](https://github.com/sylvaing/ha-energy-mapper/issues/19).
-- **Home Assistant 2025.10 ou plus récent** pour l'intégration, add-on **0.7.0 ou plus
-  récent** pour les suggestions d'entité (0.6.0 pour l'examen des signatures, 0.5.0 pour la
+- **Home Assistant 2025.10 ou plus récent** pour l'intégration, add-on **0.8.0 ou plus
+  récent** pour les suggestions d'attribut et les fusions (0.7.0 pour les suggestions
+  d'entité, 0.6.0 pour l'examen des signatures, 0.5.0 pour la
   gestion des appareils, 0.4.0 pour leurs statistiques ; développée et testée sur
   2026.10 et 2026.11 ; le panneau utilise le sélecteur de date de Home Assistant quand il est
   disponible, un simple champ de date sinon).
@@ -641,7 +660,16 @@ français) et ses formats de nombres et d'heures, et s'adapte aux écrans étroi
   - **Probablement : Ventilateur des combles (92 %)** : l'entité dont l'état change quand la
     signature démarre et s'arrête, trouvée par Energy Mapper (voir plus bas). *Valider…*
     s'ouvre alors avec cette entité déjà choisie et le nom pré-rempli ; les autres entités
-    suggérées sont à un clic, et toute autre entité reste possible ;
+    suggérées sont à un clic, et toute autre entité reste possible. Un thermostat trouvé par
+    ses périodes de chauffe s'affiche **Salon (heating)** : il nomme un nouvel appareil, il
+    n'est pas relié comme interrupteur ;
+  - **Probablement une partie de Radiateur : …** et **Fusionner dans Radiateur** : l'entité
+    trouvée appartient déjà à un appareil (c'est l'un de ses interrupteurs ou capteurs, ou elle
+    est dans le même appareil Home Assistant), donc la signature en fait probablement partie,
+    comme un radiateur qui cycle sur son propre thermostat pendant que son relais de fil pilote
+    autorise la chauffe. La fusion ajoute la signature à l'appareil : son énergie s'ajoute à
+    celle de l'appareil, jours passés compris. *Valider…* propose aussi **Une partie d'un
+    appareil existant** pour n'importe quel appareil ;
   - **Attendre** : la masquer jusqu'à avoir nettement plus de données (deux fois plus
     d'utilisations, ou 14 jours plus tard) ;
   - **Ignorer** : ne plus jamais la proposer. La liste *Ignorées* en dessous permet de revenir
@@ -655,16 +683,22 @@ français) et ses formats de nombres et d'heures, et s'adapte aux écrans étroi
   **Suggestions d'entité.** Chaque nuit, pour chaque signature à examiner, l'add-on compare
   ses démarrages et arrêts des 30 derniers jours avec les changements d'état de vos entités
   qui peuvent dire quand un appareil fonctionne : lumières, interrupteurs, booléens
-  (`input_boolean`), ventilateurs, thermostats et chauffe-eau (leur mode), lecteurs
-  multimédia, capteurs binaires, et capteurs d'état de fonctionnement (classe `enum`, comme
-  l'état du programme d'un lave-linge). Une entité est suggérée quand son état change à une
+  (`input_boolean`), ventilateurs, thermostats, humidificateurs et chauffe-eau (leur mode),
+  lecteurs multimédia, capteurs binaires, et capteurs d'état de fonctionnement (classe `enum`,
+  comme l'état du programme d'un lave-linge), ainsi que ce que font les thermostats et les
+  humidificateurs (leurs attributs `hvac_action` et `action` : *heating*, *idle*…). Une entité est suggérée quand son état change à une
   minute ou deux près (deux fois l'intervalle du compteur) d'au moins 80 % des démarrages et
   arrêts, au moins 5 fois sur 3 jours différents, et quand au moins 30 % de ses propres
   changements tombent à ces moments (une entité qui change sans cesse n'est jamais
   suggérée). Les états dans lesquels l'appareil fonctionne sont appris aussi : un relais de
   fil pilote *éteint* pendant que son radiateur chauffe, ou un lave-linge qui indique
-  *en marche*, est relié avec les bons états. Les entités déjà reliées à un appareil ou
-  utilisées comme appareil piloté ne sont pas comparées. Les premières suggestions arrivent
+  *en marche*, est relié avec les bons états. Une entité qui reste longtemps dans un état
+  pendant que l'appareil fonctionne à l'intérieur (un thermostat qui chauffe une heure pendant
+  que son radiateur s'allume et s'éteint) est suggérée quand au moins 80 % du temps de marche
+  de la signature tombe dans cet état, sur assez d'utilisations distinctes pour que le hasard
+  ne l'explique pas, et quand l'appareil fonctionne dans au moins 30 % de ces périodes (une
+  entité allumée presque tout le temps n'est jamais suggérée). Les entités déjà reliées à un
+  appareil sont comparées aussi : elles mènent à une fusion. Les premières suggestions arrivent
   après la première analyse de nuit qui suit la mise à jour (les jours passés sont alors lus
   une fois dans le *recorder*). Les entités que le *recorder* ne garde pas ne peuvent pas
   être comparées : la section indique quels types d'entités ne sont pas enregistrés du tout.
@@ -788,8 +822,12 @@ puissance et l'état de marche en direct viendront avec la détection en temps r
 - Les installations triphasées sont analysées sur la somme des phases (analyse par phase :
   [#18](https://github.com/sylvaing/ha-energy-mapper/issues/18)).
 - Les textes de *À vérifier* viennent de l'add-on, en anglais.
-- Les suggestions d'entité ne comparent que l'**état** des entités : un thermostat est
-  comparé par son mode, pas par son attribut `hvac_action` (les attributs ne sont pas lus).
+- Les suggestions d'entité ne comparent que l'**état** des entités et deux attributs
+  (`hvac_action` des thermostats, `action` des humidificateurs). Une suggestion trouvée par ses
+  longues périodes (inclusion) ou par un attribut nomme un appareil ou mène à une fusion ; elle
+  n'est pas utilisée comme interrupteur qui mesure l'appareil. Une entité qui suit le même
+  horaire quotidien qu'un appareil sans le commander (un capteur de jour et une pompe de
+  piscine) peut être suggérée : ignorez-la.
 
 ### Feuille de route
 

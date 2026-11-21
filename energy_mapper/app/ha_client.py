@@ -92,6 +92,38 @@ def parse_history(payload: list, window_start: float | None = None) -> dict[str,
     return out
 
 
+def parse_attribute_history(
+    payload: list, wanted: dict[str, tuple[str, ...]], window_start: float | None = None
+) -> dict[str, list[tuple[float, str]]]:
+    """Convert a full REST ``/api/history/period`` answer (with attributes,
+    not minimal) to ``{"<entity_id>::<attribute>": [(ts, value)]}`` for the
+    attributes ``wanted`` of each entity. An attribute change keeps the
+    state's ``last_changed``: ``last_updated`` is its time. A missing
+    attribute (an unavailable entity) is ``unknown``. The first item may be
+    older than the window: it is moved to ``window_start``."""
+    out: dict[str, list[tuple[float, str]]] = {}
+    for rows in payload or []:
+        entity_id = None
+        for row in rows or []:
+            entity_id = row.get("entity_id") or entity_id
+            attrs = wanted.get(entity_id or "")
+            stamp = row.get("last_updated") or row.get("last_changed")
+            if not attrs or stamp is None:
+                continue
+            ts = _ts(stamp)
+            if window_start is not None and ts < window_start:
+                ts = window_start
+            values = row.get("attributes") or {}
+            for attr in attrs:
+                value = values.get(attr)
+                out.setdefault(f"{entity_id}::{attr}", []).append(
+                    (ts, "unknown" if value is None else str(value))
+                )
+    for points in out.values():
+        points.sort(key=lambda p: p[0])
+    return out
+
+
 class HAClient:
     def __init__(self, endpoint: Endpoint, timeout: float = 120.0):
         self.endpoint = endpoint
@@ -174,6 +206,27 @@ class HAClient:
         )
         path = f"/history/period/{quote(iso(start))}?{query}&minimal_response&no_attributes"
         return parse_history(self._get(path), window_start=start)
+
+    def history_attributes(
+        self, wanted: dict[str, tuple[str, ...]], start: float, end: float
+    ) -> dict[str, list[tuple[float, str]]]:
+        """The values of some attributes of some entities in [start, end],
+        plus those at ``start`` (``parse_attribute_history``). Heavier than
+        ``history``: every row carries the entity's attributes, so the
+        caller keeps the list short."""
+        iso = lambda ts: dt.datetime.fromtimestamp(ts, dt.UTC).isoformat()  # noqa: E731
+        out: dict[str, list[tuple[float, str]]] = {}
+        for chunk in chunks(list(wanted), MAX_FILTER_CHARS):
+            query = urlencode(
+                {
+                    "end_time": iso(end),
+                    "filter_entity_id": ",".join(chunk),
+                    "significant_changes_only": "0",
+                }
+            )
+            payload = self._get(f"/history/period/{quote(iso(start))}?{query}")
+            out.update(parse_attribute_history(payload, {e: wanted[e] for e in chunk}, window_start=start))
+        return out
 
 
 def chunks(entities: list[str], max_chars: int) -> list[list[str]]:

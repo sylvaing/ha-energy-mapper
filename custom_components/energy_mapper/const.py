@@ -42,6 +42,7 @@ SWITCH_DOMAINS: Final = [
     "fan",
     "binary_sensor",
     "climate",
+    "humidifier",
     "water_heater",
     "media_player",
 ]

@@ -22,7 +22,19 @@ from custom_components.energy_mapper.const import (
 
 from .conftest import URL
 from .test_appliances import pushed, subentries, two_days
-from .test_statistics import device, mock_addon, refresh, settle, setup
+from .test_statistics import (
+    D1,
+    D2,
+    HEATER,
+    H,
+    assert_monotonic,
+    device,
+    mock_addon,
+    refresh,
+    rows,
+    settle,
+    setup,
+)
 
 CANDIDATE = {
     "id": "cyc-1400w",
@@ -145,6 +157,7 @@ async def test_review_commands_are_for_admins(
     for msg in (
         {"type": "energy_mapper/review"},
         {"type": "energy_mapper/validate", "signature_id": "cyc-1400w", "name": "Hob"},
+        {"type": "energy_mapper/merge_signature", "signature_id": "cyc-1400w", "appliance": "x"},
         {"type": "energy_mapper/wait", "signature_id": "cyc-1400w"},
         {"type": "energy_mapper/ignore", "signature_id": "cyc-1400w"},
         {"type": "energy_mapper/restore", "signature_id": "cyc-1400w"},
@@ -166,7 +179,11 @@ async def test_list_wait_ignore_restore(
 
     answer = await _call(client, type="energy_mapper/review")
     assert answer["success"]
-    assert answer["result"] == {**review(1), "repair": True}
+    assert answer["result"] == {
+        **review(1),
+        "repair": True,
+        "appliances": [{"key": "load:switch.water_heater", "name": "Water heater"}],
+    }
 
     for action in ("wait", "ignore", "restore"):
         answer = await _call(client, type=f"energy_mapper/{action}", signature_id="cyc-1400w")
@@ -354,3 +371,86 @@ async def test_validate_with_a_suggested_entity(
         on_states=[""],
     )
     assert answer["error"]["code"] == "invalid_format"
+
+
+async def test_merge_a_signature_into_an_appliance(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    aioclient_mock: AiohttpClientMocker,
+    entry: MockConfigEntry,
+) -> None:
+    """A signature that is part of an existing appliance (#43): it becomes one
+    more source of it, and the appliance's statistic gets its energy for the
+    stored days too."""
+    days = two_days(d1={7: {"cyc-1400w": 0.3}}, d2={8: {"cyc-1400w": 0.2}})
+    suggestion = {
+        "entity_id": "climate.room",
+        "attribute": "hvac_action",
+        "match": "containment",
+        "score": 0.95,
+        "appliance": {"key": "load:switch.water_heater", "name": "Water heater", "via": "device"},
+    }
+    listing = review(1)
+    listing["signatures"] = [{**CANDIDATE, "suggestions": [suggestion]}]
+    mock_addon(aioclient_mock, days, reg(), review=listing)
+    aioclient_mock.post(f"{URL}/api/review", json={"signature": CANDIDATE | {"review_state": "validated"}})
+    await setup(hass, entry)
+    assert (await rows(hass, HEATER))[3] == (D1 + 3 * H, 1.0, 1.0)
+    client = await hass_ws_client(hass)
+
+    # the review lists the appliances a signature can be merged into
+    answer = await _call(client, type="energy_mapper/review")
+    assert answer["result"]["appliances"] == [{"key": "load:switch.water_heater", "name": "Water heater"}]
+    assert answer["result"]["signatures"][0]["suggestions"] == [suggestion]
+
+    answer = await _call(
+        client,
+        type="energy_mapper/merge_signature",
+        signature_id="cyc-1400w",
+        appliance="load:switch.water_heater",
+    )
+    assert answer["success"], answer
+    source = {"type": "signature", "id": "cyc-1400w", "kind": "cycling", "band": "session", "power_w": 1400.0}
+    assert answer["result"]["appliance"]["sources"] == [
+        {"type": "switched_load", "entity_id": "switch.water_heater"},
+        source,
+    ]
+    await settle(hass)
+    subs = subentries(entry)
+    assert set(subs) == {"load:switch.water_heater"}
+    assert subs["load:switch.water_heater"].data["sources"][1] == source
+    # the add-on knows the new source before the decision names the appliance
+    declared = {a["key"]: a for a in pushed(aioclient_mock)[-1]}
+    assert declared["load:switch.water_heater"]["sources"][1] == source
+    assert decisions(aioclient_mock) == [
+        {"id": "cyc-1400w", "action": "validate", "appliance": "load:switch.water_heater"}
+    ]
+    # the stored days were imported again with the signature's energy
+    stats = await rows(hass, HEATER)
+    assert stats[3] == (D1 + 3 * H, 1.0, 1.0)
+    assert stats[7] == (D1 + 7 * H, 0.3, 1.3)
+    assert stats[24 + 3] == (D2 + 3 * H, 2.0, 3.3)
+    assert stats[24 + 8] == (D2 + 8 * H, 0.2, 3.5)
+    assert_monotonic(stats)
+    assert not entry.runtime_data.coordinator._reimport  # noqa: SLF001
+
+    # twice, an unknown appliance or signature: refused
+    answer = await _call(
+        client,
+        type="energy_mapper/merge_signature",
+        signature_id="cyc-1400w",
+        appliance="load:switch.water_heater",
+    )
+    assert answer["error"]["code"] == "already_linked"
+    answer = await _call(
+        client, type="energy_mapper/merge_signature", signature_id="short-2000w", appliance="nope"
+    )
+    assert answer["error"]["code"] == "not_found"
+    answer = await _call(
+        client,
+        type="energy_mapper/merge_signature",
+        signature_id="medium-9w",
+        appliance="load:switch.water_heater",
+    )
+    assert answer["error"]["code"] == "not_found"
+    await refresh(hass, entry)

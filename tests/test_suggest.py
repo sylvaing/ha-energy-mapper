@@ -273,9 +273,28 @@ class CandidateTests(unittest.TestCase):
             },
         }
         listing = {"signatures": [{"id": "a"}, {"id": "b"}]}
-        got = annotate_listing(listing, stored, {"fan.attic"})
-        self.assertEqual(got["signatures"][0]["suggestions"], [{"entity_id": "switch.relay", "score": 0.9}])
+        appliances = [
+            {"key": "k", "name": "Fan", "sources": [{"type": "switched_load", "entity_id": "fan.attic"}]}
+        ]
+        got = annotate_listing(listing, stored, appliances)
+        # an entity linked to an appliance stays, with the appliance to merge into (#43)
+        self.assertEqual(
+            got["signatures"][0]["suggestions"],
+            [
+                {
+                    "entity_id": "fan.attic",
+                    "score": 1.0,
+                    "appliance": {"key": "k", "name": "Fan", "via": "entity"},
+                },
+                {"entity_id": "switch.relay", "score": 0.9},
+            ],
+        )
+        self.assertNotIn("appliance", stored["signatures"]["a"][0])  # the stored copy is untouched
         self.assertNotIn("suggestions", got["signatures"][1])
+        # an entity of the same Home Assistant device as a source
+        stored["devices"] = {"switch.relay": "dev1", "fan.attic": "dev1"}
+        got = annotate_listing({"signatures": [{"id": "a"}]}, stored, appliances)
+        self.assertEqual(got["signatures"][0]["suggestions"][1]["appliance"]["via"], "device")
         self.assertEqual(got["suggest"]["unrecorded_domains"], ["media_player"])
         self.assertEqual(annotate_listing({"signatures": []}, None, ())["suggest"]["computed_at"], None)
 
@@ -291,6 +310,7 @@ class FanHA:
 
     def __init__(self):
         self.calls: list[list[str]] = []
+        self.attribute_calls: list[dict] = []
 
     def snapshot(self):
         from test_addon import snapshot
@@ -299,6 +319,10 @@ class FanHA:
         for e in ("fan.attic", "light.desk", "switch.relay", "media_player.tv"):
             snap["states"].append({"entity_id": e, "state": "off", "attributes": {"friendly_name": e}})
         return snap
+
+    def history_attributes(self, wanted, start, end):
+        self.attribute_calls.append(dict(wanted))
+        return {}
 
     def history(self, entities, start, end):
         self.calls.append(list(entities))
@@ -344,14 +368,14 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(sig["suggestions"][0]["score"], 1.0)
         self.assertEqual(listing["suggest"]["unrecorded_domains"], ["media_player"])
 
-        # linked meanwhile: no longer suggested, nor a candidate
+        # linked meanwhile: still suggested, with the appliance to merge into (#43)
         self.analyzer.set_appliances(
             [{"key": "k", "name": "Fan", "sources": [{"type": "switched_load", "entity_id": "fan.attic"}]}]
         )
         status, listing = route(self.analyzer, self.store, "GET", "/api/review")
         sig = next(s for s in listing["signatures"] if s["id"] == self.sid)
-        self.assertNotIn("suggestions", sig)
-        self.assertNotIn("fan.attic", self.analyzer.prepare().candidates)
+        self.assertEqual(sig["suggestions"][0]["appliance"], {"key": "k", "name": "Fan", "via": "entity"})
+        self.assertIn("fan.attic", self.analyzer.prepare().candidates)
 
     def test_validated_signatures_are_not_compared(self):
         self.analyzer.decide(self.sid, "ignore")

@@ -37,13 +37,19 @@ from settings import validate as validate_settings
 from statistic_ids import known_statistics
 from storage import ReportStore
 from suggest import (
+    ATTRIBUTE_CANDIDATES,
+    CHANGES_VERSION,
     CORRELATION_DAYS,
     SUGGESTIONS_VERSION,
     annotate_listing,
+    attribute_keys,
     candidates,
     changes_file,
     day_changes_of,
-    linked_entities,
+    day_initial_of,
+    devices,
+    has_history,
+    public_candidates,
     unrecorded,
 )
 
@@ -165,6 +171,10 @@ class Context:
     entities: list[str] = field(default_factory=list)
     # entities compared with the signatures to review (suggest.py)
     candidates: list[str] = field(default_factory=list)
+    # entities whose attributes are compared (#43)
+    attribute_entities: list[str] = field(default_factory=list)
+    # the Home Assistant device of the candidates and of the appliances' sources
+    devices: dict[str, str] = field(default_factory=dict)
 
 
 class Analyzer:
@@ -267,7 +277,7 @@ class Analyzer:
         suggestions (suggest.py)."""
         registry = self.store.load_registry() or empty_registry(self.registry_config)
         listing = review_listing(registry, self.clock(), self.review_criteria, self._appliance_keys())
-        return annotate_listing(listing, self.store.load_suggestions(), linked_entities(self.appliances))
+        return annotate_listing(listing, self.store.load_suggestions(), self.appliances)
 
     @property
     def correlation_config(self) -> CorrelationConfig:
@@ -387,11 +397,18 @@ class Analyzer:
             learned = memory.get(load.entity_id, {}).get("power_w")
             if learned and not load.power_w:
                 load.power_w = float(learned)
-        # entities that may be a signature: not those already in use
-        used = set(entities) | linked_entities(self.appliances)
-        used |= set(self.options.get("excluded_switched_loads") or [])
+        # entities that may be a signature: not the meters the analysis uses;
+        # switched loads and the entities linked to an appliance are (#43): a
+        # signature matching one is part of its appliance (a merge)
+        loads = {x.entity_id for x in derived.config.switched_loads}
+        used = (set(entities) - loads) | set(self.options.get("excluded_switched_loads") or [])
         found = candidates(snap["states"], snap["registry"], used)
-        return Context(derived, self.tz, list(dict.fromkeys(entities)), found)
+        with_attributes = candidates(snap["states"], snap["registry"], used, attributes=True)
+        sourced = {
+            s["entity_id"] for a in self.appliances for s in a.get("sources") or [] if s.get("entity_id")
+        }
+        device_of = devices(snap["registry"], set(found) | set(with_attributes) | loads | sourced)
+        return Context(derived, self.tz, list(dict.fromkeys(entities)), found, with_attributes, device_of)
 
     def _day_max(self, day: str) -> float | None:
         if day not in self._maxima:
@@ -458,14 +475,21 @@ class Analyzer:
     # -- entity suggestions (#41) -----------------------------------------------
     def _store_changes(self, day: dt.date, ctx: Context) -> None:
         """Read and keep the state changes of the candidate entities on one day."""
-        if not ctx.candidates:
+        if not ctx.candidates and not ctx.attribute_entities:
             return
         start, end = day_bounds(day, ctx.tz)
-        histories = self.client.history(ctx.candidates, start, end)
+        histories = self.client.history(ctx.candidates, start, end) if ctx.candidates else {}
+        attributes = {}
+        if ctx.attribute_entities:
+            # a separate request with attributes, for a few entities only
+            wanted = {e: ATTRIBUTE_CANDIDATES[e.split(".", 1)[0]] for e in ctx.attribute_entities}
+            attributes = self.client.history_attributes(wanted, start, end)
         cfg = self.correlation_config
-        self.store.save_changes(
-            day.isoformat(), changes_file(day.isoformat(), histories, ctx.candidates, start, end, cfg)
-        )
+        data = changes_file(day.isoformat(), histories, ctx.candidates, start, end, cfg, attributes)
+        old = self.store.load_changes(day.isoformat())
+        if old is not None and has_history(old) and not has_history(data):
+            return  # re-read after the recorder purged it: keep what was read before
+        self.store.save_changes(day.isoformat(), data)
 
     def _store_changes_safely(self, day: dt.date, ctx: Context) -> None:
         """Changes of a day just analysed: a failure only costs its suggestions."""
@@ -489,12 +513,19 @@ class Analyzer:
         summaries = self.store.summaries_all()
         days = [d for d in summaries if 0 < (today - dt.date.fromisoformat(d)).days <= CORRELATION_DAYS]
         previous = self.store.load_suggestions() or {}
-        found = ctx.candidates if ctx is not None else list(previous.get("entities") or [])
+        if ctx is not None:
+            found = ctx.candidates + attribute_keys(ctx.attribute_entities)
+            device_of = ctx.devices
+        else:
+            found = list(previous.get("entities") or [])
+            device_of = dict(previous.get("devices") or {})
         fetched = 0
         if ctx is not None and found:
             have = set(self.store.changes_days())
             for day in sorted(days, reverse=True):
-                if day in have:
+                # files written before 0.8.0 lack the attributes and the
+                # initial states: read again once while the recorder has them
+                if day in have and (self.store.load_changes(day) or {}).get("version", 1) >= CHANGES_VERSION:
                     continue
                 try:
                     self._store_changes(dt.date.fromisoformat(day), ctx)
@@ -511,22 +542,27 @@ class Analyzer:
             if review_state(s, now, criteria, keys) in SUGGESTED_STATES
         ][:MAX_SUGGESTED_SIGNATURES]
         cfg = self.correlation_config
-        linked = linked_entities(self.appliances)
+        wanted = set(found)
         changes = {
-            day: {e: ch for e, ch in per.items() if e in found and e not in linked}
-            for day, per in day_changes_of(files).items()
+            day: {e: ch for e, ch in per.items() if e in wanted} for day, per in day_changes_of(files).items()
         }
-        result = correlate({d: summaries[d] for d in days}, registry, sids, changes, cfg) if sids else {}
+        initial = day_initial_of(files)
+        result = (
+            correlate({d: summaries[d] for d in days}, registry, sids, changes, cfg, initial) if sids else {}
+        )
+        plain = [e for e in found if "::" not in e]
         data = {
             "version": SUGGESTIONS_VERSION,
             "day": today.isoformat(),
             "computed_at": now,
             "days": len(files),
-            "candidates": len(found),
+            "candidates": len(plain),
+            "attribute_candidates": len(found) - len(plain),
             "min_score": cfg.min_score,
-            "unrecorded": unrecorded(files, found),
+            "unrecorded": unrecorded(files, plain),
             "entities": found,
-            "signatures": result,
+            "devices": device_of,
+            "signatures": public_candidates(result),
         }
         self.store.save_suggestions(data)
         _LOGGER.info(
