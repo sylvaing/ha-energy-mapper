@@ -107,6 +107,27 @@ test("no sub-meter series without sub-metered energy", () => {
   assert.ok(!stackSeries(r, null).some((s) => s.id === "submetered"));
 });
 
+test("estimated devices are a series of their own, apart from the measured ones", () => {
+  const r = report();
+  r.energy_kwh.estimated = 0.5;
+  r.curve[0].estimated = 200;
+  const stack = stackSeries(r, null);
+  const measured = stack.find((s) => s.id === "submetered");
+  const estimated = stack.find((s) => s.id === "estimated");
+  assert.ok(measured && estimated);
+  assert.equal(measured.energy_kwh, r.energy_kwh.submetered - 0.5);
+  assert.equal(estimated.energy_kwh, 0.5);
+  assert.equal(seriesValue(r.curve[0], measured) + seriesValue(r.curve[0], estimated), r.curve[0].submetered);
+  const s = summary(r);
+  assert.equal(s.submetered + s.estimated, r.energy_kwh.submetered);
+});
+
+test("older reports without estimated energy: everything measured", () => {
+  const stack = stackSeries(report(), null);
+  assert.ok(!stack.some((s) => s.id === "estimated"));
+  assert.equal(summary(report()).estimated, 0);
+});
+
 test("signature names: registry label, else registry id, else daily id", () => {
   const names = signatureNames(report(), registry);
   assert.equal(names.get("short-2050w"), "Kettle");

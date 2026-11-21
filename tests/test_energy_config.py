@@ -203,6 +203,8 @@ class DeriveTests(unittest.TestCase):
         self.assertEqual(
             subs, {"sensor.fridge_plug_power", "sensor.kitchen_light_power", "sensor.office_plug_power"}
         )
+        estimated = {s.entity_id for s in d.config.submeters if s.estimated}
+        self.assertEqual(estimated, {"sensor.kitchen_light_power"})
         self.assertEqual([s.entity_id for s in d.config.switched_loads], ["switch.water_heater"])
 
     def test_manual_options_win(self):

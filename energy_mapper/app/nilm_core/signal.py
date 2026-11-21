@@ -64,6 +64,7 @@ class Sample:
     submetered: float
     house: float | None  # grid + pv + battery
     residual: float | None  # house - submetered: what the analysis looks at
+    estimated: float = 0.0  # the part of ``submetered`` that is estimated
 
 
 def pv_value(pv: StepSeries | None, ts: float, hold_s: float, night_w: float) -> float | None:
@@ -117,12 +118,15 @@ def build_samples(
     pv_hold_s: float = 300.0,
     pv_night_w: float = 50.0,
     hold_s: float = 300.0,
+    estimated: Sequence[bool] = (),
 ) -> list[Sample]:
     """One sample per grid reading (the grid meter drives the timeline).
 
     ``grid`` is signed (+ import), unless ``grid_export`` is given: then
     ``grid`` is the import and ``grid_export`` the (positive) export.
     ``battery`` is + when discharging into the house. All values in W.
+    ``estimated``: for each sub-meter, whether it is an estimate (its power
+    is also counted in ``Sample.estimated``).
     """
     pv_s = StepSeries(pv) if pv else None
     exp_s = StepSeries(grid_export) if grid_export else None
@@ -142,10 +146,12 @@ def build_samples(
             g = g - (e or 0.0)
         p = pv_value(pv_s, ts, pv_hold_s, pv_night_w)
         b = held_value(bat_s, ts, hold_s) if bat_s else 0.0
-        sub = sum(max(held_value(s, ts, hold_s), 0.0) for s in subs)
+        values = [max(held_value(s, ts, hold_s), 0.0) for s in subs]
+        sub = sum(values)
+        est = sum(v for v, e in zip(values, estimated, strict=False) if e)
         house = g + p + b if p is not None else None
         residual = house - sub if house is not None else None
-        out.append(Sample(ts, g, p, b, sub, house, residual))
+        out.append(Sample(ts, g, p, b, sub, house, residual, est))
     return out
 
 

@@ -2,7 +2,7 @@
 
 import type { CurvePoint, Days, Peak, Registry, Report } from "./types.ts";
 
-export type SeriesKind = "base" | "submetered" | "known" | "signature" | "other";
+export type SeriesKind = "base" | "submetered" | "estimated" | "known" | "signature" | "other";
 
 export interface StackSeries {
   /** stable id, also used for its colour: "base", "known:<name>", "sig:<registry id>"... */
@@ -42,8 +42,15 @@ function sortByEnergy<T extends { energy_kwh: number; name: string }>(items: T[]
 export function stackSeries(report: Report, registry: Registry | null): StackSeries[] {
   const e = report.energy_kwh;
   const out: StackSeries[] = [{ id: "base", kind: "base", keys: ["base"], name: "base", energy_kwh: e.base }];
-  if (e.submetered > 0 || report.curve.some((p) => p.submetered > 0)) {
-    out.push({ id: "submetered", kind: "submetered", keys: ["submetered"], name: "submetered", energy_kwh: e.submetered });
+  // sub-meters: what plugs and sensors measure, then the estimates subtracted
+  // with them (reports older than add-on 0.8.1 have no `estimated`: all measured)
+  const estimated = e.estimated ?? 0;
+  const measured = Math.max((e.submetered ?? 0) - estimated, 0);
+  if (measured > 0 || report.curve.some((p) => p.submetered - (p.estimated ?? 0) > 0)) {
+    out.push({ id: "submetered", kind: "submetered", keys: ["submetered"], name: "submetered", energy_kwh: measured });
+  }
+  if (estimated > 0 || report.curve.some((p) => (p.estimated ?? 0) > 0)) {
+    out.push({ id: "estimated", kind: "estimated", keys: ["estimated"], name: "estimated", energy_kwh: estimated });
   }
   const knownNames = new Set<string>(Object.keys(e.known ?? {}));
   for (const p of report.curve) for (const k of Object.keys(p.known ?? {})) knownNames.add(k);
@@ -87,7 +94,9 @@ export function seriesValue(point: CurvePoint, series: StackSeries): number {
     case "base":
       return point.base ?? 0;
     case "submetered":
-      return point.submetered ?? 0;
+      return Math.max((point.submetered ?? 0) - (point.estimated ?? 0), 0);
+    case "estimated":
+      return point.estimated ?? 0;
     case "other":
       return point.other ?? 0;
     case "known":
@@ -105,6 +114,7 @@ export interface Summary {
   base: number;
   base_w: number | null;
   submetered: number;
+  estimated: number;
   known: number;
   signatures: number;
   other: number;
@@ -123,7 +133,8 @@ export function summary(report: Report): Summary {
     pv: e.pv ?? 0,
     base: e.base ?? 0,
     base_w: e.base_w ?? null,
-    submetered: e.submetered ?? 0,
+    submetered: Math.max((e.submetered ?? 0) - (e.estimated ?? 0), 0),
+    estimated: e.estimated ?? 0,
     known: sum(e.known),
     signatures: sum(e.signatures),
     other: e.other ?? 0,

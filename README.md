@@ -258,7 +258,9 @@ and number and time formats, and adapts to narrow screens (mobile app).
   estimate configured at a few watts for a 2 kW water heater).
 - **Summary cards**: house consumption (and the day's highest power), grid import and export,
   solar, then how the house consumption splits: **base load** (the always-on power, a low
-  percentile of the day), **measured** (sub-meters), **switched loads**, **recognised
+  percentile of the day), **measured by plugs and sensors**, **estimated** (devices whose
+  power is only an estimate, e.g. lights estimated by an estimation integration), **switched
+  loads**, **recognised
   signatures** and **unexplained**.
 - **Consumption breakdown**: the same split per minute, stacked, with the house and solar
   lines, the notable threshold (dashed) and the peaks shaded. Zoom with the slider or the
@@ -712,7 +714,9 @@ français) et ses formats de nombres et d'heures, et s'adapte aux écrans étroi
   2 kW).
 - **Cartes du bilan** : consommation de la maison (et puissance maximale du jour), achat et
   revente, solaire, puis la répartition de la consommation : **consommation de fond** (la
-  puissance permanente, un bas centile de la journée), **mesuré** (sous-compteurs),
+  puissance permanente, un bas centile de la journée), **mesuré par prises et capteurs**,
+  **estimé** (appareils dont la puissance n'est qu'une estimation, comme des lumières
+  estimées par une intégration d'estimation),
   **appareils pilotés**, **signatures reconnues** et **non expliqué**.
 - **Répartition de la consommation** : la même répartition minute par minute, empilée, avec
   les courbes de la maison et du solaire, le seuil notable (en pointillés) et les pics

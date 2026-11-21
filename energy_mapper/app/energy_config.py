@@ -343,7 +343,7 @@ def derive(
             )
             continue
         role = "estimated" if src else "submeter"
-        submeters.append(SubmeterConfig(power, name))
+        submeters.append(SubmeterConfig(power, name, estimated=role == "estimated"))
         out.tracked.append(TrackedDevice(name, energy, power, role, src))
 
     # the same relay behind an estimate and an Energy Mapper statistic: the

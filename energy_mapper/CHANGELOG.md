@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.1
+
+- Reports: new `estimated`, the part of `submetered` that comes from
+  estimated devices (an estimation integration's power sensor driven by a
+  light or another entity), in the curve points, the day totals and the peaks
+  (part `estimated`). They are still subtracted before the analysis like the
+  sub-meters; the panel shows them apart (#44).
+
 ## 0.8.0
 
 - Entity suggestions compare attributes too (#43): `hvac_action` of climate

@@ -45,6 +45,8 @@ export interface EnergyKwh {
   grid_export: number;
   pv: number;
   submetered: number;
+  /** part of `submetered` that is estimated (absent in older reports) */
+  estimated?: number;
   base: number;
   other: number;
   base_w?: number;
@@ -58,6 +60,7 @@ export interface CurvePoint {
   grid: number;
   pv: number;
   submetered: number;
+  estimated?: number;
   base: number;
   other: number;
   known: Record<string, number>;
@@ -65,7 +68,7 @@ export interface CurvePoint {
 }
 
 export interface PeakPart {
-  kind: "submetered" | "known" | "signature" | string;
+  kind: "submetered" | "estimated" | "known" | "signature" | string;
   name: string;
   power_w: number;
   since?: number;

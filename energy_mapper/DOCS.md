@@ -194,7 +194,7 @@ announces itself to Home Assistant through Supervisor discovery.
 
 | Request | Answer |
 |---|---|
-| `GET /api/health` | `{"status": "ok", "version": "0.8.0", "last_run": <unix time or null>, "days": <number of full reports>, "signatures": <registry size>, "storage_bytes": <size of /data>}` |
+| `GET /api/health` | `{"status": "ok", "version": "0.8.1", "last_run": <unix time or null>, "days": <number of full reports>, "signatures": <registry size>, "storage_bytes": <size of /data>}` |
 | `GET /api/days` | `{"days": [...], "summary_days": [...], "generated": {"YYYY-MM-DD": <unix time>}}`: days with a full report, and older days with only a summary, oldest first; `generated` tells when each full report was made |
 | `GET /api/report/YYYY-MM-DD` | The report with the registry ids, or 404. For a day with only a summary: `curve` is empty and `curve_pruned` is `true` |
 | `GET /api/hourly/YYYY-MM-DD` | The energy of each appliance per hour of that day (below), or 404 when the day has no per-minute curve |

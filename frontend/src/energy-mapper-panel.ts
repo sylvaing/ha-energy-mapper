@@ -59,7 +59,7 @@ import {
   validateMessage,
 } from "./review.ts";
 import { panelStyles } from "./styles.ts";
-import { BASE_INDEX, chartTheme, type ChartTheme, SERIES_INDEXES, SUBMETERED_INDEX } from "./theme.ts";
+import { BASE_INDEX, chartTheme, type ChartTheme, ESTIMATED_INDEX, SERIES_INDEXES, SUBMETERED_INDEX } from "./theme.ts";
 import type {
   Days,
   Finding,
@@ -476,6 +476,8 @@ export class EnergyMapperPanel extends LitElement {
           ? theme.palette[BASE_INDEX]
           : s.kind === "submetered"
             ? theme.palette[SUBMETERED_INDEX]
+            : s.kind === "estimated"
+              ? theme.palette[ESTIMATED_INDEX]
             : s.kind === "other"
               ? theme.other
               : theme.palette[indexes.get(s.id) ?? 0],
@@ -496,7 +498,7 @@ export class EnergyMapperPanel extends LitElement {
   }
 
   private seriesName(s: StackSeries, t: Translate): string {
-    if (s.kind === "base" || s.kind === "submetered" || s.kind === "other") return t(s.kind);
+    if (s.kind === "base" || s.kind === "submetered" || s.kind === "estimated" || s.kind === "other") return t(s.kind);
     if (s.kind === "signature" && s.name === "?") return t("unclassified");
     return s.name;
   }
@@ -754,6 +756,7 @@ export class EnergyMapperPanel extends LitElement {
       ${s.has_pv ? tile(t("pv"), s.pv, "", model?.theme.pv) : nothing}
       ${tile(t("base"), s.base, s.base_w != null ? t("always_on", { power: formatPower(s.base_w, info) }) : share(s.base), color("base"))}
       ${s.submetered > 0 ? tile(t("submetered"), s.submetered, share(s.submetered), color("submetered")) : nothing}
+      ${s.estimated > 0 ? tile(t("estimated"), s.estimated, share(s.estimated), color("estimated")) : nothing}
       ${tile(t("known"), s.known, share(s.known), firstKnown ? color(firstKnown) : undefined)}
       ${tile(t("signatures"), s.signatures, share(s.signatures), firstSig ? color(firstSig) : undefined)}
       ${tile(t("other"), s.other, share(s.other), color("other"))}
@@ -781,7 +784,7 @@ export class EnergyMapperPanel extends LitElement {
   }
 
   private partLabel(part: PeakPart, t: Translate): string {
-    if (part.kind === "submetered") return t("submetered");
+    if (part.kind === "submetered" || part.kind === "estimated") return t(part.kind);
     if (part.kind === "signature") {
       const rid = part.registry_id;
       const label = rid ? this._registry?.signatures.find((s) => s.id === rid)?.label : null;
@@ -793,7 +796,7 @@ export class EnergyMapperPanel extends LitElement {
 
   private partColor(part: PeakPart, model: ChartModel | null, report: Report): string | undefined {
     if (!model) return undefined;
-    if (part.kind === "submetered") return model.colors.get("submetered");
+    if (part.kind === "submetered" || part.kind === "estimated") return model.colors.get(part.kind);
     if (part.kind === "known") return model.colors.get(`known:${part.name}`);
     if (part.kind === "signature") return model.colors.get(`sig:${part.registry_id || registryIdOf(report, part.name)}`);
     return undefined;

@@ -37,11 +37,12 @@ export const HA_PALETTE = [
 /** Palette indexes of the fixed series. */
 export const BASE_INDEX = 8; // grey
 export const SUBMETERED_INDEX = 0; // blue
+export const ESTIMATED_INDEX = 6; // light blue
 const GREYS = [8, 18, 28, 29];
 
 /** Palette indexes given to the appliances: all but the fixed series and the greys. */
 export const SERIES_INDEXES = HA_PALETTE.map((_, i) => i).filter(
-  (i) => i !== SUBMETERED_INDEX && !GREYS.includes(i),
+  (i) => i !== SUBMETERED_INDEX && i !== ESTIMATED_INDEX && !GREYS.includes(i),
 );
 
 export function cssVar(el: Element, name: string, fallback: string): string {

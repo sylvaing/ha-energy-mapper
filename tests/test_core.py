@@ -112,6 +112,16 @@ class SignalTests(unittest.TestCase):
         self.assertEqual(by_t[200].submetered, 900.0)  # held
         self.assertEqual(by_t[600].submetered, 0.0)  # given up after 5 min
 
+    def test_estimated_submeters_are_counted_apart(self):
+        grid = [(DAY0 + i * 10, 1500.0) for i in range(10)]
+        plug = [(DAY0, 300.0)]
+        light = [(DAY0, 40.0)]
+        samples = build_samples(grid, submeters=[plug, light], estimated=[False, True])
+        self.assertEqual(samples[0].submetered, 340.0)  # both subtracted
+        self.assertEqual(samples[0].estimated, 40.0)  # the estimate, apart
+        self.assertEqual(samples[0].residual, 1160.0)
+        self.assertEqual(build_samples(grid, submeters=[plug])[0].estimated, 0.0)
+
 
 # ---------------------------------------------------------------------------
 # #2 steps, cycling sessions, pairing
@@ -259,6 +269,7 @@ class ReportTests(unittest.TestCase):
         )
         self.assertAlmostEqual(parts, e["house"], delta=0.05 * e["house"])
         self.assertAlmostEqual(e["base_w"], 250, delta=40)
+        self.assertEqual(e["estimated"], 0)  # no estimated device in this installation
 
     def test_peak_explained(self):
         r = self.day()

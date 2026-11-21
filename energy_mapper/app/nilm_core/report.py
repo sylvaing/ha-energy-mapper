@@ -20,6 +20,9 @@ REPORT_VERSION = 1
 class SubmeterConfig:
     entity_id: str
     name: str
+    # an estimate (e.g. an estimation integration's power sensor), not a
+    # measurement: subtracted the same way, shown apart
+    estimated: bool = False
 
 
 @dataclass
@@ -105,6 +108,7 @@ def analyze(
         if config.pv_entity
         else None,
         submeters=[series(s.entity_id) for s in config.submeters],
+        estimated=[s.estimated for s in config.submeters],
         grid_export=series(config.grid_export_entity),
         battery=series(config.battery_entity, config.battery_invert),
     )
@@ -214,6 +218,8 @@ def _curve(samples, config, known, acts, start, end):
             "grid": round(_mean([s.grid for s in group])),
             "pv": round(_mean([s.pv for s in group if s.pv is not None])),
             "submetered": round(_mean([s.submetered for s in group])),
+            # the part of ``submetered`` that is estimated, not measured
+            "estimated": round(_mean([s.estimated for s in group])),
             "known": {},
             "signatures": {},
         }
@@ -236,6 +242,7 @@ def _curve(samples, config, known, acts, start, end):
         "grid_export": 0.0,
         "pv": 0.0,
         "submetered": 0.0,
+        "estimated": 0.0,
         "base": 0.0,
         "other": 0.0,
         "known": {},
@@ -267,6 +274,7 @@ def _curve(samples, config, known, acts, start, end):
         totals["grid_export"] += max(-row["grid"], 0) * h
         totals["pv"] += row["pv"] * h
         totals["submetered"] += row["submetered"] * h
+        totals["estimated"] += row["estimated"] * h
         totals["base"] += row["base"] * h
         totals["other"] += row["other"] * h
         for n, v in row["known"].items():
@@ -315,8 +323,11 @@ def _peaks(samples, config, known, acts, start, end, threshold):
     for e in episodes[: config.top_peaks]:
         m = e["max"]
         parts = []
-        if m.submetered > 0:
-            parts.append({"kind": "submetered", "name": "submetered", "power_w": round(m.submetered)})
+        measured = m.submetered - m.estimated
+        if measured > 0.5:
+            parts.append({"kind": "submetered", "name": "submetered", "power_w": round(measured)})
+        if m.estimated > 0.5:
+            parts.append({"kind": "estimated", "name": "estimated", "power_w": round(m.estimated)})
         for kl in known:
             if kl.active_at(m.ts):
                 parts.append({"kind": "known", "name": kl.name, "power_w": round(kl.power_w)})
