@@ -109,12 +109,16 @@ def registry(labelled: bool = False, updated: bool = True) -> dict[str, Any]:
     }
 
 
+REVIEW = {"criteria": {}, "now": 0.0, "counts": {"proposed": 0}, "signatures": []}
+
+
 def mock_addon(
     mock: AiohttpClientMocker,
     days: dict[str, dict[str, Any]],
     reg: dict[str, Any],
     health=None,
     appliances: list[dict[str, Any]] | None = None,
+    review: dict[str, Any] | None = None,
 ) -> None:
     mock.clear_requests()
     mock.get(f"{URL}/api/health", json=health or HEALTH)
@@ -131,6 +135,7 @@ def mock_addon(
         },
     )
     mock.get(f"{URL}/api/signatures", json=reg)
+    mock.get(f"{URL}/api/review", json=review or REVIEW)
     for day, payload in days.items():
         mock.get(f"{URL}/api/hourly/{day}", json=payload)
 

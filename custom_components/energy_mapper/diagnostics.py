@@ -36,4 +36,5 @@ async def async_get_config_entry_diagnostics(
         "appliances_api": coordinator.appliances_api,
         "imported_days": coordinator.imported,
         "latest_day": coordinator.latest.get("day"),
+        "signatures_to_review": coordinator.review_count,
     }

@@ -124,3 +124,16 @@ class EnergyMapperClient:
             "/api/signatures",
             json={"kind": kind, "band": band, "power_w": power_w, "label": label},
         )
+
+    async def review(self) -> dict[str, Any]:
+        """``{"criteria", "now", "counts", "signatures"}``: the signatures to
+        review, waiting and ignored (add-on 0.6.0+)."""
+        return await self._request("GET", "/api/review")
+
+    async def review_decision(self, sid: str, action: str, appliance: str | None = None) -> dict[str, Any]:
+        """Record a review decision (``validate``, ``wait``, ``ignore``,
+        ``restore``): ``{"signature"}``; error ``not_found`` (404)."""
+        body: dict[str, Any] = {"id": sid, "action": action}
+        if appliance:
+            body["appliance"] = appliance
+        return await self._request("POST", "/api/review", json=body)

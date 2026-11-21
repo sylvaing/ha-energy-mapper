@@ -42,6 +42,10 @@ DEFAULTS = {
     "battery_invert": False,
     "step_threshold_w": 300.0,
     "peak_threshold_w": None,
+    "review_min_uses": 5,
+    "review_min_days": 3,
+    "review_wait_days": 14,
+    "review_wait_factor": 2.0,
 }
 
 

@@ -15,12 +15,14 @@ from homeassistant.config_entries import ConfigEntry, ConfigSubentry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import EnergyMapperApiError, EnergyMapperClient, EnergyMapperError
 from .appliances import (
     KIND_LOAD,
+    KIND_SUBMETER,
     SUBENTRY_TYPE,
     Appliance,
     Source,
@@ -28,8 +30,19 @@ from .appliances import (
     new_appliance,
     power_of,
     powers,
+    relay,
+    signature,
 )
-from .const import DOMAIN, HOURLY_CONCURRENCY, OPT_SETTINGS, UPDATE_INTERVAL
+from .const import (
+    DOMAIN,
+    HOURLY_CONCURRENCY,
+    ISSUE_REVIEW,
+    OPT_REVIEW_REPAIR,
+    OPT_SETTINGS,
+    PANEL_REVIEW_PATH,
+    SWITCH_DOMAINS,
+    UPDATE_INTERVAL,
+)
 from .statistics import (
     async_clear,
     async_import,
@@ -45,6 +58,15 @@ type EnergyMapperConfigEntry = ConfigEntry[EnergyMapperData]
 
 STORAGE_VERSION = 1
 EXCLUDED_KEY = "excluded_switched_loads"
+
+
+class ReviewError(Exception):
+    """A review decision that cannot be applied; ``code`` is a websocket error code."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
 @dataclass
@@ -132,6 +154,8 @@ class EnergyMapperCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._sync_again = False
         self._sync_scheduled = False
         self._warned_old_addon = False
+        # signatures waiting for a review (None: unknown, or an add-on before 0.6.0)
+        self.review_count: int | None = None
 
     # -- persistence ----------------------------------------------------------
     async def async_load(self) -> None:
@@ -199,6 +223,7 @@ class EnergyMapperCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         options): apply what the change means."""
         current = self.appliances_by_subentry()
         previous, self._known = self._known, current
+        self._async_update_issue()  # the Repairs notice may have been turned off
         if current == previous:
             return
         self.appliances = {a.key: a for a in current.values()}
@@ -280,6 +305,85 @@ class EnergyMapperCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self._async_save()
         _LOGGER.info("Appliance %s merged into %s", other.name, target.name)
         return merged
+
+    # -- review of the signatures (#10) ----------------------------------------
+    @callback
+    def _async_update_issue(self) -> None:
+        """One Repairs notice while signatures wait for a review (unless
+        turned off in the options); it only links to the panel."""
+        enabled = self.config_entry.options.get(OPT_REVIEW_REPAIR, True)
+        if self.review_count and enabled:
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                ISSUE_REVIEW,
+                is_fixable=False,
+                is_persistent=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key=ISSUE_REVIEW,
+                translation_placeholders={"count": str(self.review_count), "url": PANEL_REVIEW_PATH},
+                learn_more_url=PANEL_REVIEW_PATH,
+            )
+        else:
+            ir.async_delete_issue(self.hass, DOMAIN, ISSUE_REVIEW)
+
+    async def async_review(self) -> dict[str, Any]:
+        """The review listing of the add-on (``GET /api/review``); the
+        Repairs notice follows its count."""
+        listing = await self.client.review()
+        self.review_count = int((listing.get("counts") or {}).get("proposed") or 0)
+        self._async_update_issue()
+        return listing
+
+    async def async_update_review(self) -> None:
+        """Count the signatures to review and update the notice."""
+        try:
+            await self.async_review()
+        except EnergyMapperApiError as err:
+            if not self._no_endpoint(err):
+                raise
+            self.review_count = None  # an add-on before 0.6.0
+            self._async_update_issue()
+
+    async def async_validate(self, sid: str, name: str, entity_id: str | None = None) -> Appliance:
+        """Validate a signature of the review: a new appliance with this
+        signature as its source, or linked to a switch (a switched load) or a
+        power sensor (a sub-meter) instead. The appliance is a subentry like
+        any other (devices, sensors and statistics follow at the next
+        synchronisation); the add-on records the decision with its key."""
+        name = name.strip()
+        if not name or len(name) > 100:
+            raise ReviewError("invalid_format", "expected a name of 1 to 100 characters")
+        registry = await self.client.signatures()
+        sig = next((s for s in registry.get("signatures") or [] if s.get("id") == sid), None)
+        if sig is None:
+            raise ReviewError("not_found", f"no signature {sid}")
+        if entity_id is None:
+            source = signature(sig)
+        elif entity_id.split(".", 1)[0] == "sensor":
+            source = Source(KIND_SUBMETER, entity_id)
+        elif entity_id.split(".", 1)[0] in SWITCH_DOMAINS:
+            source = relay(entity_id)
+        else:
+            raise ReviewError("invalid_format", f"{entity_id}: expected a switch or a power sensor")
+        current = self.appliances_by_subentry().values()
+        for wanted in {source, signature(sig)}:
+            owner = next((a for a in current if a.has(wanted)), None)
+            if owner is not None:
+                raise ReviewError("already_linked", f"{wanted.id} is already linked to {owner.name}")
+        appliance = self.async_add_appliance(name, [source])
+        _LOGGER.info("Signature %s validated as %s (%s)", sid, name, appliance.key)
+        # the add-on must know the appliance before the decision names it
+        await self._async_push(self.appliances_by_subentry().values())
+        await self.client.review_decision(sid, "validate", appliance.key)
+        await self.async_update_review()
+        return appliance
+
+    async def async_review_decision(self, sid: str, action: str) -> dict[str, Any]:
+        """Wait, ignore or restore a signature (recorded by the add-on)."""
+        answer = await self.client.review_decision(sid, action)
+        await self.async_update_review()
+        return answer
 
     # -- polling --------------------------------------------------------------
     async def _async_update_data(self) -> dict[str, Any]:
@@ -525,6 +629,7 @@ class EnergyMapperCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         }
         await self._async_push(current.values())
         await self._async_save()
+        await self.async_update_review()
 
     @callback
     def _async_update_devices(self, current: dict[str, Appliance]) -> None:

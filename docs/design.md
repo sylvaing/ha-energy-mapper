@@ -1,6 +1,6 @@
 # Energy Mapper: design
 
-This document describes how Energy Mapper works as of add-on 0.5.0 and integration 0.3.0:
+This document describes how Energy Mapper works as of add-on 0.6.0 and integration 0.4.0:
 the architecture, the analysis engine, how the Energy dashboard is used, storage, the APIs
 and the reasons behind the main choices. User documentation: the [README](../README.md) and
 the [add-on documentation](../energy_mapper/DOCS.md).
@@ -55,6 +55,7 @@ flowchart LR
       WS[Websocket commands]
       PS[Panel registration and static bundle]
       SE[Appliance devices and sensors]
+      RP[Repairs notice]
     end
   end
   subgraph FE["Browser / companion app"]
@@ -68,9 +69,10 @@ flowchart LR
   end
   P -- "hass.callWS" --> WS
   WS -- HTTP --> API
-  CO -- "GET /api/health, PUT /api/settings, PUT /api/appliances, GET /api/days, /api/signatures, /api/hourly" --> API
+  CO -- "GET /api/health, PUT /api/settings, PUT /api/appliances, GET /api/days, /api/signatures, /api/hourly, /api/review" --> API
   CO -- "external statistics (hourly kWh)" --> REC
   CO --> SE
+  CO --> RP
   CF -- "GET/PUT /api/settings" --> API
   SV -- "REST history, websocket (read-only), via the Supervisor proxy" --> REC
   SV --> EN
@@ -366,7 +368,7 @@ Everything is under the add-on's `/data` (included in Home Assistant backups):
 |---|---|---|---|
 | `reports/YYYY-MM-DD.json.gz` | Full daily report, with the per-minute curve | `report_retention_days` (90) | ~2 MB in all |
 | `summaries/YYYY-MM-DD.json.gz` | The report without its curve | Until its activations' weight is below 1 % (~200 days with a 30-day half-life); never while the full report is kept | ~1–2 MB in all |
-| `registry.json` | Signature registry | While a signature's weight is above 1 %; forever once labelled (v1) | tens of KB |
+| `registry.json` | Signature registry, with the review decisions (§ 8.3) | While a signature's weight is above 1 %; forever once labelled; the 100 most recently ignored after they fade out | tens of KB |
 | `settings.json` | Settings pushed by the integration | Until replaced (`PUT {}` deletes it) | < 64 KB |
 | `statistic_ids.json` | Energy Mapper statistic id → appliance (§ 5) | Forever (one line per appliance ever published) | KB |
 | `appliances.json` | The user's appliances pushed by the integration (§ 8.2) | Until replaced | KB |
@@ -405,7 +407,7 @@ JSON in and out; request bodies are limited to 64 KB (413 above).
 
 | Request | Answer |
 |---|---|
-| `GET /api/health` | `200 {"status": "ok", "version": "0.5.0", "last_run": <unix time \| null>, "days": <full reports>, "signatures": <registry size>, "storage_bytes": <int>}` |
+| `GET /api/health` | `200 {"status": "ok", "version": "0.6.0", "last_run": <unix time \| null>, "days": <full reports>, "signatures": <registry size>, "storage_bytes": <int>}` |
 | `GET /api/days` | `200 {"days": [...], "summary_days": [...], "generated": {day: <unix time>}}`: days with a full report, and older days with only a summary, ascending; `generated`: when each full report was made (`generated_at`) |
 | `GET /api/report/YYYY-MM-DD` | `200` the report with registry ids; `400 {"error": "invalid_day"}`; `404 {"error": "not_found"}` |
 | `GET /api/hourly/YYYY-MM-DD` | `200` the hourly breakdown of the day (`nilm_core/hourly.py`, § 8.1); `400 invalid_day`; `404 not_found` when the day has no per-minute curve |
@@ -415,6 +417,8 @@ JSON in and out; request bodies are limited to 64 KB (413 above).
 | `PUT /api/settings` | Replaces the settings: `200 {"settings": <as stored>}`; `400 {"error": "invalid_settings" \| "invalid_json", "message"}` |
 | `GET /api/appliances` | `200 {"appliances": [...]}`: the user's appliances (§ 8.2) |
 | `PUT /api/appliances` | Replaces them: `200 {"appliances": <as stored>}`; `400 {"error": "invalid_appliances" \| "invalid_json", "message"}` |
+| `GET /api/review` | `200 {"criteria": {min_uses, min_days, wait_days, wait_factor}, "now", "counts": {proposed, waiting, ignored, validated}, "signatures": [...]}`: the registry signatures `proposed` (most weighted energy first), `waiting` and `ignored`, each with its `review_state` (§ 8.3) |
+| `POST /api/review` | `{"id", "action": "validate" \| "wait" \| "ignore" \| "restore", "appliance"?}`: `200 {"signature"}` with its `review_state`; `404 not_found`; `400 invalid_review` (`validate` needs `appliance`) |
 | `POST /api/signatures` | `{"kind", "band", "power_w", "label"}`: the signature of an appliance not seen yet: `200 {"signature", "created"}` (an existing unnamed signature at that power is returned, `created: false`); `409 {"error": "conflict", "message", "id"}` when that signature belongs to another appliance; `400 invalid_signature` |
 
 Other paths answer `404 {"error": "not_found"}`, other methods on known paths
@@ -441,11 +445,17 @@ returns its JSON unchanged.
 | `energy_mapper/day_stats` | `days`: list of at most 62 days | `{"days": {"YYYY-MM-DD": {"house_kwh", "max_house_w", "notable_peaks", "last_notable"}}}`; days without a report are left out. The integration reads the reports (4 at a time) and caches the totals (up to 400 days; an analysis invalidates its day). |
 | `energy_mapper/signatures` | – | `GET /api/signatures` |
 | `energy_mapper/settings` | – | `GET /api/settings` (settings are changed in the options flow) |
+| `energy_mapper/review` | – | `GET /api/review` and `"repair"` (the notice is on); admin only |
+| `energy_mapper/validate` | `signature_id`, `name`, `entity_id`? | Creates the appliance (§ 8.3): `{"appliance": {"key", "name", "sources"}}`; admin only |
+| `energy_mapper/wait`, `energy_mapper/ignore`, `energy_mapper/restore` | `signature_id` | `POST /api/review`: `{"signature"}`; admin only |
 
+The review commands take `signature_id` (`id` is the websocket message's own id).
 Errors (`{"code", "message"}`): `invalid_format` (bad parameters), `unauthorized`,
 `not_loaded` (no entry, or not set up), `addon_unavailable` (unreachable or timeout, 30 s by
 default), or the add-on's own code and message (`invalid_day`, `not_found`, `no_grid`,
-`no_data`, `partial_day`, `ha_error`, `internal`), else `http_<status>` / `invalid_response`.
+`no_data`, `partial_day`, `ha_error`, `internal`), else `http_<status>` / `invalid_response`;
+`validate` also answers `already_linked` (the signature or the entity is already a source of an
+appliance) and `not_found` (no such signature).
 
 Other parts of the integration:
 
@@ -459,7 +469,7 @@ Other parts of the integration:
   icon `mdi:home-lightning-bolt-outline`, not admin-only), bundle served from
   `/energy_mapper_frontend/` with a content hash in the URL.
 - **Diagnostics**: entry data and options, last health, availability, sync state, appliances
-  and imported days.
+  and imported days, signatures to review.
 
 ### 8.1 Appliances, sensors and hourly statistics
 
@@ -575,7 +585,7 @@ applies them. Sources:
    `appliance` (a label set before #11 or by another client) that no subentry covers gets a
    subentry, named after the switched load or the label. A label with `appliance` belongs to
    one of our appliances: when none has that key, it was deleted and the next push clears it.
-   The review in the panel (#10) creates its appliances through the same helper
+   The review in the panel (§ 8.3) creates its appliances through the same helper
    (`EnergyMapperCoordinator.async_add_appliance`).
 
 **Sync, Home Assistant → add-on**: the list of appliances, sorted, is pushed with
@@ -610,6 +620,75 @@ that key, name and the statistic id of the rule; the device moves into it
 statistic ids do not change, nothing is re-imported. The add-on gets the appliances at the
 first push; until then it keeps working from its settings.
 
+### 8.3 Review of the signatures in the panel
+
+The user decides which recurring signatures become appliances in the panel, where the curve
+is visible, not in Repairs: a Repair per signature would be a red badge for every new
+signature, and a Repair only offers "fix" or "ignore", with no "wait" and no curve.
+
+**Who decides what.** The add-on owns the review state of each signature, computed when it is
+asked (`review.py`), from the registry and the keys of the appliances the integration pushed:
+
+| `review_state` | Rule |
+|---|---|
+| `validated` | The signature has a `label`/`appliance` (signature source of an appliance), or its decision is `validated` for an appliance key the add-on currently holds |
+| `ignored` | Decision `ignored`, or `validated` for an appliance that no longer exists (deleting an appliance means "not interested"; restoring brings it back) |
+| `waiting` | Decision `waiting` and neither `count ≥ until_count` (`ceil(count × wait_factor)`, at least one more) nor `now ≥ until` (`wait_days` later) |
+| `proposed` | Mature: `count ≥ min_uses` and `days_seen ≥ min_days` (raw counts over the stored summaries) |
+| `immature` | Otherwise |
+
+The thresholds are settings (`review_min_uses` 5, `review_min_days` 3, `review_wait_days` 14,
+`review_wait_factor` 2, § 9); a wait stores its own `until_count` and `until`, so changing the
+settings does not move the waits already decided.
+
+**Storage: in the registry signature** (`review`: `{"state", "at", …}`), because the
+decision is about a registry identity and must follow it: `registry.update` copies it to the
+cluster that takes the id each night, like the label. Ignored signatures are exempt from the
+1 % forgetting (a carried one is kept when nothing absorbed its activations), so that the same
+appliance seen again months later takes the ignored id and stays ignored; at most
+`MAX_FADED_IGNORED` (100) faded ignored signatures are kept, the most recently ignored first,
+which bounds the registry. Waiting decisions go with their signature. Decisions are written
+under the registry lock; the nightly update, which reads the registry before re-clustering
+(about 0.2 s), copies the decisions stored meanwhile before saving, so none is lost. The
+registry is in `/data`, so decisions survive restarts and are in the backups; a registry
+rebuilt from scratch (corrupt file) loses them (the appliances themselves are in Home
+Assistant).
+
+**Validation** (`energy_mapper/validate`, `EnergyMapperCoordinator.async_validate`): the
+integration reads the registry signature, builds the source and creates the subentry with the
+same helper as discovery, so the device, sensors, statistics and backfill follow at the next
+synchronisation exactly as for any appliance:
+
+| Choice in the panel | Source of the new appliance | Key |
+|---|---|---|
+| New appliance (a name) | `signature` (id, group, power) | `signature:<id>` |
+| Linked to a switch (`switch`, `input_boolean`, `light`, `fan`, `binary_sensor`, `climate`, `water_heater`) | `switched_load`: the relay is the ground truth, the engine measures its power; the signature fades out as its steps are explained | `load:<entity_id>` |
+| Linked to a power sensor (`sensor`) | `submeter`: subtracted before the analysis, its steps disappear | `submeter:<entity_id>` |
+
+A signature or an entity already used by an appliance is refused (`already_linked`; merging is
+done from the appliance's own flow). The integration then pushes the appliances at once
+(`PUT /api/appliances`) and records `validate` with the new key (`POST /api/review`), so the
+add-on knows the appliance before the decision names it.
+
+**Repairs: one notice only.** After each synchronisation (every 5 minutes) and after each
+decision, the integration reads `GET /api/review` and keeps a single non-fixable issue
+`signatures_to_review` (warning, "to review: N") whose description and *Learn more* link open
+the panel at `/energy-mapper?review=1`; the panel scrolls to its *To review* section. It is
+deleted when nothing is proposed, when the option *Notify in Repairs* is off, or when the entry
+is removed. An add-on before 0.6.0 answers 404: no notice, no section.
+
+**Panel** (`frontend/src/review.ts`, unit tested): administrators only. Proposed signatures
+with power, duration or cycle (on-time and period), uses and days, uses per week, energy, the
+usual hours (the hours at or above half of the busiest one, as ranges, across midnight) and
+the three most recent examples of the registry; an example opens its day and zooms the chart
+on it. *Validate…* opens an inline form (new appliance / switch / power sensor, Home
+Assistant's `ha-entity-picker` when loaded, a native input with a list of the matching
+entities otherwise); *Wait* and *Ignore* act at once. Below: the waiting signatures (when they
+come back) and a collapsible *Ignored* list, each with *Restore*.
+
+Not in this version: the other proposals of the same section, "take over tracking" (#13) and
+"probable sub-meter" (a power sensor whose steps coincide with the whole-house steps).
+
 ## 9. Settings and precedence
 
 The settings have three possible sources, resolved **key by key**:
@@ -636,7 +715,9 @@ Accepted keys and ranges: `grid_entity`, `grid_export_entity`, `pv_entity`, `bat
 `switched_loads` (`{entity_id, name?, on_states?}` list), `excluded_switched_loads` (entity id
 list, § 8.2), `step_threshold_w` 50–10000,
 `peak_threshold_w` 100–100000, `analysis_time` `HH:MM`, `backfill_days` 0–365,
-`half_life_days` and `peak_window_days` 1–365, `report_retention_days` 7–3650. `null`, `""`
+`half_life_days` and `peak_window_days` 1–365, `report_retention_days` 7–3650,
+`review_min_uses` 2–1000, `review_min_days` and `review_wait_days` 1–365, `review_wait_factor`
+1.2–10. `null`, `""`
 and `[]` mean absent; unknown keys refuse the whole request. A new `analysis_time` applies
 after the next pass; everything else applies to the next analysis.
 
@@ -675,6 +756,10 @@ cannot be read).
   plain fallbacks; nothing of Home Assistant is bundled.
 - **Read-only v0**: building trust in the results before anything is written to the user's
   configuration.
+- **Review in the panel, decisions in the registry** (§ 8.3): the curve is needed to judge a
+  signature, and only the panel shows it; Repairs only notifies. Appliances are Home
+  Assistant's (subentries), but "wait" and "ignore" are about a registry identity that changes
+  every night, so they live next to it and follow it.
 
 ## 11. Known limits
 
@@ -694,6 +779,9 @@ cannot be read).
   sources, after a link change).
 - An appliance linked to a power sensor gets no statistics or sensors from Energy Mapper: its
   energy is the sensor's own.
+- Review decisions live in the registry: a registry rebuilt from scratch (unreadable file)
+  proposes the ignored and waiting signatures again (appliances are not affected).
+- The review does not propose "take over tracking" (#13) or "probable sub-meter" yet.
 - The options flow cannot express "no sub-meters": an empty field falls back to the automatic
   value (#33). Excluding a switch is possible.
 
@@ -701,6 +789,6 @@ cannot be read).
 
 | Milestone | Issues |
 |---|---|
-| [v1 – Validate & track](https://github.com/sylvaing/ha-energy-mapper/milestone/2) | Review of the signatures in the panel (#10), one config subentry per appliance (#11, done), per-appliance entities (#12, done), take over tracking in the Energy dashboard (#13), learn from measured devices (#14), nightly self-test (#15), variable loads (#16), public-dataset benchmark with NILMTK metrics (#28) |
+| [v1 – Validate & track](https://github.com/sylvaing/ha-energy-mapper/milestone/2) | Review of the signatures in the panel (#10, done), one config subentry per appliance (#11, done), per-appliance entities (#12, done), take over tracking in the Energy dashboard (#13), learn from measured devices (#14), nightly self-test (#15), variable loads (#16), public-dataset benchmark with NILMTK metrics (#28) |
 | [v2 – Live](https://github.com/sylvaing/ha-energy-mapper/milestone/3) | Real-time detection (#17), per-phase analysis (#18), multi-phase appliance cycles (#26) |
 | [v3 – Publish](https://github.com/sylvaing/ha-energy-mapper/milestone/4) | Standalone Docker image for Container/Core (#19), release process and store listings (#20) |

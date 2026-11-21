@@ -142,9 +142,21 @@ export const panelStyles = css`
   .text-button:hover:not([disabled]) {
     background: rgba(127, 127, 127, 0.12);
   }
+  .text-button.accent {
+    color: var(--text-primary-color, #fff);
+    background: var(--primary-color);
+  }
+  .text-button.accent:hover:not([disabled]) {
+    background: var(--primary-color);
+    filter: brightness(1.1);
+  }
   .text-button[disabled] {
     color: var(--disabled-text-color, #bdbdbd);
     cursor: default;
+  }
+  .text-button.accent[disabled] {
+    background: var(--disabled-color, #bdbdbd);
+    color: var(--text-primary-color, #fff);
   }
   .alert {
     display: flex;
@@ -457,5 +469,134 @@ export const panelStyles = css`
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+
+  /* review of the signatures */
+  .review .card-header .count {
+    margin-inline-start: 8px;
+    min-width: 20px;
+    padding: 0 6px;
+    border-radius: var(--ha-border-radius-pill, 9999px);
+    background: var(--primary-color);
+    color: var(--text-primary-color, #fff);
+    font-size: var(--ha-font-size-s, 12px);
+    line-height: 20px;
+    text-align: center;
+  }
+  .review-list,
+  .review-compact {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .review-list > li {
+    padding: 12px 16px;
+    border-top: 1px solid var(--divider-color);
+  }
+  .review-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .review-main {
+    flex: 1;
+    min-width: 0;
+  }
+  .review-head .hours {
+    flex: none;
+  }
+  .narrow .review-head .hours {
+    width: 72px;
+  }
+  .chip.link {
+    font: inherit;
+    font-size: var(--ha-font-size-s, 12px);
+    color: var(--primary-text-color);
+    background: none;
+    cursor: pointer;
+  }
+  .chip.link:hover,
+  .chip.link:focus-visible {
+    border-color: var(--primary-color);
+    outline: none;
+  }
+  .review-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .review-form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 12px;
+    padding: 12px;
+    border: 1px solid var(--divider-color);
+    border-radius: var(--ha-card-border-radius, 12px);
+  }
+  .review-form fieldset {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 16px;
+    margin: 0;
+    padding: 0;
+    border: none;
+  }
+  .review-form legend {
+    padding: 0;
+    margin-bottom: 4px;
+    font-weight: var(--ha-font-weight-medium, 500);
+  }
+  .radio {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+  }
+  .radio input {
+    accent-color: var(--primary-color);
+  }
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: var(--ha-font-size-s, 12px);
+    color: var(--secondary-text-color);
+  }
+  .text-input {
+    font: inherit;
+    font-size: var(--ha-font-size-m, 14px);
+    color: var(--primary-text-color);
+    background: var(--card-background-color, #fff);
+    border: 1px solid var(--divider-color);
+    border-radius: var(--ha-border-radius-sm, 4px);
+    padding: 8px 10px;
+    max-width: 420px;
+  }
+  .text-input:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: -1px;
+  }
+  .field-error {
+    color: var(--error-color, #db4437);
+    font-size: var(--ha-font-size-s, 12px);
+  }
+  .review-more {
+    padding: 8px 16px;
+    border-top: 1px solid var(--divider-color);
+  }
+  .review-compact > li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+  }
+  .review-compact .review-main {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    align-items: baseline;
   }
 `;

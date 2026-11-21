@@ -12,6 +12,12 @@ CONF_URL: Final = "url"
 CONF_DISCOVERED: Final = "discovered"
 # entry.options[OPT_SETTINGS]: the settings pushed to the add-on
 OPT_SETTINGS: Final = "settings"
+# entry.options[OPT_REVIEW_REPAIR]: notify in Repairs when signatures wait for a review
+OPT_REVIEW_REPAIR: Final = "review_repair"
+# the Repairs issue "signatures to review" (#10)
+ISSUE_REVIEW: Final = "signatures_to_review"
+# where the panel shows its "To review" section
+PANEL_REVIEW_PATH: Final = "/energy-mapper?review=1"
 
 DEFAULT_URL: Final = "http://local-energy-mapper:8099"
 UPDATE_INTERVAL: Final = timedelta(minutes=5)
@@ -28,6 +34,17 @@ SENSOR_KEYS: Final = ("grid_entity", "grid_export_entity", "pv_entity", "battery
 LIST_KEYS: Final = ("submeters", "switched_loads")
 BOOL_KEYS: Final = ("grid_invert", "battery_invert")
 THRESHOLD_KEYS: Final = ("step_threshold_w", "peak_threshold_w")
+# entities whose state tells whether an appliance runs
+SWITCH_DOMAINS: Final = [
+    "switch",
+    "input_boolean",
+    "light",
+    "fan",
+    "binary_sensor",
+    "climate",
+    "water_heater",
+]
+REVIEW_KEYS: Final = ("review_min_uses", "review_min_days", "review_wait_days", "review_wait_factor")
 ANALYSIS_KEYS: Final = (
     "analysis_time",
     "backfill_days",

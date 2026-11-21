@@ -86,6 +86,21 @@
               "analysis_time": "A new time applies after the next analysis.",
               "half_life_days": "Age at which a past use counts half in the signature registry."
             }
+          },
+          "review": {
+            "name": "Review of the signatures",
+            "data": {
+              "review_repair": "Notify in Repairs",
+              "review_min_uses": "Uses before a signature is proposed",
+              "review_min_days": "Different days before a signature is proposed",
+              "review_wait_days": "\"Wait\": propose again after (days)",
+              "review_wait_factor": "\"Wait\": or after this many times more uses"
+            },
+            "data_description": {
+              "review_repair": "One notice in Settings > Repairs while signatures wait in the \"To review\" section of the Energy Mapper panel.",
+              "review_min_uses": "The panel proposes a recurring signature once it was seen this many times, on at least as many different days as below.",
+              "review_wait_factor": "For example 2: a signature put on hold after 6 uses comes back after 12 uses, or after the number of days above."
+            }
           }
         }
       }
@@ -255,6 +270,12 @@
       "last_analysis": {
         "name": "Last analysis"
       }
+    }
+  },
+  "issues": {
+    "signatures_to_review": {
+      "title": "Energy Mapper: signatures to review",
+      "description": "Energy Mapper found recurring signatures that may be appliances (to review: {count}). Open the [Energy Mapper panel]({url}) to name them, wait for more data or ignore them. This notice can be turned off in the options of the integration."
     }
   }
 }

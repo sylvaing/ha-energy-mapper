@@ -40,6 +40,17 @@ import {
 } from "./format.ts";
 import { adaptCalendar, definedPicker, type HaPickerTag, loadHaDatePicker } from "./ha-date-picker.ts";
 import { type StringKey, type Translate, translator } from "./i18n.ts";
+import {
+  entityChoices,
+  exampleWindow,
+  formatHours,
+  hasReview,
+  type LinkMode,
+  linkDomains,
+  reviewGroups,
+  usualHours,
+  validateMessage,
+} from "./review.ts";
 import { panelStyles } from "./styles.ts";
 import { BASE_INDEX, chartTheme, type ChartTheme, SERIES_INDEXES, SUBMETERED_INDEX } from "./theme.ts";
 import type {
@@ -51,6 +62,9 @@ import type {
   Registry,
   RegistrySignature,
   Report,
+  ReviewListing,
+  ReviewSignature,
+  SignatureExample,
   Status,
 } from "./types.ts";
 
@@ -83,6 +97,11 @@ export class EnergyMapperPanel extends LitElement {
     _single: { state: true },
     _picker: { state: true },
     _stats: { state: true },
+    _review: { state: true },
+    _reviewForm: { state: true },
+    _reviewBusy: { state: true },
+    _reviewError: { state: true },
+    _showIgnored: { state: true },
   };
 
   static override styles = panelStyles;
@@ -106,6 +125,13 @@ export class EnergyMapperPanel extends LitElement {
   /** HA's date picker element, once loaded (null: native date input) */
   declare _picker: HaPickerTag | null;
   declare _stats: Record<string, DayStats>;
+  /** the review of the signatures (administrators; null: not available) */
+  declare _review: ReviewListing | null;
+  /** the validation form open in the review */
+  declare _reviewForm: { id: string; mode: LinkMode; name: string; entity: string; missing?: string } | null;
+  declare _reviewBusy: string | null;
+  declare _reviewError: string | null;
+  declare _showIgnored: boolean;
 
   private started = false;
   private requestId = 0;
@@ -131,8 +157,13 @@ export class EnergyMapperPanel extends LitElement {
     this._single = false;
     this._picker = definedPicker();
     this._stats = {};
+    this._review = null;
+    this._reviewForm = null;
+    this._reviewBusy = null;
+    this._reviewError = null;
+    this._showIgnored = false;
     // HA elements loaded later (lazily) replace the fallbacks
-    for (const tag of ["ha-menu-button", "ha-icon-button", "ha-button", "ha-alert"]) {
+    for (const tag of ["ha-menu-button", "ha-icon-button", "ha-button", "ha-alert", "ha-entity-picker"]) {
       if (!defined(tag)) customElements.whenDefined(tag).then(() => this.requestUpdate());
     }
   }
@@ -228,6 +259,7 @@ export class EnergyMapperPanel extends LitElement {
       const [days, registry] = await Promise.all([
         this.ws<Days>({ type: "energy_mapper/days" }),
         this.ws<Registry>({ type: "energy_mapper/signatures" }),
+        this.loadReview(),
       ]);
       this._days = days;
       this._registry = registry;
@@ -242,6 +274,85 @@ export class EnergyMapperPanel extends LitElement {
     } finally {
       this._loading = false;
     }
+  }
+
+  /** The review of the signatures (administrators only; an add-on before
+   * 0.6.0 has none: the section is left out). */
+  private async loadReview(): Promise<void> {
+    if (!this.isAdmin) {
+      this._review = null;
+      return;
+    }
+    try {
+      this._review = await this.ws<ReviewListing>({ type: "energy_mapper/review" });
+    } catch {
+      this._review = null;
+    }
+    if (this.reviewLinked && this._review) {
+      // opened from the Repairs notice: show the section
+      this.reviewLinked = false;
+      void this.updateComplete.then(() =>
+        this.renderRoot.querySelector("#review")?.scrollIntoView({ behavior: "smooth", block: "start" }),
+      );
+    }
+  }
+
+  private reviewLinked = new URLSearchParams(location.search).has("review");
+
+  private async decide(sig: ReviewSignature, action: "wait" | "ignore" | "restore"): Promise<void> {
+    this._reviewBusy = sig.id;
+    this._reviewError = null;
+    try {
+      await this.ws({ type: `energy_mapper/${action}`, signature_id: sig.id });
+      if (this._reviewForm?.id === sig.id) this._reviewForm = null;
+      await this.loadReview();
+    } catch (err) {
+      this._reviewError = this.errorText(err);
+    } finally {
+      this._reviewBusy = null;
+    }
+  }
+
+  private async validate(sig: ReviewSignature): Promise<void> {
+    const form = this._reviewForm;
+    if (!form || form.id !== sig.id) return;
+    const built = validateMessage(sig, form.mode, form.name, form.entity);
+    if ("missing" in built) {
+      this._reviewForm = { ...form, missing: built.missing };
+      return;
+    }
+    this._reviewBusy = sig.id;
+    this._reviewError = null;
+    try {
+      await this.ws(built.msg);
+      this._reviewForm = null;
+      this._notice = this.t("review_validated", { name: String(built.msg.name) });
+      const [registry] = await Promise.all([
+        this.ws<Registry>({ type: "energy_mapper/signatures" }),
+        this.loadReview(),
+      ]);
+      this._registry = registry;
+    } catch (err) {
+      this._reviewError = this.errorText(err);
+    } finally {
+      this._reviewBusy = null;
+    }
+  }
+
+  /** Show one use of a signature on the chart: its day, zoomed on it. */
+  private async showExample(example: SignatureExample): Promise<void> {
+    if (example.day !== this._day) await this.selectDay(example.day);
+    await this.updateComplete;
+    const report = this._report;
+    if (!report || report.day !== example.day || !report.curve.length) return;
+    // the chart is created by this update: let it render first
+    requestAnimationFrame(() => {
+      const chart = this.chartElement();
+      if (!chart) return;
+      const [a, b] = exampleWindow(example, report.start, report.end);
+      chart.zoom(a, b);
+      chart.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
   }
 
   /** Today in Home Assistant's time zone (the days of the reports). */
@@ -368,11 +479,26 @@ export class EnergyMapperPanel extends LitElement {
     </button>`;
   }
 
-  private textButton(label: string, onClick: () => void, disabled = false): TemplateResult {
+  private textButton(
+    label: string,
+    onClick: () => void,
+    disabled = false,
+    appearance: "plain" | "accent" = "plain",
+    title = "",
+  ): TemplateResult {
     if (defined("ha-button")) {
-      return html`<ha-button appearance="plain" size="small" ?disabled=${disabled} @click=${onClick}>${label}</ha-button>`;
+      return html`<ha-button
+        appearance=${appearance}
+        size="small"
+        title=${title}
+        ?disabled=${disabled}
+        @click=${onClick}
+        >${label}</ha-button
+      >`;
     }
-    return html`<button class="text-button" ?disabled=${disabled} @click=${onClick}>${label}</button>`;
+    return html`<button type="button" class="text-button ${appearance}" title=${title} ?disabled=${disabled} @click=${onClick}>
+      ${label}
+    </button>`;
   }
 
   private alert(type: "info" | "warning" | "error" | "success", text: string, title?: string): TemplateResult {
@@ -427,6 +553,7 @@ export class EnergyMapperPanel extends LitElement {
       ${entries.length > 0 && this._day && !entries.some((e) => e.day === this._day)
         ? this.renderNoReportDay(this._day, entries, t)
         : nothing}
+      ${this.renderReview(t)}
       ${this._report && this._report.day === this._day ? this.renderReport(this._report, t) : nothing}
       ${this.renderRegistry(t)}
     `;
@@ -856,6 +983,217 @@ export class EnergyMapperPanel extends LitElement {
         </li>`;
       })}
     </ul>`;
+  }
+
+  // -- review of the signatures (#10) ---------------------------------------
+  private renderReview(t: Translate): TemplateResult | typeof nothing {
+    const listing = this._review;
+    if (!listing || !this.isAdmin) return nothing;
+    const groups = reviewGroups(listing);
+    if (!hasReview(groups) && !this._reviewError) return nothing;
+    const info = this.info;
+    const c = listing.criteria;
+    return html`<div class="card review" id="review">
+      <div class="card-header">${t("review")}${groups.proposed.length ? html`<span class="count">${groups.proposed.length}</span>` : nothing}</div>
+      <div class="card-hint">${t("review_hint")}</div>
+      ${this._reviewError ? html`<div class="card-content">${this.alert("error", this._reviewError)}</div>` : nothing}
+      ${groups.proposed.length
+        ? html`<ul class="review-list">${groups.proposed.map((s) => this.renderCandidate(s, t))}</ul>`
+        : html`<div class="message">
+            ${t("review_none", { uses: formatNumber(c.min_uses, info), days: formatNumber(c.min_days, info) })}
+          </div>`}
+      ${groups.waiting.length
+        ? html`<div class="review-more">
+            <div class="secondary">${t("review_waiting", { count: formatNumber(groups.waiting.length, info) })}</div>
+            <ul class="review-compact">
+              ${groups.waiting.map((s) => this.renderCompact(s, t, this.waitText(s, t)))}
+            </ul>
+          </div>`
+        : nothing}
+      ${groups.ignored.length
+        ? html`<div class="review-more">
+            ${this.textButton(
+              t("review_ignored", { count: formatNumber(groups.ignored.length, info) }),
+              () => (this._showIgnored = !this._showIgnored),
+            )}
+            ${this._showIgnored
+              ? html`<ul class="review-compact">
+                  ${groups.ignored.map((s) =>
+                    this.renderCompact(s, t, s.review?.state === "validated" ? t("review_ignored_appliance") : ""),
+                  )}
+                </ul>`
+              : nothing}
+          </div>`
+        : nothing}
+    </div>`;
+  }
+
+  private waitText(s: ReviewSignature, t: Translate): string {
+    const r = s.review;
+    if (!r?.until_count || !r.until) return "";
+    const day = dayOf(r.until * 1000, this.info.time_zone);
+    return t("review_back", { uses: formatNumber(r.until_count, this.info), day: formatDay(day, this.info, "short") });
+  }
+
+  /** The facts of a signature: power, duration or rhythm, uses, energy, hours. */
+  private reviewFacts(s: ReviewSignature, t: Translate): string[] {
+    const info = this.info;
+    const facts = [formatPower(s.power_w, info)];
+    if (s.kind === "cycling" && s.on_s && s.period_s) {
+      facts.push(t("cycle", { on: formatDuration(s.on_s, info), period: formatDuration(s.period_s, info) }));
+      if (s.duration_s) facts.push(formatDuration(s.duration_s, info));
+    } else {
+      facts.push(formatDuration(s.duration_s, info));
+    }
+    facts.push(t("review_uses", { count: formatNumber(s.count, info), days: formatNumber(s.days_seen, info) }));
+    if (s.per_week != null) facts.push(t("review_per_week", { count: formatNumber(s.per_week, info, 1) }));
+    facts.push(t("review_energy", { energy: formatEnergy(s.energy_kwh, info) }));
+    const hours = formatHours(usualHours(s.hours));
+    if (hours) facts.push(t("review_hours", { hours }));
+    return facts;
+  }
+
+  private renderCandidate(s: ReviewSignature, t: Translate): TemplateResult {
+    const info = this.info;
+    const busy = this._reviewBusy === s.id;
+    const form = this._reviewForm?.id === s.id ? this._reviewForm : null;
+    const profile = hourProfile(s.hours);
+    const days = new Set(dayEntries(this._days).map((e) => e.day));
+    return html`<li>
+      <div class="review-head">
+        <div class="review-main">
+          <div class="sig-name">${s.id}</div>
+          <div class="secondary">${this.reviewFacts(s, t).join(" · ")}</div>
+        </div>
+        <div class="hours" title=${formatHours(usualHours(s.hours, 0.01, 24))}>
+          ${profile.map((v) => html`<div class=${v > 0 ? "" : "zero"} style="height:${Math.max(v * 100, 4)}%"></div>`)}
+        </div>
+      </div>
+      ${s.examples?.length
+        ? html`<div class="chips">
+            <span class="secondary">${t("review_examples")}</span>
+            ${s.examples.map((ex) => {
+              const label = `${formatDay(ex.day, info, "short")} ${formatTime(ex.start, info)}`;
+              return days.has(ex.day)
+                ? html`<button class="chip link" title=${t("show_on_chart")} @click=${() => void this.showExample(ex)}>
+                    ${label}<span class="chip-value">${formatDuration(ex.end - ex.start, info)}</span>
+                  </button>`
+                : html`<span class="chip">${label}</span>`;
+            })}
+          </div>`
+        : nothing}
+      ${form
+        ? this.renderValidateForm(s, form, t)
+        : html`<div class="review-actions">
+            ${this.textButton(t("review_validate"), () => (this._reviewForm = { id: s.id, mode: "new", name: "", entity: "" }), busy, "accent")}
+            ${this.textButton(t("review_wait"), () => void this.decide(s, "wait"), busy, "plain", t("review_wait_hint"))}
+            ${this.textButton(t("review_ignore"), () => void this.decide(s, "ignore"), busy, "plain", t("review_ignore_hint"))}
+          </div>`}
+    </li>`;
+  }
+
+  private renderCompact(s: ReviewSignature, t: Translate, note: string): TemplateResult {
+    const facts = this.reviewFacts(s, t).slice(0, 3);
+    if (note) facts.push(note);
+    return html`<li>
+      <div class="review-main">
+        <span class="sig-name">${s.id}</span>
+        <span class="secondary">${facts.join(" · ")}</span>
+      </div>
+      ${this.textButton(t("review_restore"), () => void this.decide(s, "restore"), this._reviewBusy === s.id)}
+    </li>`;
+  }
+
+  private setForm(patch: Partial<NonNullable<EnergyMapperPanel["_reviewForm"]>>): void {
+    if (this._reviewForm) this._reviewForm = { ...this._reviewForm, ...patch, missing: undefined };
+  }
+
+  private pickEntity(entity: string): void {
+    const form = this._reviewForm;
+    if (!form) return;
+    const name = this.hass?.states?.[entity]?.attributes?.friendly_name;
+    this.setForm({ entity, name: (form.name.trim() || typeof name !== "string") ? form.name : name });
+  }
+
+  private renderEntityPicker(form: NonNullable<EnergyMapperPanel["_reviewForm"]>, t: Translate): TemplateResult {
+    if (defined("ha-entity-picker")) {
+      return html`<ha-entity-picker
+        .hass=${this.hass}
+        .value=${form.entity}
+        .label=${t("review_entity")}
+        .includeDomains=${linkDomains(form.mode)}
+        .includeDeviceClasses=${form.mode === "sensor" ? ["power"] : undefined}
+        @value-changed=${(ev: CustomEvent<{ value?: string }>) => this.pickEntity(ev.detail?.value ?? "")}
+      ></ha-entity-picker>`;
+    }
+    const listId = `em-entities-${form.mode}`;
+    return html`<label class="field">
+      <span>${t("review_entity")}</span>
+      <input
+        class="text-input"
+        list=${listId}
+        .value=${form.entity}
+        @change=${(ev: Event) => this.pickEntity((ev.target as HTMLInputElement).value.trim())}
+      />
+      <datalist id=${listId}>
+        ${entityChoices(this.hass?.states, form.mode).map((e) => html`<option value=${e.id}>${e.name}</option>`)}
+      </datalist>
+    </label>`;
+  }
+
+  private renderValidateForm(
+    s: ReviewSignature,
+    form: NonNullable<EnergyMapperPanel["_reviewForm"]>,
+    t: Translate,
+  ): TemplateResult {
+    const busy = this._reviewBusy === s.id;
+    const modes: LinkMode[] = ["new", "switch", "sensor"];
+    return html`<form
+      class="review-form"
+      @submit=${(ev: Event) => {
+        ev.preventDefault();
+        void this.validate(s);
+      }}
+    >
+      <fieldset>
+        <legend>${t("review_mode")}</legend>
+        ${modes.map(
+          (m) => html`<label class="radio">
+            <input
+              type="radio"
+              name="mode-${s.id}"
+              .checked=${form.mode === m}
+              @change=${() => this.setForm({ mode: m, entity: "" })}
+            />
+            ${t(`review_mode_${m}` as StringKey)}
+          </label>`,
+        )}
+      </fieldset>
+      <div class="secondary">${t(`review_mode_${form.mode}_hint` as StringKey)}</div>
+      ${form.mode !== "new" ? this.renderEntityPicker(form, t) : nothing}
+      <label class="field">
+        <span>${t("review_name")}</span>
+        <input
+          class="text-input"
+          maxlength="100"
+          .value=${form.name}
+          @input=${(ev: Event) => this.setForm({ name: (ev.target as HTMLInputElement).value })}
+          @keydown=${(ev: KeyboardEvent) => {
+            if (ev.key === "Enter") {
+              ev.preventDefault();
+              void this.validate(s);
+            }
+          }}
+        />
+      </label>
+      ${form.missing
+        ? html`<div class="field-error">${form.missing === "name" ? t("review_missing_name") : t("review_missing_entity")}</div>`
+        : nothing}
+      <div class="review-actions">
+        ${this.textButton(t("review_cancel"), () => (this._reviewForm = null), busy)}
+        ${this.textButton(t("review_confirm"), () => void this.validate(s), busy, "accent")}
+      </div>
+    </form>`;
   }
 
   private renderQuality(report: Report, t: Translate): TemplateResult | typeof nothing {

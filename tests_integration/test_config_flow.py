@@ -11,7 +11,13 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMocker
 
 from custom_components.energy_mapper.config_flow import settings_from_form, suggested_values
-from custom_components.energy_mapper.const import CONF_DISCOVERED, CONF_URL, DOMAIN, OPT_SETTINGS
+from custom_components.energy_mapper.const import (
+    CONF_DISCOVERED,
+    CONF_URL,
+    DOMAIN,
+    OPT_REVIEW_REPAIR,
+    OPT_SETTINGS,
+)
 
 from .conftest import AUTOMATIC, DEFAULTS, HEALTH, URL, addon_settings
 
@@ -136,6 +142,7 @@ FORM = {
     },
     "thresholds": {"step_threshold_w": 200},
     "analysis": {"analysis_time": "03:15:00", "backfill_days": 30, "half_life_days": 20},
+    "review": {"review_repair": False, "review_min_uses": 5, "review_wait_factor": 3},
 }
 EXPECTED = {
     "pv_entity": "sensor.other_solar_power",
@@ -145,6 +152,7 @@ EXPECTED = {
     "step_threshold_w": 200.0,
     "analysis_time": "03:15",
     "half_life_days": 20,
+    "review_wait_factor": 3.0,
 }
 
 
@@ -173,6 +181,12 @@ def test_suggested_values() -> None:
     assert values["analysis"]["backfill_days"] == 5
     assert values["analysis"]["analysis_time"] == "04:30:00"
     assert "peak_threshold_w" not in values["thresholds"]
+    assert values["review"] == {
+        "review_min_uses": 5,
+        "review_min_days": 3,
+        "review_wait_days": 14,
+        "review_wait_factor": 2.0,
+    }
 
 
 async def test_options_flow_pushes_the_settings(
@@ -188,7 +202,7 @@ async def test_options_flow_pushes_the_settings(
     addon.mock_calls.clear()
     result = await hass.config_entries.options.async_configure(result["flow_id"], FORM)
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options == {OPT_SETTINGS: EXPECTED}
+    assert entry.options == {OPT_SETTINGS: EXPECTED, OPT_REVIEW_REPAIR: False}
     puts = [call for call in addon.mock_calls if call[0].lower() == "put"]
     assert len(puts) == 1
     assert str(puts[0][1]) == f"{URL}/api/settings"

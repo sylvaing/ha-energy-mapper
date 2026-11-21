@@ -94,8 +94,9 @@ thermostat), which are grouped into one session with their duty cycle.
   **aarch64** (Raspberry Pi 4/5 included: a day is analysed in a few seconds at most).
   Home Assistant Container and Core are not supported yet: a standalone image is planned in
   [#19](https://github.com/sylvaing/ha-energy-mapper/issues/19).
-- **Home Assistant 2025.10 or later** for the integration, add-on **0.5.0 or later** for the
-  appliance management (0.4.0 for the appliance statistics; developed and tested on 2026.10 and
+- **Home Assistant 2025.10 or later** for the integration, add-on **0.6.0 or later** for the
+  review of the signatures (0.5.0 for the appliance management, 0.4.0 for the appliance
+  statistics; developed and tested on 2026.10 and
   2026.11; the panel uses Home Assistant's own date picker when available, and a plain date
   field otherwise).
 - [HACS](https://hacs.xyz) to install the integration (or a manual copy).
@@ -180,6 +181,10 @@ precedence over the add-on options.
 | | Signature half-life | 30 days | Age at which a past use counts half in the signature registry. Shorter forgets replaced appliances faster; longer keeps rare ones known longer. |
 | | Keep full reports | 90 days | Full reports keep the per-minute curve; older days keep a summary (totals, peaks, activations). |
 | | Peak reference window | 30 days | Notable peaks are relative to the highest power of these days, to follow the seasons. |
+| Review of the signatures | Notify in Repairs | on | One notice in **Settings → Repairs** while signatures wait in the *To review* section of the panel. |
+| | Uses / different days before a signature is proposed | 5 / 3 | A signature is proposed once it was seen that many times on that many different days. |
+| | *Wait*: propose again after | 14 days | A signature put on hold comes back after these days, or once its uses reached… |
+| | *Wait*: or after this many times more uses | 2 | …twice the number it had (6 uses: back at 12). |
 
 The same settings exist as **add-on options** (*Configuration* tab of the add-on), useful
 without the integration. See the [add-on documentation](energy_mapper/DOCS.md#configuration).
@@ -192,6 +197,24 @@ and number and time formats, and adapts to narrow screens (mobile app).
 - **Day picker**: Home Assistant's date picker, with presets *Yesterday*, *Day before
   yesterday*, *Highest use (30 days)* and *Last notable peak*. Administrators can **analyse a
   day** again (after changing the settings, for example).
+- **To review** (administrators): the recurring signatures seen often enough to be an
+  appliance (5 uses on 3 different days by default), most energy first, with their power,
+  duration or on/off rhythm, number of uses, energy, usual hours and up to three recent
+  **examples**: select one to open its day zoomed on it. For each one:
+  - **Validate…**: say what it is: a **new appliance** (give it a name: Energy Mapper creates
+    the appliance, its sensors and hourly energy statistics from the signature); an appliance
+    **driven by a switch** without power measurement (relay-driven water heater, pilot-wire
+    radiator: its state becomes the ground truth and Energy Mapper measures its power); or an
+    appliance **with a power sensor** (a smart plug: it becomes a sub-meter, subtracted before
+    the analysis, so its steps no longer appear). The switch or sensor is picked with Home
+    Assistant's entity picker;
+  - **Wait**: hide it until there is clearly more data (twice as many uses, or 14 days later);
+  - **Ignore**: never propose it again. The *Ignored* list below brings one back (*Restore*).
+    A signature whose appliance you deleted is listed there too.
+
+  Decisions are kept by the add-on (in Home Assistant backups). A single notice in
+  **Settings → Repairs** says how many signatures wait for a review and links to this
+  section; it disappears when nothing is left, and can be turned off in the options.
 - **Things to check**: what the analysis found in your setup, such as a device without a power
   sensor, an unavailable sensor, a battery whose sign should be checked, or a **tracking gap**
   (a switch-driven device whose declared energy is far from what was measured, typically an
@@ -224,8 +247,8 @@ curve.
 Each **appliance** is an entry of its own on the integration page (**Settings → Devices &
 services → Energy Mapper**, under *Appliances*), with a device under the *Energy Mapper*
 service device. Appliances are created automatically for the **switched loads** (once their
-power has been learned) and, with the review in the panel, for the **signatures you name**.
-From the integration page you can:
+power has been learned) and, from the *To review* section of the panel, for the **signatures
+you validate**. From the integration page you can:
 
 - **add** one by hand (*Add appliance*): driven by a switch (a relay, a pilot wire), or not
   seen yet, described by its power and a typical use ("Kettle, 2000 W, short"): its first use
@@ -281,7 +304,7 @@ on/off states come with real-time detection
   add-on's `/data` folder, is **included in Home Assistant backups**, and stays bounded (a few
   MB) whatever the age of the installation.
 - The panel and its websocket commands need a logged-in Home Assistant user; analysing a day
-  requires an administrator.
+  and reviewing signatures require an administrator.
 
 ## Limits
 
@@ -466,8 +489,9 @@ regroupés en une seule session avec leur rapport cyclique.
   **aarch64** (Raspberry Pi 4/5 compris : une journée s'analyse en quelques secondes au plus).
   Home Assistant Container et Core ne sont pas encore pris en charge : une image autonome est
   prévue dans [#19](https://github.com/sylvaing/ha-energy-mapper/issues/19).
-- **Home Assistant 2025.10 ou plus récent** pour l'intégration, add-on **0.5.0 ou plus
-  récent** pour la gestion des appareils (0.4.0 pour leurs statistiques ; développée et testée sur
+- **Home Assistant 2025.10 ou plus récent** pour l'intégration, add-on **0.6.0 ou plus
+  récent** pour l'examen des signatures (0.5.0 pour la gestion des appareils, 0.4.0 pour leurs
+  statistiques ; développée et testée sur
   2026.10 et 2026.11 ; le panneau utilise le sélecteur de date de Home Assistant quand il est
   disponible, un simple champ de date sinon).
 - [HACS](https://hacs.xyz) pour installer l'intégration (ou une copie manuelle).
@@ -556,6 +580,10 @@ options de l'add-on.
 | | Demi-vie des signatures | 30 jours | Âge auquel une utilisation passée compte pour moitié dans le registre des signatures. Plus court oublie plus vite un appareil remplacé ; plus long garde plus longtemps les appareils rares. |
 | | Conservation des rapports complets | 90 jours | Les rapports complets gardent la courbe minute par minute ; les jours plus anciens gardent un résumé (totaux, pics, utilisations). |
 | | Fenêtre de référence des pics | 30 jours | Les pics notables sont relatifs à la puissance la plus haute de ces jours, pour suivre les saisons. |
+| Examen des signatures | Signaler dans Réparations | oui | Un seul avis dans **Paramètres → Réparations** tant que des signatures attendent dans la section *À examiner* du panneau. |
+| | Utilisations / jours différents avant de proposer une signature | 5 / 3 | Une signature est proposée dès qu'elle a été vue ce nombre de fois sur ce nombre de jours différents. |
+| | *Attendre* : proposer de nouveau après | 14 jours | Une signature mise en attente revient après ces jours, ou quand ses utilisations ont atteint… |
+| | *Attendre* : ou après ce multiple d'utilisations | 2 | …le double de son nombre (6 utilisations : retour à 12). |
 
 Les mêmes réglages existent comme **options de l'add-on** (onglet *Configuration* de
 l'add-on), utiles sans l'intégration. Voir la
@@ -569,6 +597,28 @@ français) et ses formats de nombres et d'heures, et s'adapte aux écrans étroi
 - **Choix du jour** : le sélecteur de date de Home Assistant, avec les raccourcis *Hier*,
   *Avant-hier*, *Conso. max. (30 j)* et *Dernier pic notable*. Les administrateurs peuvent
   **analyser un jour** à nouveau (après un changement de réglages, par exemple).
+- **À examiner** (administrateurs) : les signatures récurrentes vues assez souvent pour être
+  un appareil (5 utilisations sur 3 jours différents par défaut), les plus gourmandes d'abord,
+  avec leur puissance, leur durée ou leur rythme marche/arrêt, leur nombre d'utilisations,
+  leur énergie, leurs heures habituelles et jusqu'à trois **exemples** récents : sélectionnez-en
+  un pour ouvrir son jour zoomé dessus. Pour chacune :
+  - **Valider…** : dites ce que c'est : un **nouvel appareil** (donnez-lui un nom : Energy
+    Mapper crée l'appareil, ses capteurs et ses statistiques d'énergie horaires à partir de la
+    signature) ; un appareil **commandé par un interrupteur** sans mesure de puissance
+    (chauffe-eau sur relais, radiateur sur fil pilote : son état devient la référence et
+    Energy Mapper mesure sa puissance) ; ou un appareil **avec un capteur de puissance** (une
+    prise connectée : il devient un sous-compteur, soustrait avant l'analyse, ses marches
+    n'apparaissent plus). L'interrupteur ou le capteur se choisit avec le sélecteur d'entités
+    de Home Assistant ;
+  - **Attendre** : la masquer jusqu'à avoir nettement plus de données (deux fois plus
+    d'utilisations, ou 14 jours plus tard) ;
+  - **Ignorer** : ne plus jamais la proposer. La liste *Ignorées* en dessous permet de revenir
+    en arrière (*Rétablir*). Une signature dont vous avez supprimé l'appareil y figure aussi.
+
+  Les décisions sont gardées par l'add-on (dans les sauvegardes de Home Assistant). Un seul
+  avis dans **Paramètres → Réparations** indique combien de signatures attendent et renvoie à
+  cette section ; il disparaît quand il n'y a plus rien, et peut être désactivé dans les
+  options.
 - **À vérifier** : ce que l'analyse a trouvé dans votre configuration, comme un appareil sans
   capteur de puissance, un capteur indisponible, une batterie dont le signe est à vérifier,
   ou un **écart de suivi** (un appareil piloté dont l'énergie déclarée est loin de ce qui a
@@ -603,8 +653,8 @@ signatures, sans la courbe.
 Chaque **appareil** est une entrée à part sur la page de l'intégration (**Paramètres →
 Appareils et services → Energy Mapper**, sous *Appareils*), avec son appareil Home Assistant
 rattaché à l'appareil de service *Energy Mapper*. Les appareils sont créés automatiquement
-pour les **appareils pilotés** (dès que leur puissance a été apprise) et, avec la revue dans le
-panneau, pour les **signatures que vous nommez**. Depuis la page de l'intégration, vous pouvez :
+pour les **appareils pilotés** (dès que leur puissance a été apprise) et, depuis la section
+*À examiner* du panneau, pour les **signatures que vous validez**. Depuis la page de l'intégration, vous pouvez :
 
 - en **ajouter** un à la main (*Ajouter un appareil*) : piloté par un interrupteur (relais, fil
   pilote), ou pas encore vu, décrit par sa puissance et une utilisation typique
@@ -665,7 +715,7 @@ puissance et l'état de marche en direct viendront avec la détection en temps r
   dossier `/data` de l'add-on, **incluses dans les sauvegardes de Home Assistant**, et restent
   bornées (quelques Mo) quel que soit l'âge de l'installation.
 - Le panneau et ses commandes websocket demandent un utilisateur Home Assistant connecté ;
-  analyser un jour demande un administrateur.
+  analyser un jour et examiner les signatures demandent un administrateur.
 
 ### Limites
 

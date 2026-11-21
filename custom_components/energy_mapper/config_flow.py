@@ -57,8 +57,11 @@ from .const import (
     CONF_URL,
     DEFAULT_URL,
     DOMAIN,
+    OPT_REVIEW_REPAIR,
     OPT_SETTINGS,
+    REVIEW_KEYS,
     SENSOR_KEYS,
+    SWITCH_DOMAINS,
     THRESHOLD_KEYS,
 )
 from .coordinator import EnergyMapperConfigEntry
@@ -66,9 +69,15 @@ from .coordinator import EnergyMapperConfigEntry
 _LOGGER = logging.getLogger(__name__)
 
 TITLE = "Energy Mapper"
-# entities whose state tells whether an appliance runs
-SWITCH_DOMAINS = ["switch", "input_boolean", "light", "fan", "binary_sensor", "climate", "water_heater"]
-INT_KEYS = ("backfill_days", "half_life_days", "report_retention_days", "peak_window_days")
+INT_KEYS = (
+    "backfill_days",
+    "half_life_days",
+    "report_retention_days",
+    "peak_window_days",
+    "review_min_uses",
+    "review_min_days",
+    "review_wait_days",
+)
 
 
 def _normalize_url(url: str) -> str | None:
@@ -241,6 +250,18 @@ OPTIONS_SCHEMA = vol.Schema(
             ),
             {"collapsed": True},
         ),
+        vol.Required("review"): section(
+            vol.Schema(
+                {
+                    vol.Optional(OPT_REVIEW_REPAIR, default=True): BooleanSelector(),
+                    vol.Optional("review_min_uses"): _number(2, 1000),
+                    vol.Optional("review_min_days"): _number(1, 365),
+                    vol.Optional("review_wait_days"): _number(1, 365),
+                    vol.Optional("review_wait_factor"): _number(1.2, 10, 0.1),
+                }
+            ),
+            {"collapsed": True},
+        ),
     }
 )
 SECTIONS = {
@@ -248,6 +269,7 @@ SECTIONS = {
     "loads": ("switched_loads", "excluded_switched_loads"),
     "thresholds": THRESHOLD_KEYS,
     "analysis": ANALYSIS_KEYS,
+    "review": REVIEW_KEYS,
 }
 
 
@@ -278,7 +300,7 @@ def suggested_values(addon: dict[str, Any]) -> dict[str, dict[str, Any]]:
         flat["switched_loads"] = list(loads.values())
     if settings.get("excluded_switched_loads"):
         flat["excluded_switched_loads"] = list(settings["excluded_switched_loads"])
-    for key in (*BOOL_KEYS, *THRESHOLD_KEYS, *ANALYSIS_KEYS):
+    for key in (*BOOL_KEYS, *THRESHOLD_KEYS, *ANALYSIS_KEYS, *REVIEW_KEYS):
         value = settings.get(key, defaults.get(key))
         if value is not None:
             flat[key] = value
@@ -312,7 +334,7 @@ def settings_from_form(user_input: dict[str, Any], addon: dict[str, Any]) -> dic
     excluded = list(dict.fromkeys(flat.get("excluded_switched_loads") or []))
     if excluded:
         out["excluded_switched_loads"] = excluded
-    for key in (*BOOL_KEYS, *THRESHOLD_KEYS, *ANALYSIS_KEYS):
+    for key in (*BOOL_KEYS, *THRESHOLD_KEYS, *ANALYSIS_KEYS, *REVIEW_KEYS):
         value = flat.get(key)
         if value is None or value == "":
             continue
@@ -320,7 +342,7 @@ def settings_from_form(user_input: dict[str, Any], addon: dict[str, Any]) -> dic
             value = str(value)[:5]
         elif key in INT_KEYS:
             value = int(value)
-        elif key in THRESHOLD_KEYS:
+        elif key in THRESHOLD_KEYS or key == "review_wait_factor":
             value = float(value)
         if value != defaults.get(key):
             out[key] = value
@@ -360,8 +382,15 @@ class EnergyMapperOptionsFlow(OptionsFlow):
             else:
                 if self.config_entry.state is ConfigEntryState.LOADED:
                     self.config_entry.runtime_data.coordinator.settings_synced = True
-                return self.async_create_entry(data={**self.config_entry.options, OPT_SETTINGS: settings})
-        values = suggested_values(self._addon) if user_input is None else user_input
+                repair = bool((user_input.get("review") or {}).get(OPT_REVIEW_REPAIR, True))
+                return self.async_create_entry(
+                    data={**self.config_entry.options, OPT_SETTINGS: settings, OPT_REVIEW_REPAIR: repair}
+                )
+        if user_input is None:
+            values = suggested_values(self._addon)
+            values["review"][OPT_REVIEW_REPAIR] = self.config_entry.options.get(OPT_REVIEW_REPAIR, True)
+        else:
+            values = user_input
         return self.async_show_form(
             step_id="init",
             data_schema=self.add_suggested_values_to_schema(OPTIONS_SCHEMA, values),

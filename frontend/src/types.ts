@@ -14,6 +14,7 @@ export interface HomeAssistant {
   config: { time_zone: string };
   user?: { is_admin: boolean; name?: string };
   themes?: { darkMode?: boolean; theme?: string };
+  states?: Record<string, { entity_id: string; state?: string; attributes?: Record<string, unknown> }>;
   callWS<T>(msg: Record<string, unknown>): Promise<T>;
 }
 
@@ -146,6 +147,40 @@ export interface RegistrySignature {
   last_seen: string;
   hours: number[];
   energy_kwh: number;
+  weighted_energy_kwh?: number;
+  examples?: SignatureExample[];
+  appliance?: string | null;
+}
+
+export interface SignatureExample {
+  day: string;
+  start: number;
+  end: number;
+  power_w: number;
+}
+
+export type ReviewState = "proposed" | "waiting" | "ignored" | "validated" | "immature";
+
+export interface ReviewSignature extends RegistrySignature {
+  review_state: ReviewState;
+  /** the decision recorded by the add-on */
+  review?: {
+    state: "waiting" | "ignored" | "validated";
+    at: number;
+    count?: number;
+    until_count?: number;
+    until?: number;
+    appliance?: string;
+  };
+}
+
+/** energy_mapper/review */
+export interface ReviewListing {
+  criteria: { min_uses: number; min_days: number; wait_days: number; wait_factor: number };
+  now: number;
+  counts: Record<string, number>;
+  signatures: ReviewSignature[];
+  repair?: boolean;
 }
 
 export interface RegistrySwitchedLoad {

@@ -86,6 +86,21 @@
               "analysis_time": "Une nouvelle heure s'applique après la prochaine analyse.",
               "half_life_days": "Âge auquel une utilisation passée compte pour moitié dans le registre des signatures."
             }
+          },
+          "review": {
+            "name": "Examen des signatures",
+            "data": {
+              "review_repair": "Signaler dans Réparations",
+              "review_min_uses": "Utilisations avant de proposer une signature",
+              "review_min_days": "Jours différents avant de proposer une signature",
+              "review_wait_days": "« Attendre » : proposer de nouveau après (jours)",
+              "review_wait_factor": "« Attendre » : ou après ce multiple d'utilisations"
+            },
+            "data_description": {
+              "review_repair": "Un seul avis dans Paramètres > Réparations tant que des signatures attendent dans la section « À examiner » du panneau Energy Mapper.",
+              "review_min_uses": "Le panneau propose une signature récurrente dès qu'elle a été vue ce nombre de fois, sur au moins autant de jours différents qu'indiqué ci-dessous.",
+              "review_wait_factor": "Par exemple 2 : une signature mise en attente après 6 utilisations revient après 12 utilisations, ou après le nombre de jours ci-dessus."
+            }
           }
         }
       }
@@ -255,6 +270,12 @@
       "last_analysis": {
         "name": "Dernière analyse"
       }
+    }
+  },
+  "issues": {
+    "signatures_to_review": {
+      "title": "Energy Mapper : signatures à examiner",
+      "description": "Energy Mapper a trouvé des signatures récurrentes qui peuvent être des appareils (à examiner : {count}). Ouvrez le [panneau Energy Mapper]({url}) pour les nommer, attendre plus de données ou les ignorer. Cet avis peut être désactivé dans les options de l'intégration."
     }
   }
 }

@@ -17,10 +17,11 @@ import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import config_validation as cv
 
 from .api import EnergyMapperApiError, EnergyMapperClient, EnergyMapperConnectionError, EnergyMapperError
-from .const import CONF_URL, DOMAIN, OPT_SETTINGS
-from .coordinator import EnergyMapperConfigEntry
+from .const import CONF_URL, DOMAIN, OPT_REVIEW_REPAIR, OPT_SETTINGS
+from .coordinator import EnergyMapperConfigEntry, EnergyMapperCoordinator, ReviewError
 
 DAY = vol.Match(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -36,7 +37,20 @@ ERR_ADDON_UNAVAILABLE = "addon_unavailable"
 @callback
 def async_register_commands(hass: HomeAssistant) -> None:
     """Register the commands of the panel."""
-    for handler in (ws_status, ws_days, ws_report, ws_analyze, ws_day_stats, ws_signatures, ws_settings):
+    for handler in (
+        ws_status,
+        ws_days,
+        ws_report,
+        ws_analyze,
+        ws_day_stats,
+        ws_signatures,
+        ws_settings,
+        ws_review,
+        ws_validate,
+        ws_wait,
+        ws_ignore,
+        ws_restore,
+    ):
         websocket_api.async_register_command(hass, handler)
 
 
@@ -214,3 +228,100 @@ async def ws_settings(
 ) -> None:
     """The settings as the add-on knows them (they are changed in the options)."""
     await _relay(hass, connection, msg, lambda client: client.get_settings())
+
+
+# ---------------------------------------------------------------------------
+# review of the signatures (#10): administrators only
+# ---------------------------------------------------------------------------
+SIGNATURE_ID = vol.All(str, vol.Length(min=1, max=64))
+
+
+async def _review(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+    call: Callable[[EnergyMapperCoordinator], Awaitable[dict[str, Any]]],
+) -> None:
+    async def run(client: EnergyMapperClient) -> dict[str, Any]:
+        entry = _entry(hass)
+        if entry is None:  # removed meanwhile
+            raise ReviewError(ERR_NOT_LOADED, "Energy Mapper is not set up")
+        return await call(entry.runtime_data.coordinator)
+
+    try:
+        await _relay(hass, connection, msg, run)
+    except ReviewError as err:
+        connection.send_error(msg["id"], err.code, err.message)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "energy_mapper/review"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_review(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """The signatures to review, waiting and ignored (``GET /api/review``),
+    and whether the Repairs notice is on."""
+
+    async def review(coordinator: EnergyMapperCoordinator) -> dict[str, Any]:
+        listing = await coordinator.async_review()
+        return {**listing, "repair": coordinator.config_entry.options.get(OPT_REVIEW_REPAIR, True)}
+
+    await _review(hass, connection, msg, review)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "energy_mapper/validate",
+        vol.Required("signature_id"): SIGNATURE_ID,
+        vol.Required("name"): vol.All(str, vol.Length(min=1, max=100)),
+        vol.Optional("entity_id"): cv.entity_id,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_validate(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Validate a signature: a new appliance (config subentry) named by the
+    user, from the signature, or linked to a switch or a power sensor."""
+
+    async def validate(coordinator: EnergyMapperCoordinator) -> dict[str, Any]:
+        appliance = await coordinator.async_validate(msg["signature_id"], msg["name"], msg.get("entity_id"))
+        return {
+            "appliance": {
+                "key": appliance.key,
+                "name": appliance.name,
+                "sources": [s.as_dict() for s in appliance.sources],
+            }
+        }
+
+    await _review(hass, connection, msg, validate)
+
+
+def _decision(action: str):
+    @websocket_api.websocket_command(
+        {vol.Required("type"): f"energy_mapper/{action}", vol.Required("signature_id"): SIGNATURE_ID}
+    )
+    @websocket_api.require_admin
+    @websocket_api.async_response
+    async def handler(
+        hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+    ) -> None:
+        await _review(
+            hass,
+            connection,
+            msg,
+            lambda coordinator: coordinator.async_review_decision(msg["signature_id"], action),
+        )
+
+    handler.__name__ = f"ws_{action}"
+    handler.__doc__ = f"{action.capitalize()} a signature of the review (recorded by the add-on)."
+    return handler
+
+
+# wait: shown again when there is clearly more evidence; ignore: never proposed
+# again; restore: undo an ignore (or a wait)
+ws_wait = _decision("wait")
+ws_ignore = _decision("ignore")
+ws_restore = _decision("restore")

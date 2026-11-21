@@ -19,13 +19,14 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
 
 from .api import EnergyMapperClient
 from .appliances import SUBENTRY_TYPE, Appliance, appliance_of_key
-from .const import CONF_URL, DOMAIN
+from .const import CONF_URL, DOMAIN, ISSUE_REVIEW
 from .coordinator import STORAGE_VERSION, EnergyMapperConfigEntry, EnergyMapperCoordinator, EnergyMapperData
 from .panel import async_register_panel, async_unregister_panel
 from .websocket import async_register_commands
@@ -146,3 +147,4 @@ async def async_unload_entry(hass: HomeAssistant, entry: EnergyMapperConfigEntry
 async def async_remove_entry(hass: HomeAssistant, entry: EnergyMapperConfigEntry) -> None:
     """Forget what the entities showed; the statistics are kept (a reinstall continues them)."""
     await Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}").async_remove()
+    ir.async_delete_issue(hass, DOMAIN, ISSUE_REVIEW)
