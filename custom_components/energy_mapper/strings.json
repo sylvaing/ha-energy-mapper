@@ -94,12 +94,14 @@
               "review_min_uses": "Uses before a signature is proposed",
               "review_min_days": "Different days before a signature is proposed",
               "review_wait_days": "\"Wait\": propose again after (days)",
-              "review_wait_factor": "\"Wait\": or after this many times more uses"
+              "review_wait_factor": "\"Wait\": or after this many times more uses",
+              "review_suggest_score": "Entity suggestions: minimum match (%)"
             },
             "data_description": {
               "review_repair": "One notice in Settings > Repairs while signatures wait in the \"To review\" section of the Energy Mapper panel.",
               "review_min_uses": "The panel proposes a recurring signature once it was seen this many times, on at least as many different days as below.",
-              "review_wait_factor": "For example 2: a signature put on hold after 6 uses comes back after 12 uses, or after the number of days above."
+              "review_wait_factor": "For example 2: a signature put on hold after 6 uses comes back after 12 uses, or after the number of days above.",
+              "review_suggest_score": "The panel suggests the entity of a signature when the entity's state changes at this share of the signature's starts and stops (at least 5 of them, on 3 different days)."
             }
           }
         }

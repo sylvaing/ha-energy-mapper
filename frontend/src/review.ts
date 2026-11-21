@@ -1,6 +1,11 @@
 // The "To review" section of the panel (#10): pure helpers, unit tested.
 
-import type { RegistrySignature, ReviewListing, ReviewSignature, SignatureExample } from "./types.ts";
+import type {
+  EntitySuggestion,
+  ReviewListing,
+  ReviewSignature,
+  SignatureExample,
+} from "./types.ts";
 
 export interface ReviewGroups {
   proposed: ReviewSignature[];
@@ -73,42 +78,85 @@ export function exampleWindow(example: SignatureExample, start: number, end: num
 /** What validating does to the entity the user picks. */
 export type LinkMode = "new" | "switch" | "sensor";
 
-export const SWITCH_DOMAINS = ["switch", "input_boolean", "light", "fan", "binary_sensor", "climate", "water_heater"];
+export const SWITCH_DOMAINS = [
+  "switch",
+  "input_boolean",
+  "light",
+  "fan",
+  "binary_sensor",
+  "climate",
+  "water_heater",
+  "media_player",
+];
+/** A sensor of this device class (an operation state) is linked like a switch. */
+export const STATE_SENSOR_CLASS = "enum";
 
-/** Entity domains offered for a link mode. */
+/** Entity domains offered for a link mode (sensors: power sensors for
+ * "sensor", operation states for "switch"). */
 export function linkDomains(mode: LinkMode): string[] {
-  return mode === "sensor" ? ["sensor"] : mode === "switch" ? SWITCH_DOMAINS : [];
+  return mode === "sensor" ? ["sensor"] : mode === "switch" ? [...SWITCH_DOMAINS, "sensor"] : [];
 }
 
-/** The websocket message of a validation, or the key of the missing field. */
+/** Whether an entity can be linked in a mode. */
+export function linkable(mode: LinkMode, entityId: string, attributes?: Record<string, unknown>): boolean {
+  const domain = entityId.split(".")[0];
+  if (!linkDomains(mode).includes(domain)) return false;
+  if (domain !== "sensor") return true;
+  const dc = attributes?.device_class;
+  return mode === "sensor" ? dc !== STATE_SENSOR_CLASS : dc === STATE_SENSOR_CLASS;
+}
+
+/** The best entity suggested for a signature, if any. */
+export function bestSuggestion(sig: Pick<ReviewSignature, "suggestions">): EntitySuggestion | undefined {
+  return sig.suggestions?.[0];
+}
+
+/** The validation form a signature opens with: linked to its best suggested
+ * entity (named after it) when there is one, else a new appliance. */
+export function initialForm(
+  sig: Pick<ReviewSignature, "id" | "suggestions">,
+  friendlyName?: (entityId: string) => string | undefined,
+): { id: string; mode: LinkMode; name: string; entity: string } {
+  const best = bestSuggestion(sig);
+  if (!best) return { id: sig.id, mode: "new", name: "", entity: "" };
+  return { id: sig.id, mode: "switch", name: friendlyName?.(best.entity_id) ?? "", entity: best.entity_id };
+}
+
+/** The websocket message of a validation, or the key of the missing field.
+ * An entity the add-on suggested is linked with the states in which its
+ * appliance runs (unless they are the default "on"). */
 export function validateMessage(
-  sig: Pick<RegistrySignature, "id">,
+  sig: Pick<ReviewSignature, "id" | "suggestions">,
   mode: LinkMode,
   name: string,
   entityId: string,
+  attributes?: Record<string, unknown>,
 ): { msg: Record<string, unknown> } | { missing: "name" | "entity" } {
   const n = name.trim();
   if (!n) return { missing: "name" };
   const msg: Record<string, unknown> = { type: "energy_mapper/validate", signature_id: sig.id, name: n };
   if (mode !== "new") {
     const e = entityId.trim();
-    if (!e || !linkDomains(mode).includes(e.split(".")[0])) return { missing: "entity" };
+    if (!e || !linkable(mode, e, attributes)) return { missing: "entity" };
     msg.entity_id = e;
+    const states = sig.suggestions?.find((s) => s.entity_id === e)?.on_states ?? [];
+    if (mode === "switch" && states.length && !(states.length === 1 && states[0] === "on")) {
+      msg.on_states = [...states];
+    }
   }
   return { msg };
 }
 
 /** Entities offered by the fallback picker (when Home Assistant's own entity
  * picker is not loaded): those of the mode's domains, power sensors only for
- * a sub-meter, sorted by name. */
+ * a sub-meter, operation-state sensors only for a switch, sorted by name. */
 export function entityChoices(
   states: Record<string, { entity_id: string; attributes?: Record<string, unknown> }> | undefined,
   mode: LinkMode,
 ): Array<{ id: string; name: string }> {
-  const domains = linkDomains(mode);
   const out: Array<{ id: string; name: string }> = [];
   for (const [id, st] of Object.entries(states ?? {})) {
-    if (!domains.includes(id.split(".")[0])) continue;
+    if (!linkable(mode, id, st.attributes)) continue;
     if (mode === "sensor" && st.attributes?.device_class !== "power") continue;
     out.push({ id, name: String(st.attributes?.friendly_name ?? id) });
   }

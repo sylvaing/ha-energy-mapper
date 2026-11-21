@@ -77,6 +77,7 @@ INT_KEYS = (
     "review_min_uses",
     "review_min_days",
     "review_wait_days",
+    "review_suggest_score",
 )
 
 
@@ -258,6 +259,7 @@ OPTIONS_SCHEMA = vol.Schema(
                     vol.Optional("review_min_days"): _number(1, 365),
                     vol.Optional("review_wait_days"): _number(1, 365),
                     vol.Optional("review_wait_factor"): _number(1.2, 10, 0.1),
+                    vol.Optional("review_suggest_score"): _number(50, 100),
                 }
             ),
             {"collapsed": True},

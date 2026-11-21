@@ -117,6 +117,12 @@ sequenceDiagram
   S->>E: registry.update(previous, all summaries, now)
   E-->>S: registry
   S->>D: registry.json
+  opt days of the last 30 without stored entity changes (once per day)
+    S->>HA: REST /api/history/period (candidate entities, the day)
+    S->>D: changes/DAY.json.gz
+  end
+  S->>E: correlation.suggest(summaries, registry, signatures to review, changes)
+  S->>D: suggestions.json
 ```
 
 - **When**: on start, then every day at `analysis_time` (04:30 by default) in Home
@@ -131,7 +137,9 @@ sequenceDiagram
   `significant_changes_only=0`, for the grid, solar, battery, sub-meter and switch entities
   and the energy sensors of the switched devices (for the tracking gaps).
 - **After a pass that analysed something** (or once a day otherwise), the storage is pruned
-  and the signature registry updated. `POST /api/analyze` does the same for one day.
+  and the signature registry updated, then the entity suggestions are computed (§ 8.4).
+  `POST /api/analyze` does the same for one day. A pass with nothing to analyse never calls
+  Home Assistant: it recomputes the suggestions from the stored changes only.
 
 ### Viewing a report
 
@@ -154,7 +162,9 @@ sequenceDiagram
 
 ## 4. The engine
 
-`nilm_core.analyze()` turns raw histories into a daily report.
+`nilm_core.analyze()` turns raw histories into a daily report. Across days,
+`nilm_core/registry.py` keeps the signature registry (§ 4.8) and
+`nilm_core/correlation.py` scores entities against the signatures to review (§ 8.4).
 
 ```mermaid
 flowchart TD
@@ -372,6 +382,8 @@ Everything is under the add-on's `/data` (included in Home Assistant backups):
 | `settings.json` | Settings pushed by the integration | Until replaced (`PUT {}` deletes it) | < 64 KB |
 | `statistic_ids.json` | Energy Mapper statistic id → appliance (§ 5) | Forever (one line per appliance ever published) | KB |
 | `appliances.json` | The user's appliances pushed by the integration (§ 8.2) | Until replaced | KB |
+| `changes/YYYY-MM-DD.json.gz` | State changes of the candidate entities on one day (§ 8.4) | 31 days, and never without the day's summary | ~10–100 KB per day |
+| `suggestions.json` | Entity suggestions of the signatures to review (§ 8.4), and the candidate list | Replaced each night | a few KB to tens of KB |
 | `state.json` | `last_run`, `last_maintenance` | – | bytes |
 | `options.json` | Add-on options (written by the Supervisor) | – | bytes |
 
@@ -407,7 +419,7 @@ JSON in and out; request bodies are limited to 64 KB (413 above).
 
 | Request | Answer |
 |---|---|
-| `GET /api/health` | `200 {"status": "ok", "version": "0.6.0", "last_run": <unix time \| null>, "days": <full reports>, "signatures": <registry size>, "storage_bytes": <int>}` |
+| `GET /api/health` | `200 {"status": "ok", "version": "0.7.0", "last_run": <unix time \| null>, "days": <full reports>, "signatures": <registry size>, "storage_bytes": <int>}` |
 | `GET /api/days` | `200 {"days": [...], "summary_days": [...], "generated": {day: <unix time>}}`: days with a full report, and older days with only a summary, ascending; `generated`: when each full report was made (`generated_at`) |
 | `GET /api/report/YYYY-MM-DD` | `200` the report with registry ids; `400 {"error": "invalid_day"}`; `404 {"error": "not_found"}` |
 | `GET /api/hourly/YYYY-MM-DD` | `200` the hourly breakdown of the day (`nilm_core/hourly.py`, § 8.1); `400 invalid_day`; `404 not_found` when the day has no per-minute curve |
@@ -417,7 +429,7 @@ JSON in and out; request bodies are limited to 64 KB (413 above).
 | `PUT /api/settings` | Replaces the settings: `200 {"settings": <as stored>}`; `400 {"error": "invalid_settings" \| "invalid_json", "message"}` |
 | `GET /api/appliances` | `200 {"appliances": [...]}`: the user's appliances (§ 8.2) |
 | `PUT /api/appliances` | Replaces them: `200 {"appliances": <as stored>}`; `400 {"error": "invalid_appliances" \| "invalid_json", "message"}` |
-| `GET /api/review` | `200 {"criteria": {min_uses, min_days, wait_days, wait_factor}, "now", "counts": {proposed, waiting, ignored, validated}, "signatures": [...]}`: the registry signatures `proposed` (most weighted energy first), `waiting` and `ignored`, each with its `review_state` (§ 8.3) |
+| `GET /api/review` | `200 {"criteria": {min_uses, min_days, wait_days, wait_factor}, "now", "counts": {proposed, waiting, ignored, validated}, "signatures": [...], "suggest": {computed_at, days, candidates, min_score, unrecorded_domains, unrecorded_entities}}`: the registry signatures `proposed` (most weighted energy first), `waiting` and `ignored`, each with its `review_state` (§ 8.3) and, when some entity matches, its `suggestions` (§ 8.4) |
 | `POST /api/review` | `{"id", "action": "validate" \| "wait" \| "ignore" \| "restore", "appliance"?}`: `200 {"signature"}` with its `review_state`; `404 not_found`; `400 invalid_review` (`validate` needs `appliance`) |
 | `POST /api/signatures` | `{"kind", "band", "power_w", "label"}`: the signature of an appliance not seen yet: `200 {"signature", "created"}` (an existing unnamed signature at that power is returned, `created: false`); `409 {"error": "conflict", "message", "id"}` when that signature belongs to another appliance; `400 invalid_signature` |
 
@@ -446,7 +458,7 @@ returns its JSON unchanged.
 | `energy_mapper/signatures` | – | `GET /api/signatures` |
 | `energy_mapper/settings` | – | `GET /api/settings` (settings are changed in the options flow) |
 | `energy_mapper/review` | – | `GET /api/review` and `"repair"` (the notice is on); admin only |
-| `energy_mapper/validate` | `signature_id`, `name`, `entity_id`? | Creates the appliance (§ 8.3): `{"appliance": {"key", "name", "sources"}}`; admin only |
+| `energy_mapper/validate` | `signature_id`, `name`, `entity_id`?, `on_states`? (at most 20) | Creates the appliance (§ 8.3, § 8.4): `{"appliance": {"key", "name", "sources"}}`; admin only |
 | `energy_mapper/wait`, `energy_mapper/ignore`, `energy_mapper/restore` | `signature_id` | `POST /api/review`: `{"signature"}`; admin only |
 
 The review commands take `signature_id` (`id` is the websocket message's own id).
@@ -662,8 +674,8 @@ synchronisation exactly as for any appliance:
 | Choice in the panel | Source of the new appliance | Key |
 |---|---|---|
 | New appliance (a name) | `signature` (id, group, power) | `signature:<id>` |
-| Linked to a switch (`switch`, `input_boolean`, `light`, `fan`, `binary_sensor`, `climate`, `water_heater`) | `switched_load`: the relay is the ground truth, the engine measures its power; the signature fades out as its steps are explained | `load:<entity_id>` |
-| Linked to a power sensor (`sensor`) | `submeter`: subtracted before the analysis, its steps disappear | `submeter:<entity_id>` |
+| Linked to a switch or an entity whose state tells when it runs (`switch`, `input_boolean`, `light`, `fan`, `binary_sensor`, `climate`, `water_heater`, `media_player`, or a `sensor` of the `enum` device class) | `switched_load`: the entity is the ground truth, the engine measures its power; the signature fades out as its steps are explained. `on_states`: those learned by the suggestion (§ 8.4) when the entity was suggested and they are not just `on`, else none (the add-on's automatic polarity) | `load:<entity_id>` |
+| Linked to a power sensor (any other `sensor`) | `submeter`: subtracted before the analysis, its steps disappear | `submeter:<entity_id>` |
 
 A signature or an entity already used by an appliance is refused (`already_linked`; merging is
 done from the appliance's own flow). The integration then pushes the appliances at once
@@ -688,6 +700,77 @@ come back) and a collapsible *Ignored* list, each with *Restore*.
 
 Not in this version: the other proposals of the same section, "take over tracking" (#13) and
 "probable sub-meter" (a power sensor whose steps coincide with the whole-house steps).
+
+### 8.4 Entity suggestions (#41)
+
+The review asks the user what a signature is; often Home Assistant already knows: a fan, a
+heater on a smart relay, a washing machine reporting its programme state turn on and off
+exactly when the signature starts and stops. The add-on compares them every night and the
+panel shows the best match: "Probably: Attic fan (92 %)".
+
+**Candidates** (`suggest.py`): entities of the domains `light`, `switch`, `input_boolean`,
+`fan`, `climate`, `water_heater`, `media_player`, `binary_sensor`, and `sensor` with the `enum`
+device class (an operation state); not the diagnostic or configuration entities
+(`entity_category`), not Energy Mapper's own entities, not the entities already used by the
+analysis (switched loads, sub-meters, meters), linked to an appliance, or excluded
+(`excluded_switched_loads`). At most 500, sorted. Nothing is specific to a vendor or a name.
+Only the **state** is compared (history is read without attributes): a `climate` entity by
+its HVAC mode, not `hvac_action`.
+
+**Changes** (one history request per day, split so that the entity list of a request stays
+under 3,000 characters): for each candidate, the changes of state within the day (the first
+known state is not a change; `unavailable`/`unknown` are skipped). An entity changing more than
+100 times that day is only counted (`chatty`: that day is not compared for it); an entity
+without any recorded state is `missing`. The changes of a day are read right after the day is
+analysed, and kept in `changes/DAY.json.gz` for 31 days; days of the window without that file
+(the days analysed before 0.7.0) are read once at the next nightly run. A day whose history is
+empty for every candidate (purged by the recorder) is kept but not compared.
+
+**Scoring** (`nilm_core/correlation.py`, pure): the signatures in the `proposed` and `waiting`
+states (at most 50) and their activations of the stored summaries of the last 30 days
+(registry ids by the clustering's rule). Each activation gives an *on* step (its start) and an
+*off* step (its end); steps closer to midnight than the window are left out. The **window**
+is twice the day's mean sampling interval (`(end − start) / quality.samples`), between 60 and
+300 s. For one entity and one signature:
+
+1. For each step, the nearest change of the entity within ± window, and the state it entered.
+2. **On states**: the states entered at more on steps than off steps (`on` for a light,
+   `off` for a pilot-wire relay, `running` for an operation state…). None: no candidate.
+3. A step is **matched** when the state entered is an on state for an on step, or any other
+   state for an off step.
+4. `score` = matched / steps compared (days without stored changes, or chatty, are not
+   compared); `on_share` and `off_share` the same per kind of step; `explained` (reverse
+   share) = the entity's changes within the window of some step / all its changes on the
+   compared days, steps or not.
+
+An entity is **suggested** when `score ≥ review_suggest_score` (80 % by default), at least 5
+steps are matched on at least 3 different days, and `explained ≥ 0.3`: an entity that changes
+all the time matches every step by chance but explains few of its own changes. A random
+entity changing *r* times a day hits a step with a probability of about *r × 2 × window / 1 day*
+(7 % for 50 changes a day and a 60 s window), far from 80 %. The best 3 are kept, by score,
+then `explained`, then matches. Cost: entities × signatures × days of dictionary lookups and
+binary searches, under a second for 500 entities, 50 signatures and 30 days.
+
+**Storage and API.** `suggestions.json`: `{version, day, computed_at, days, candidates,
+min_score, unrecorded: {entities, domains}, entities: [the candidates], signatures: {id:
+[{entity_id, score, on_share, off_share, explained, matches, steps, days, days_compared,
+on_states, inverted}]}}`, replaced each night; separate from the registry so that the nightly
+re-clustering never has to carry it. `GET /api/review` adds `suggestions` to each listed
+signature that has some (dropping the entities linked to an appliance since) and `suggest` to
+the listing. `unrecorded.domains`: the candidate domains none of whose entities has any
+recorded state on the days that have some history (recorder exclusions); the panel names them
+under the section's hint, without blocking anything. The integration relays the listing as is.
+
+**Linking.** The panel's *Validate…* form opens on *An appliance driven by a switch* with the
+best entity picked and named after it (friendly name), and the suggested entities as chips;
+another entity can still be chosen. `energy_mapper/validate` accepts `on_states`, sent when
+the entity is one of the suggestions and its on states are not just `on`. Any linked entity
+becomes a **switched load** (§ 4.3): the engine handles any state values once the on states
+are known (and still tries the opposite polarity), so every candidate domain is usable as a
+ground truth, an operation-state sensor included. The derivation from the Energy dashboard
+(§ 5) keeps `switch` and `input_boolean` only, for estimates driven by a switch: a light with
+an estimate stays an estimate (subtracted), since a light below the step threshold could
+never be measured as a switched load.
 
 ## 9. Settings and precedence
 
@@ -717,7 +800,7 @@ list, § 8.2), `step_threshold_w` 50–10000,
 `peak_threshold_w` 100–100000, `analysis_time` `HH:MM`, `backfill_days` 0–365,
 `half_life_days` and `peak_window_days` 1–365, `report_retention_days` 7–3650,
 `review_min_uses` 2–1000, `review_min_days` and `review_wait_days` 1–365, `review_wait_factor`
-1.2–10. `null`, `""`
+1.2–10, `review_suggest_score` 50–100 (%, § 8.4). `null`, `""`
 and `[]` mean absent; unknown keys refuse the whole request. A new `analysis_time` applies
 after the next pass; everything else applies to the next analysis.
 
@@ -782,6 +865,10 @@ cannot be read).
 - Review decisions live in the registry: a registry rebuilt from scratch (unreadable file)
   proposes the ignored and waiting signatures again (appliances are not affected).
 - The review does not propose "take over tracking" (#13) or "probable sub-meter" yet.
+- Entity suggestions compare states only (no attributes such as `hvac_action`), start after
+  the first nightly run following the update, and cannot see entities the recorder excludes.
+  Two entities that always change together (a relay and a binary sensor mirroring it) are
+  both suggested; the user picks one.
 - The options flow cannot express "no sub-meters": an empty field falls back to the automatic
   value (#33). Excluding a switch is possible.
 
@@ -789,6 +876,6 @@ cannot be read).
 
 | Milestone | Issues |
 |---|---|
-| [v1 – Validate & track](https://github.com/sylvaing/ha-energy-mapper/milestone/2) | Review of the signatures in the panel (#10, done), one config subentry per appliance (#11, done), per-appliance entities (#12, done), take over tracking in the Energy dashboard (#13), learn from measured devices (#14), nightly self-test (#15), variable loads (#16), public-dataset benchmark with NILMTK metrics (#28) |
+| [v1 – Validate & track](https://github.com/sylvaing/ha-energy-mapper/milestone/2) | Review of the signatures in the panel (#10, done), entity suggestions (#41, done), one config subentry per appliance (#11, done), per-appliance entities (#12, done), take over tracking in the Energy dashboard (#13), learn from measured devices (#14), nightly self-test (#15), variable loads (#16), public-dataset benchmark with NILMTK metrics (#28) |
 | [v2 – Live](https://github.com/sylvaing/ha-energy-mapper/milestone/3) | Real-time detection (#17), per-phase analysis (#18), multi-phase appliance cycles (#26) |
 | [v3 – Publish](https://github.com/sylvaing/ha-energy-mapper/milestone/4) | Standalone Docker image for Container/Core (#19), release process and store listings (#20) |

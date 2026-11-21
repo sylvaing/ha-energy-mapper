@@ -10,8 +10,8 @@ house consumption into base load, measured devices, switch-driven appliances and
 
 > **Status: experimental.** The nightly report is complete; appliances get their own devices,
 > sensors and hourly energy for the Energy dashboard, and can be renamed, re-linked, merged,
-> deleted or added by hand; reviewing signatures in the panel comes next (see the
-> [roadmap](#roadmap)). Feedback from installations other than the developer's is very welcome.
+> deleted or added by hand; the signatures to review are listed in the panel, with the
+> entity each one probably is (see the [roadmap](#roadmap)). Feedback from installations other than the developer's is very welcome.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/sylvaing/ha-energy-mapper/main/docs/images/panel-dark.png">
@@ -94,9 +94,9 @@ thermostat), which are grouped into one session with their duty cycle.
   **aarch64** (Raspberry Pi 4/5 included: a day is analysed in a few seconds at most).
   Home Assistant Container and Core are not supported yet: a standalone image is planned in
   [#19](https://github.com/sylvaing/ha-energy-mapper/issues/19).
-- **Home Assistant 2025.10 or later** for the integration, add-on **0.6.0 or later** for the
-  review of the signatures (0.5.0 for the appliance management, 0.4.0 for the appliance
-  statistics; developed and tested on 2026.10 and
+- **Home Assistant 2025.10 or later** for the integration, add-on **0.7.0 or later** for the
+  entity suggestions (0.6.0 for the review of the signatures, 0.5.0 for the appliance
+  management, 0.4.0 for the appliance statistics; developed and tested on 2026.10 and
   2026.11; the panel uses Home Assistant's own date picker when available, and a plain date
   field otherwise).
 - [HACS](https://hacs.xyz) to install the integration (or a manual copy).
@@ -185,6 +185,7 @@ precedence over the add-on options.
 | | Uses / different days before a signature is proposed | 5 / 3 | A signature is proposed once it was seen that many times on that many different days. |
 | | *Wait*: propose again after | 14 days | A signature put on hold comes back after these days, or once its uses reached… |
 | | *Wait*: or after this many times more uses | 2 | …twice the number it had (6 uses: back at 12). |
+| | Entity suggestions: minimum match | 80 % | An entity is suggested for a signature when its state changes at this share of the signature's starts and stops (at least 5 of them, on 3 different days). |
 
 The same settings exist as **add-on options** (*Configuration* tab of the add-on), useful
 without the integration. See the [add-on documentation](energy_mapper/DOCS.md#configuration).
@@ -208,6 +209,10 @@ and number and time formats, and adapts to narrow screens (mobile app).
     appliance **with a power sensor** (a smart plug: it becomes a sub-meter, subtracted before
     the analysis, so its steps no longer appear). The switch or sensor is picked with Home
     Assistant's entity picker;
+  - **Probably: Attic fan (92 %)**: the entity whose state changes when the signature starts
+    and stops, found by Energy Mapper (see below). *Validate…* then opens with it already
+    picked and named after it; the other suggested entities are one click away, and any other
+    entity can still be chosen;
   - **Wait**: hide it until there is clearly more data (twice as many uses, or 14 days later);
   - **Ignore**: never propose it again. The *Ignored* list below brings one back (*Restore*).
     A signature whose appliance you deleted is listed there too.
@@ -215,6 +220,24 @@ and number and time formats, and adapts to narrow screens (mobile app).
   Decisions are kept by the add-on (in Home Assistant backups). A single notice in
   **Settings → Repairs** says how many signatures wait for a review and links to this
   section; it disappears when nothing is left, and can be turned off in the options.
+
+  **Entity suggestions.** Every night, for each signature to review, the add-on compares its
+  starts and stops of the last 30 days with the state changes of your entities that may tell
+  when an appliance runs: lights, switches, input booleans, fans, climate and water heater
+  entities (their mode), media players, binary sensors, and sensors reporting an operation
+  state (`enum` device class, such as a washing machine's programme state). An entity is
+  suggested when its state changes within a minute or two (twice the meter's reporting
+  interval) of at least 80 % of the starts and stops, at least 5 times on 3 different days,
+  and when at least 30 % of its own changes happen at those times (an entity that changes all
+  the time is never suggested). The states it is in while the appliance runs are learned too:
+  a pilot-wire relay that is *off* while its radiator heats, or a washing machine reporting
+  *running*, is linked with the right states. Entities already linked to an appliance or used
+  as a switched load are not compared. The first suggestions appear after the first nightly
+  analysis following the update (the past days are then read once from the recorder).
+  Entities the recorder does not keep cannot be compared: the section says which kinds of
+  entities are not recorded at all. Lights and small devices below the step threshold
+  (300 W) never match: suggestions mostly help with large loads (heaters, fans, connected
+  appliances, audio and video equipment).
 - **Things to check**: what the analysis found in your setup, such as a device without a power
   sensor, an unavailable sensor, a battery whose sign should be checked, or a **tracking gap**
   (a switch-driven device whose declared energy is far from what was measured, typically an
@@ -323,6 +346,8 @@ on/off states come with real-time detection
 - Three-phase installations are analysed on the sum of the phases (per-phase analysis:
   [#18](https://github.com/sylvaing/ha-energy-mapper/issues/18)).
 - The texts of *Things to check* come from the add-on in English.
+- Entity suggestions compare the **state** of the entities only: a climate entity is compared
+  by its mode, not by its `hvac_action` attribute (attributes are not read).
 
 ## Roadmap
 
@@ -331,8 +356,9 @@ See the [milestones](https://github.com/sylvaing/ha-energy-mapper/milestones):
 - [**v0 – Nightly report**](https://github.com/sylvaing/ha-energy-mapper/milestone/1): done.
   Read-only nightly analysis, sidebar panel.
 - [**v1 – Validate & track**](https://github.com/sylvaing/ha-energy-mapper/milestone/2): review
-  signatures in the panel (name one, or link it to an existing switch or power sensor), one
-  entry per appliance and per-appliance entities and hourly energy statistics (done), "take
+  signatures in the panel (name one, or link it to an existing switch or power sensor), with
+  the entity each one probably is, one entry per appliance and per-appliance entities and
+  hourly energy statistics (done), "take
   over tracking" in the Energy dashboard,
   learning from measured devices, a nightly self-test with a success rate, variable loads, and
   a benchmark on public NILM datasets ([#28](https://github.com/sylvaing/ha-energy-mapper/issues/28)).
@@ -412,8 +438,9 @@ explique les pics. Tout reste en local.
 
 > **État : expérimental.** Le rapport de nuit est complet ; les appareils ont leurs appareils
 > Home Assistant, capteurs et énergie heure par heure pour le tableau Énergie, et peuvent être
-> renommés, reliés autrement, fusionnés, supprimés ou ajoutés à la main ; la revue des
-> signatures dans le panneau vient ensuite (voir la [feuille de route](#feuille-de-route)). Les retours d'autres installations que celle du
+> renommés, reliés autrement, fusionnés, supprimés ou ajoutés à la main ; les signatures à
+> examiner sont listées dans le panneau, avec l'entité qu'elles sont probablement (voir la
+> [feuille de route](#feuille-de-route)). Les retours d'autres installations que celle du
 > développeur sont très bienvenus.
 
 <img alt="Le panneau Energy Mapper en français (données synthétiques)" src="https://raw.githubusercontent.com/sylvaing/ha-energy-mapper/main/docs/images/panel-fr.png">
@@ -489,9 +516,9 @@ regroupés en une seule session avec leur rapport cyclique.
   **aarch64** (Raspberry Pi 4/5 compris : une journée s'analyse en quelques secondes au plus).
   Home Assistant Container et Core ne sont pas encore pris en charge : une image autonome est
   prévue dans [#19](https://github.com/sylvaing/ha-energy-mapper/issues/19).
-- **Home Assistant 2025.10 ou plus récent** pour l'intégration, add-on **0.6.0 ou plus
-  récent** pour l'examen des signatures (0.5.0 pour la gestion des appareils, 0.4.0 pour leurs
-  statistiques ; développée et testée sur
+- **Home Assistant 2025.10 ou plus récent** pour l'intégration, add-on **0.7.0 ou plus
+  récent** pour les suggestions d'entité (0.6.0 pour l'examen des signatures, 0.5.0 pour la
+  gestion des appareils, 0.4.0 pour leurs statistiques ; développée et testée sur
   2026.10 et 2026.11 ; le panneau utilise le sélecteur de date de Home Assistant quand il est
   disponible, un simple champ de date sinon).
 - [HACS](https://hacs.xyz) pour installer l'intégration (ou une copie manuelle).
@@ -584,6 +611,7 @@ options de l'add-on.
 | | Utilisations / jours différents avant de proposer une signature | 5 / 3 | Une signature est proposée dès qu'elle a été vue ce nombre de fois sur ce nombre de jours différents. |
 | | *Attendre* : proposer de nouveau après | 14 jours | Une signature mise en attente revient après ces jours, ou quand ses utilisations ont atteint… |
 | | *Attendre* : ou après ce multiple d'utilisations | 2 | …le double de son nombre (6 utilisations : retour à 12). |
+| | Suggestions d'entité : concordance minimale | 80 % | Une entité est suggérée pour une signature quand son état change à cette part des démarrages et arrêts de la signature (au moins 5, sur 3 jours différents). |
 
 Les mêmes réglages existent comme **options de l'add-on** (onglet *Configuration* de
 l'add-on), utiles sans l'intégration. Voir la
@@ -610,6 +638,10 @@ français) et ses formats de nombres et d'heures, et s'adapte aux écrans étroi
     prise connectée : il devient un sous-compteur, soustrait avant l'analyse, ses marches
     n'apparaissent plus). L'interrupteur ou le capteur se choisit avec le sélecteur d'entités
     de Home Assistant ;
+  - **Probablement : Ventilateur des combles (92 %)** : l'entité dont l'état change quand la
+    signature démarre et s'arrête, trouvée par Energy Mapper (voir plus bas). *Valider…*
+    s'ouvre alors avec cette entité déjà choisie et le nom pré-rempli ; les autres entités
+    suggérées sont à un clic, et toute autre entité reste possible ;
   - **Attendre** : la masquer jusqu'à avoir nettement plus de données (deux fois plus
     d'utilisations, ou 14 jours plus tard) ;
   - **Ignorer** : ne plus jamais la proposer. La liste *Ignorées* en dessous permet de revenir
@@ -619,6 +651,26 @@ français) et ses formats de nombres et d'heures, et s'adapte aux écrans étroi
   avis dans **Paramètres → Réparations** indique combien de signatures attendent et renvoie à
   cette section ; il disparaît quand il n'y a plus rien, et peut être désactivé dans les
   options.
+
+  **Suggestions d'entité.** Chaque nuit, pour chaque signature à examiner, l'add-on compare
+  ses démarrages et arrêts des 30 derniers jours avec les changements d'état de vos entités
+  qui peuvent dire quand un appareil fonctionne : lumières, interrupteurs, booléens
+  (`input_boolean`), ventilateurs, thermostats et chauffe-eau (leur mode), lecteurs
+  multimédia, capteurs binaires, et capteurs d'état de fonctionnement (classe `enum`, comme
+  l'état du programme d'un lave-linge). Une entité est suggérée quand son état change à une
+  minute ou deux près (deux fois l'intervalle du compteur) d'au moins 80 % des démarrages et
+  arrêts, au moins 5 fois sur 3 jours différents, et quand au moins 30 % de ses propres
+  changements tombent à ces moments (une entité qui change sans cesse n'est jamais
+  suggérée). Les états dans lesquels l'appareil fonctionne sont appris aussi : un relais de
+  fil pilote *éteint* pendant que son radiateur chauffe, ou un lave-linge qui indique
+  *en marche*, est relié avec les bons états. Les entités déjà reliées à un appareil ou
+  utilisées comme appareil piloté ne sont pas comparées. Les premières suggestions arrivent
+  après la première analyse de nuit qui suit la mise à jour (les jours passés sont alors lus
+  une fois dans le *recorder*). Les entités que le *recorder* ne garde pas ne peuvent pas
+  être comparées : la section indique quels types d'entités ne sont pas enregistrés du tout.
+  Les lumières et petits appareils sous le seuil de marche (300 W) ne correspondent jamais :
+  les suggestions servent surtout pour les gros appareils (chauffages, ventilateurs,
+  appareils connectés, audio et vidéo).
 - **À vérifier** : ce que l'analyse a trouvé dans votre configuration, comme un appareil sans
   capteur de puissance, un capteur indisponible, une batterie dont le signe est à vérifier,
   ou un **écart de suivi** (un appareil piloté dont l'énergie déclarée est loin de ce qui a
@@ -736,6 +788,8 @@ puissance et l'état de marche en direct viendront avec la détection en temps r
 - Les installations triphasées sont analysées sur la somme des phases (analyse par phase :
   [#18](https://github.com/sylvaing/ha-energy-mapper/issues/18)).
 - Les textes de *À vérifier* viennent de l'add-on, en anglais.
+- Les suggestions d'entité ne comparent que l'**état** des entités : un thermostat est
+  comparé par son mode, pas par son attribut `hvac_action` (les attributs ne sont pas lus).
 
 ### Feuille de route
 
@@ -745,8 +799,8 @@ Voir les [jalons](https://github.com/sylvaing/ha-energy-mapper/milestones) :
   terminé. Analyse de nuit en lecture seule, panneau.
 - [**v1 – Valider et suivre**](https://github.com/sylvaing/ha-energy-mapper/milestone/2) :
   revue des signatures dans le panneau (en nommer une, ou la relier à un interrupteur ou un
-  capteur de puissance existant), une entrée par appareil, entités par appareil et
-  statistiques d'énergie heure par heure (faits),
+  capteur de puissance existant), avec l'entité qu'elle est probablement, une entrée par
+  appareil, entités par appareil et statistiques d'énergie heure par heure (faits),
   « reprendre le suivi » dans le tableau Énergie, apprentissage à partir des appareils
   mesurés, auto-contrôle de nuit avec un taux de réussite, charges variables, et évaluation
   sur des jeux de données NILM publics ([#28](https://github.com/sylvaing/ha-energy-mapper/issues/28)).

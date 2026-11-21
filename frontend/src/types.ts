@@ -161,8 +161,27 @@ export interface SignatureExample {
 
 export type ReviewState = "proposed" | "waiting" | "ignored" | "validated" | "immature";
 
+/** An entity whose state changes coincide with a signature's steps (#41). */
+export interface EntitySuggestion {
+  entity_id: string;
+  /** share of the signature's steps matched (0..1) */
+  score: number;
+  on_share: number | null;
+  off_share: number | null;
+  /** share of the entity's changes near a step */
+  explained: number;
+  matches: number;
+  steps: number;
+  days: number;
+  /** the states in which the appliance runs */
+  on_states: string[];
+  inverted: boolean;
+}
+
 export interface ReviewSignature extends RegistrySignature {
   review_state: ReviewState;
+  /** the best entities first (add-on 0.7.0+) */
+  suggestions?: EntitySuggestion[];
   /** the decision recorded by the add-on */
   review?: {
     state: "waiting" | "ignored" | "validated";
@@ -181,6 +200,16 @@ export interface ReviewListing {
   counts: Record<string, number>;
   signatures: ReviewSignature[];
   repair?: boolean;
+  /** the entity suggestions of the nightly run (add-on 0.7.0+) */
+  suggest?: {
+    computed_at: number | null;
+    days: number;
+    candidates: number;
+    min_score: number | null;
+    /** candidate domains none of whose entities is recorded */
+    unrecorded_domains: string[];
+    unrecorded_entities: number;
+  };
 }
 
 export interface RegistrySwitchedLoad {

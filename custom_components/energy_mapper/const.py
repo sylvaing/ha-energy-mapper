@@ -43,8 +43,18 @@ SWITCH_DOMAINS: Final = [
     "binary_sensor",
     "climate",
     "water_heater",
+    "media_player",
 ]
-REVIEW_KEYS: Final = ("review_min_uses", "review_min_days", "review_wait_days", "review_wait_factor")
+# a sensor of this device class (an operation state) is linked like a switch,
+# with the on-states learned by the entity suggestions (#41)
+STATE_SENSOR_CLASS: Final = "enum"
+REVIEW_KEYS: Final = (
+    "review_min_uses",
+    "review_min_days",
+    "review_wait_days",
+    "review_wait_factor",
+    "review_suggest_score",
+)
 ANALYSIS_KEYS: Final = (
     "analysis_time",
     "backfill_days",

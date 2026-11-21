@@ -3,15 +3,18 @@ import { test } from "node:test";
 
 import { translator } from "../src/i18n.ts";
 import {
+  bestSuggestion,
   entityChoices,
   exampleWindow,
   formatHours,
   hasReview,
+  initialForm,
+  linkable,
   reviewGroups,
   usualHours,
   validateMessage,
 } from "../src/review.ts";
-import type { ReviewListing, ReviewSignature } from "../src/types.ts";
+import type { EntitySuggestion, ReviewListing, ReviewSignature } from "../src/types.ts";
 
 function sig(id: string, state: ReviewSignature["review_state"]): ReviewSignature {
   return {
@@ -111,11 +114,12 @@ test("entity choices of the fallback picker", () => {
     "switch.a": { entity_id: "switch.a", attributes: { friendly_name: "A relay" } },
     "sensor.p": { entity_id: "sensor.p", attributes: { friendly_name: "Power", device_class: "power" } },
     "sensor.t": { entity_id: "sensor.t", attributes: { device_class: "temperature" } },
+    "sensor.w": { entity_id: "sensor.w", attributes: { friendly_name: "Washer state", device_class: "enum" } },
     "automation.x": { entity_id: "automation.x" },
   };
   assert.deepEqual(
     entityChoices(states, "switch").map((e) => e.id),
-    ["switch.a", "switch.b"],
+    ["switch.a", "switch.b", "sensor.w"],
   );
   assert.deepEqual(entityChoices(states, "sensor"), [{ id: "sensor.p", name: "Power" }]);
   assert.deepEqual(entityChoices(states, "new"), []);
@@ -129,4 +133,74 @@ test("review strings exist in French", () => {
   for (const mode of ["new", "switch", "sensor"]) {
     assert.notEqual(fr(`review_mode_${mode}` as never), translator("en")(`review_mode_${mode}` as never));
   }
+});
+
+function suggestion(entity_id: string, score: number, on_states = ["on"]): EntitySuggestion {
+  return {
+    entity_id,
+    score,
+    on_share: score,
+    off_share: score,
+    explained: 0.9,
+    matches: 11,
+    steps: 12,
+    days: 4,
+    on_states,
+    inverted: on_states[0] === "off",
+  };
+}
+
+test("suggested entities pre-fill the validation form (#41)", () => {
+  const plain = sig("a", "proposed");
+  assert.equal(bestSuggestion(plain), undefined);
+  assert.deepEqual(initialForm(plain), { id: "a", mode: "new", name: "", entity: "" });
+  const s = { ...plain, suggestions: [suggestion("fan.attic", 0.92), suggestion("switch.pilot", 0.85, ["off"])] };
+  assert.equal(bestSuggestion(s)?.entity_id, "fan.attic");
+  assert.deepEqual(
+    initialForm(s, (e) => (e === "fan.attic" ? "Attic fan" : undefined)),
+    { id: "a", mode: "switch", name: "Attic fan", entity: "fan.attic" },
+  );
+  assert.deepEqual(initialForm(s), { id: "a", mode: "switch", name: "", entity: "fan.attic" });
+});
+
+test("validate message: the on-states of a suggested entity", () => {
+  const washer = suggestion("sensor.washer_state", 0.9, ["rinsing", "running"]);
+  const s = { ...sig("a", "proposed"), suggestions: [suggestion("fan.attic", 0.92), suggestion("switch.pilot", 0.85, ["off"]), washer] };
+  // "on" is the default: not sent
+  assert.deepEqual(validateMessage(s, "switch", "Fan", "fan.attic"), {
+    msg: { type: "energy_mapper/validate", signature_id: "a", name: "Fan", entity_id: "fan.attic" },
+  });
+  assert.deepEqual(validateMessage(s, "switch", "Radiator", "switch.pilot"), {
+    msg: { type: "energy_mapper/validate", signature_id: "a", name: "Radiator", entity_id: "switch.pilot", on_states: ["off"] },
+  });
+  // an operation-state sensor is linked like a switch, with its states
+  assert.deepEqual(validateMessage(s, "switch", "Washer", "sensor.washer_state", { device_class: "enum" }), {
+    msg: {
+      type: "energy_mapper/validate",
+      signature_id: "a",
+      name: "Washer",
+      entity_id: "sensor.washer_state",
+      on_states: ["rinsing", "running"],
+    },
+  });
+  // another entity: the add-on's automatic polarity
+  assert.deepEqual(validateMessage(s, "switch", "Other", "light.other"), {
+    msg: { type: "energy_mapper/validate", signature_id: "a", name: "Other", entity_id: "light.other" },
+  });
+});
+
+test("which entities can be linked", () => {
+  assert.equal(linkable("switch", "media_player.tv"), true);
+  assert.equal(linkable("switch", "sensor.w", { device_class: "enum" }), true);
+  assert.equal(linkable("switch", "sensor.p", { device_class: "power" }), false);
+  assert.equal(linkable("sensor", "sensor.p", { device_class: "power" }), true);
+  assert.equal(linkable("sensor", "sensor.w", { device_class: "enum" }), false);
+  assert.equal(linkable("new", "switch.a"), false);
+  assert.equal(linkable("switch", "automation.x"), false);
+});
+
+test("suggestion strings exist in French", () => {
+  const fr = translator("fr");
+  assert.equal(fr("review_probably", { name: "Ventilateur", score: "92 %" }), "Probablement : Ventilateur (92 %)");
+  assert.notEqual(fr("review_unrecorded", { domains: "x" }), translator("en")("review_unrecorded", { domains: "x" }));
 });

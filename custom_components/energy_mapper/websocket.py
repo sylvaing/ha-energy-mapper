@@ -276,6 +276,8 @@ async def ws_review(
         vol.Required("signature_id"): SIGNATURE_ID,
         vol.Required("name"): vol.All(str, vol.Length(min=1, max=100)),
         vol.Optional("entity_id"): cv.entity_id,
+        # the states in which the linked entity's appliance runs (#41)
+        vol.Optional("on_states"): vol.All([vol.All(str, vol.Length(min=1, max=100))], vol.Length(max=20)),
     }
 )
 @websocket_api.require_admin
@@ -284,10 +286,13 @@ async def ws_validate(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Validate a signature: a new appliance (config subentry) named by the
-    user, from the signature, or linked to a switch or a power sensor."""
+    user, from the signature, or linked to a switch, an entity whose state
+    tells when it runs (with its on-states) or a power sensor."""
 
     async def validate(coordinator: EnergyMapperCoordinator) -> dict[str, Any]:
-        appliance = await coordinator.async_validate(msg["signature_id"], msg["name"], msg.get("entity_id"))
+        appliance = await coordinator.async_validate(
+            msg["signature_id"], msg["name"], msg.get("entity_id"), msg.get("on_states")
+        )
         return {
             "appliance": {
                 "key": appliance.key,

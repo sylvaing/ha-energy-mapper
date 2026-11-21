@@ -41,12 +41,15 @@ import {
 import { adaptCalendar, definedPicker, type HaPickerTag, loadHaDatePicker } from "./ha-date-picker.ts";
 import { type StringKey, type Translate, translator } from "./i18n.ts";
 import {
+  bestSuggestion,
   entityChoices,
   exampleWindow,
   formatHours,
   hasReview,
+  initialForm,
   type LinkMode,
   linkDomains,
+  linkable,
   reviewGroups,
   usualHours,
   validateMessage,
@@ -316,7 +319,7 @@ export class EnergyMapperPanel extends LitElement {
   private async validate(sig: ReviewSignature): Promise<void> {
     const form = this._reviewForm;
     if (!form || form.id !== sig.id) return;
-    const built = validateMessage(sig, form.mode, form.name, form.entity);
+    const built = validateMessage(sig, form.mode, form.name, form.entity, this.hass?.states?.[form.entity]?.attributes);
     if ("missing" in built) {
       this._reviewForm = { ...form, missing: built.missing };
       return;
@@ -996,6 +999,9 @@ export class EnergyMapperPanel extends LitElement {
     return html`<div class="card review" id="review">
       <div class="card-header">${t("review")}${groups.proposed.length ? html`<span class="count">${groups.proposed.length}</span>` : nothing}</div>
       <div class="card-hint">${t("review_hint")}</div>
+      ${listing.suggest?.unrecorded_domains?.length
+        ? html`<div class="card-hint">${t("review_unrecorded", { domains: listing.suggest.unrecorded_domains.join(", ") })}</div>`
+        : nothing}
       ${this._reviewError ? html`<div class="card-content">${this.alert("error", this._reviewError)}</div>` : nothing}
       ${groups.proposed.length
         ? html`<ul class="review-list">${groups.proposed.map((s) => this.renderCandidate(s, t))}</ul>`
@@ -1064,6 +1070,7 @@ export class EnergyMapperPanel extends LitElement {
         <div class="review-main">
           <div class="sig-name">${s.id}</div>
           <div class="secondary">${this.reviewFacts(s, t).join(" · ")}</div>
+          ${this.renderProbably(s, t)}
         </div>
         <div class="hours" title=${formatHours(usualHours(s.hours, 0.01, 24))}>
           ${profile.map((v) => html`<div class=${v > 0 ? "" : "zero"} style="height:${Math.max(v * 100, 4)}%"></div>`)}
@@ -1085,11 +1092,59 @@ export class EnergyMapperPanel extends LitElement {
       ${form
         ? this.renderValidateForm(s, form, t)
         : html`<div class="review-actions">
-            ${this.textButton(t("review_validate"), () => (this._reviewForm = { id: s.id, mode: "new", name: "", entity: "" }), busy, "accent")}
+            ${this.textButton(t("review_validate"), () => (this._reviewForm = initialForm(s, (e) => this.friendlyName(e))), busy, "accent")}
             ${this.textButton(t("review_wait"), () => void this.decide(s, "wait"), busy, "plain", t("review_wait_hint"))}
             ${this.textButton(t("review_ignore"), () => void this.decide(s, "ignore"), busy, "plain", t("review_ignore_hint"))}
           </div>`}
     </li>`;
+  }
+
+  /** The friendly name of an entity, if Home Assistant knows it. */
+  private friendlyName(entityId: string): string | undefined {
+    const name = this.hass?.states?.[entityId]?.attributes?.friendly_name;
+    return typeof name === "string" ? name : undefined;
+  }
+
+  /** "Probably: <entity> (92 %)": the best entity suggested (#41). */
+  private renderProbably(s: ReviewSignature, t: Translate): TemplateResult | typeof nothing {
+    const best = bestSuggestion(s);
+    if (!best) return nothing;
+    const info = this.info;
+    const hint = t("review_probably_hint", {
+      matches: formatNumber(best.matches, info),
+      steps: formatNumber(best.steps, info),
+      days: formatNumber(best.days, info),
+    });
+    return html`<div class="probably" title=${`${best.entity_id} · ${hint}`}>
+      ${t("review_probably", {
+        name: this.friendlyName(best.entity_id) ?? best.entity_id,
+        score: formatPercent(best.score, info),
+      })}
+    </div>`;
+  }
+
+  /** The suggested entities in the validation form: one click links one. */
+  private renderSuggested(s: ReviewSignature, form: NonNullable<EnergyMapperPanel["_reviewForm"]>, t: Translate): TemplateResult | typeof nothing {
+    if (!s.suggestions?.length) return nothing;
+    const info = this.info;
+    return html`<div class="chips">
+      <span class="secondary">${t("review_suggested")}</span>
+      ${s.suggestions.map((c) => {
+        const selected = form.mode === "switch" && form.entity === c.entity_id;
+        return html`<button
+          type="button"
+          class="chip link ${selected ? "selected" : ""}"
+          aria-pressed=${selected ? "true" : "false"}
+          title=${c.entity_id}
+          @click=${() => {
+            this.setForm({ mode: "switch" });
+            this.pickEntity(c.entity_id);
+          }}
+        >
+          ${this.friendlyName(c.entity_id) ?? c.entity_id}<span class="chip-value">${formatPercent(c.score, info)}</span>
+        </button>`;
+      })}
+    </div>`;
   }
 
   private renderCompact(s: ReviewSignature, t: Translate, note: string): TemplateResult {
@@ -1111,8 +1166,10 @@ export class EnergyMapperPanel extends LitElement {
   private pickEntity(entity: string): void {
     const form = this._reviewForm;
     if (!form) return;
-    const name = this.hass?.states?.[entity]?.attributes?.friendly_name;
-    this.setForm({ entity, name: (form.name.trim() || typeof name !== "string") ? form.name : name });
+    const name = this.friendlyName(entity);
+    // the name follows the entity until the user types one
+    const typed = form.name.trim() && form.name !== this.friendlyName(form.entity);
+    this.setForm({ entity, name: typed || name === undefined ? form.name : name });
   }
 
   private renderEntityPicker(form: NonNullable<EnergyMapperPanel["_reviewForm"]>, t: Translate): TemplateResult {
@@ -1123,6 +1180,8 @@ export class EnergyMapperPanel extends LitElement {
         .label=${t("review_entity")}
         .includeDomains=${linkDomains(form.mode)}
         .includeDeviceClasses=${form.mode === "sensor" ? ["power"] : undefined}
+        .entityFilter=${(st: { entity_id: string; attributes?: Record<string, unknown> }) =>
+          linkable(form.mode, st.entity_id, st.attributes)}
         @value-changed=${(ev: CustomEvent<{ value?: string }>) => this.pickEntity(ev.detail?.value ?? "")}
       ></ha-entity-picker>`;
     }
@@ -1169,6 +1228,7 @@ export class EnergyMapperPanel extends LitElement {
           </label>`,
         )}
       </fieldset>
+      ${this.renderSuggested(s, form, t)}
       <div class="secondary">${t(`review_mode_${form.mode}_hint` as StringKey)}</div>
       ${form.mode !== "new" ? this.renderEntityPicker(form, t) : nothing}
       <label class="field">

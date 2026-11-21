@@ -46,6 +46,7 @@ DEFAULTS = {
     "review_min_days": 3,
     "review_wait_days": 14,
     "review_wait_factor": 2.0,
+    "review_suggest_score": 80,
 }
 
 

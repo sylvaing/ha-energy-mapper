@@ -298,3 +298,59 @@ async def test_validate_by_linking(
         client, type="energy_mapper/validate", signature_id="short-2000w", name="X", entity_id="nope"
     )
     assert answer["error"]["code"] == "invalid_format"
+
+
+async def test_validate_with_a_suggested_entity(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    aioclient_mock: AiohttpClientMocker,
+    entry: MockConfigEntry,
+) -> None:
+    """The entity suggested by the add-on (#41) is linked with the states in
+    which its appliance runs; an operation-state sensor is a switched load."""
+    suggestion = {"entity_id": "fan.attic", "score": 0.92, "on_states": ["on"], "inverted": False}
+    listing = review(1)
+    listing["signatures"] = [{**CANDIDATE, "suggestions": [suggestion]}]
+    listing["suggest"] = {"computed_at": 1.0, "unrecorded_domains": ["media_player"]}
+    addon(aioclient_mock)
+    replace(aioclient_mock, "get", "/api/review", json=listing)
+    await setup(hass, entry)
+    client = await hass_ws_client(hass)
+
+    answer = await _call(client, type="energy_mapper/review")
+    assert answer["result"]["signatures"][0]["suggestions"] == [suggestion]
+    assert answer["result"]["suggest"]["unrecorded_domains"] == ["media_player"]
+
+    hass.states.async_set("sensor.washer_state", "idle", {"device_class": "enum"})
+    answer = await _call(
+        client,
+        type="energy_mapper/validate",
+        signature_id="cyc-1400w",
+        name="Washing machine",
+        entity_id="sensor.washer_state",
+        on_states=["running", "rinsing"],
+    )
+    assert answer["success"], answer
+    assert answer["result"]["appliance"]["sources"] == [
+        {"type": "switched_load", "entity_id": "sensor.washer_state", "on_states": ["running", "rinsing"]}
+    ]
+    answer = await _call(
+        client,
+        type="energy_mapper/validate",
+        signature_id="short-2000w",
+        name="TV",
+        entity_id="media_player.tv",
+        on_states=["off"],
+    )
+    assert answer["result"]["appliance"]["sources"] == [
+        {"type": "switched_load", "entity_id": "media_player.tv", "on_states": ["off"]}
+    ]
+    answer = await _call(
+        client,
+        type="energy_mapper/validate",
+        signature_id="short-2000w",
+        name="X",
+        entity_id="light.x",
+        on_states=[""],
+    )
+    assert answer["error"]["code"] == "invalid_format"

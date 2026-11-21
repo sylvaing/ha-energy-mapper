@@ -142,7 +142,12 @@ FORM = {
     },
     "thresholds": {"step_threshold_w": 200},
     "analysis": {"analysis_time": "03:15:00", "backfill_days": 30, "half_life_days": 20},
-    "review": {"review_repair": False, "review_min_uses": 5, "review_wait_factor": 3},
+    "review": {
+        "review_repair": False,
+        "review_min_uses": 5,
+        "review_wait_factor": 3,
+        "review_suggest_score": 90.0,
+    },
 }
 EXPECTED = {
     "pv_entity": "sensor.other_solar_power",
@@ -153,6 +158,7 @@ EXPECTED = {
     "analysis_time": "03:15",
     "half_life_days": 20,
     "review_wait_factor": 3.0,
+    "review_suggest_score": 90,
 }
 
 
@@ -186,6 +192,7 @@ def test_suggested_values() -> None:
         "review_min_days": 3,
         "review_wait_days": 14,
         "review_wait_factor": 2.0,
+        "review_suggest_score": 80,
     }
 
 

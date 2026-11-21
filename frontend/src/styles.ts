@@ -520,6 +520,16 @@ export const panelStyles = css`
     border-color: var(--primary-color);
     outline: none;
   }
+  .chip.link.selected {
+    border-color: var(--primary-color);
+    background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.12);
+  }
+  .probably {
+    margin-top: 2px;
+    color: var(--primary-text-color);
+    font-size: var(--ha-font-size-s, 12px);
+    font-weight: var(--ha-font-weight-medium, 500);
+  }
   .review-actions {
     display: flex;
     flex-wrap: wrap;

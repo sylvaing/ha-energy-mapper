@@ -213,14 +213,43 @@
           .sort((a, b) => order[a.review_state] - order[b.review_state] || b.weighted_energy_kwh - a.weighted_energy_kwh);
         const counts = { proposed: 0, waiting: 0, ignored: 0, validated: 0 };
         for (const s of reg.signatures) if (state(s) in counts) counts[state(s)]++;
+        // entity suggestions (#41): synthetic, on the first proposals
+        sigs
+          .filter((s) => s.review_state === "proposed")
+          .slice(0, SUGGESTIONS.length)
+          .forEach((s, i) => (s.suggestions = SUGGESTIONS[i]));
         return {
           criteria: { min_uses: 5, min_days: 3, wait_days: 14, wait_factor: 2 },
           now: NOW,
           counts,
           signatures: sigs,
           repair: true,
+          suggest: {
+            computed_at: NOW,
+            days: 7,
+            candidates: 9,
+            min_score: 0.8,
+            unrecorded_domains: ["media_player"],
+            unrecorded_entities: 1,
+          },
         };
       }
+      const suggestion = (entity_id, score, on_states = ["on"]) => ({
+        entity_id,
+        score,
+        on_share: score,
+        off_share: score,
+        explained: 0.9,
+        matches: Math.round(score * 12),
+        steps: 12,
+        days: 4,
+        on_states,
+        inverted: on_states[0] === "off",
+      });
+      const SUGGESTIONS = [
+        [suggestion("fan.attic", 0.92), suggestion("switch.dishwasher_plug", 0.83)],
+        [suggestion("sensor.washer_state", 0.88, ["running"])],
+      ];
       // synthetic entities for the entity picker's fallback
       const STATES = Object.fromEntries(
         [
@@ -230,6 +259,8 @@
           ["sensor.dishwasher_plug_power", "Dishwasher plug power", "power"],
           ["sensor.heat_pump_power", "Heat pump power", "power"],
           ["sensor.outdoor_temperature", "Outdoor temperature", "temperature"],
+          ["fan.attic", "Attic fan", null],
+          ["sensor.washer_state", "Washing machine state", "enum"],
         ].map(([id, name, dc]) => [id, { entity_id: id, state: "on", attributes: { friendly_name: name, device_class: dc } }]),
       );
 

@@ -40,6 +40,7 @@ from .const import (
     OPT_REVIEW_REPAIR,
     OPT_SETTINGS,
     PANEL_REVIEW_PATH,
+    STATE_SENSOR_CLASS,
     SWITCH_DOMAINS,
     UPDATE_INTERVAL,
 )
@@ -345,12 +346,21 @@ class EnergyMapperCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.review_count = None  # an add-on before 0.6.0
             self._async_update_issue()
 
-    async def async_validate(self, sid: str, name: str, entity_id: str | None = None) -> Appliance:
+    async def async_validate(
+        self,
+        sid: str,
+        name: str,
+        entity_id: str | None = None,
+        on_states: list[str] | None = None,
+    ) -> Appliance:
         """Validate a signature of the review: a new appliance with this
-        signature as its source, or linked to a switch (a switched load) or a
-        power sensor (a sub-meter) instead. The appliance is a subentry like
-        any other (devices, sensors and statistics follow at the next
-        synchronisation); the add-on records the decision with its key."""
+        signature as its source, or linked to an entity instead: a switch or
+        any entity whose state tells when it runs (a switched load, with the
+        ``on_states`` of the suggestion when given), or a power sensor (a
+        sub-meter). A sensor of the ``enum`` device class (an operation
+        state) is a switched load. The appliance is a subentry like any other
+        (devices, sensors and statistics follow at the next synchronisation);
+        the add-on records the decision with its key."""
         name = name.strip()
         if not name or len(name) > 100:
             raise ReviewError("invalid_format", "expected a name of 1 to 100 characters")
@@ -361,9 +371,13 @@ class EnergyMapperCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if entity_id is None:
             source = signature(sig)
         elif entity_id.split(".", 1)[0] == "sensor":
-            source = Source(KIND_SUBMETER, entity_id)
+            state = self.hass.states.get(entity_id)
+            if state is not None and state.attributes.get("device_class") == STATE_SENSOR_CLASS:
+                source = relay(entity_id, on_states)
+            else:
+                source = Source(KIND_SUBMETER, entity_id)
         elif entity_id.split(".", 1)[0] in SWITCH_DOMAINS:
-            source = relay(entity_id)
+            source = relay(entity_id, on_states)
         else:
             raise ReviewError("invalid_format", f"{entity_id}: expected a switch or a power sensor")
         current = self.appliances_by_subentry().values()
