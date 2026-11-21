@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import importlib.util
+import pathlib
 from typing import Any
 
 import aiohttp
@@ -197,6 +199,35 @@ def test_appliances_and_ids() -> None:
     # a rename in the settings follows the last analysed day
     apps = appliances_from(registry(), {"switch.water_heater": "Boiler"})
     assert apps["load:switch.water_heater"] == Appliance(KIND_LOAD, "switch.water_heater", "Boiler", 1850)
+
+
+def _addon_statistic_ids():
+    """The add-on's ``statistic_ids`` module (the add-on code is not a package)."""
+    path = pathlib.Path(__file__).resolve().parents[1] / "energy_mapper" / "app" / "statistic_ids.py"
+    spec = importlib.util.spec_from_file_location("addon_statistic_ids", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(
+    ("kind", "addon_kind", "source_id"),
+    [
+        (KIND_LOAD, "load", "switch.water_heater"),
+        (KIND_LOAD, "load", "input_boolean.pump_2"),
+        (KIND_LOAD, "load", "switch.relay__x"),
+        (KIND_LOAD, "load", "climate.living_room"),
+        (KIND_SIGNATURE, "signature", "short-2000w"),
+        (KIND_SIGNATURE, "signature", "cyc-150w"),
+        (KIND_SIGNATURE, "signature", "long-1200w-3"),
+    ],
+)
+def test_statistic_ids_agree_with_the_addon(kind: str, addon_kind: str, source_id: str) -> None:
+    """The add-on maps the statistics of the Energy dashboard back to their
+    appliance: both sides must build the same ids (issue #36)."""
+    addon = _addon_statistic_ids()
+    assert statistic_id(kind, source_id) == addon.statistic_id(addon_kind, source_id)
+    assert addon.kind_of(statistic_id(kind, source_id)) == addon_kind
 
 
 def test_merge_rows() -> None:

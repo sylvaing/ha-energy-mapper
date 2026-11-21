@@ -1,6 +1,6 @@
 # Energy Mapper: design
 
-This document describes how Energy Mapper works as of add-on 0.4.0 and integration 0.2.0:
+This document describes how Energy Mapper works as of add-on 0.4.1 and integration 0.2.0:
 the architecture, the analysis engine, how the Energy dashboard is used, storage, the APIs
 and the reasons behind the main choices. User documentation: the [README](../README.md) and
 the [add-on documentation](../energy_mapper/DOCS.md).
@@ -324,9 +324,24 @@ read.
 | `nested` | `included_in_stat` points to another tracked device | Not subtracted (never twice) |
 | `energy_only` | No power sensor found | Not used; finding `no_power_sensor` |
 | `unavailable` | Energy sensor unavailable | Not used; finding `unavailable` |
+| `energy_mapper` | One of Energy Mapper's own statistics (`energy_mapper:…`, § 8.1), e.g. an estimate replaced by the appliance's statistic | Never subtracted, never `unavailable`. A switched load's statistic keeps its relay measured as a switched load, with its learned polarity; a labelled signature's needs nothing. An id the add-on cannot map: finding `unknown_statistic`, not used |
+
+**Energy Mapper's own statistics** (`statistic_ids.py`): once an appliance is published, users
+may replace its estimate in the Energy dashboard by its statistic; the relay then disappears
+from the dashboard (no more `source_entity`). The add-on maps the statistic back with
+`statistic_ids.json`: `statistic id → {kind, source_id, name, on_states}`, rebuilt before
+each analysis from the registry with the integration's rule (every learned switched load,
+every labelled signature) and never forgetting an entry, so a relay idle for months keeps its
+learned polarity. A load id missing from it is matched against the current entities
+(`statistic_id(load, entity_id)`; default polarity, which the engine's automatic polarity
+corrects). Both sides build ids with the same function (`energy_mapper:<load|signature>_<slug>_energy`,
+Home Assistant's `slugify`), checked by the integration tests. A device whose
+`included_in_stat` is such a statistic is `nested`; a statistic nested in another device too.
+When the same relay is behind both an estimate and a statistic, it is measured once, with the
+learned polarity.
 
 **Findings** (shown as *Things to check*): `grid_ignored`, `no_power_sensor`, `unavailable`,
-`battery_sign`, `no_grid`, and `tracking_gap`: after the analysis, `tracking_gaps()` compares,
+`battery_sign`, `no_grid`, `unknown_statistic`, and `tracking_gap`: after the analysis, `tracking_gaps()` compares,
 for each switch-driven device, the energy declared by its sensor over the day with the energy
 measured for its switched load; a ratio of 2 or more (with at least 0.5 kWh on one side) is
 reported, typically an estimate configured at a few watts for a 2 kW water heater.
@@ -346,6 +361,7 @@ Everything is under the add-on's `/data` (included in Home Assistant backups):
 | `summaries/YYYY-MM-DD.json.gz` | The report without its curve | Until its activations' weight is below 1 % (~200 days with a 30-day half-life); never while the full report is kept | ~1–2 MB in all |
 | `registry.json` | Signature registry | While a signature's weight is above 1 %; forever once labelled (v1) | tens of KB |
 | `settings.json` | Settings pushed by the integration | Until replaced (`PUT {}` deletes it) | < 64 KB |
+| `statistic_ids.json` | Energy Mapper statistic id → appliance (§ 5) | Forever (one line per appliance ever published) | KB |
 | `state.json` | `last_run`, `last_maintenance` | – | bytes |
 | `options.json` | Add-on options (written by the Supervisor) | – | bytes |
 
@@ -381,7 +397,7 @@ JSON in and out; request bodies are limited to 64 KB (413 above).
 
 | Request | Answer |
 |---|---|
-| `GET /api/health` | `200 {"status": "ok", "version": "0.4.0", "last_run": <unix time \| null>, "days": <full reports>, "signatures": <registry size>, "storage_bytes": <int>}` |
+| `GET /api/health` | `200 {"status": "ok", "version": "0.4.1", "last_run": <unix time \| null>, "days": <full reports>, "signatures": <registry size>, "storage_bytes": <int>}` |
 | `GET /api/days` | `200 {"days": [...], "summary_days": [...], "generated": {day: <unix time>}}`: days with a full report, and older days with only a summary, ascending; `generated`: when each full report was made (`generated_at`) |
 | `GET /api/report/YYYY-MM-DD` | `200` the report with registry ids; `400 {"error": "invalid_day"}`; `404 {"error": "not_found"}` |
 | `GET /api/hourly/YYYY-MM-DD` | `200` the hourly breakdown of the day (`nilm_core/hourly.py`, § 8.1); `400 invalid_day`; `404 not_found` when the day has no per-minute curve |

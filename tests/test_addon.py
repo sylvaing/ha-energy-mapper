@@ -487,6 +487,46 @@ class SettingsTests(unittest.TestCase):
             analyzer, _ = make_analyzer(tmp, FakeHA(0, prefs=False))
             self.assertIsNone(analyzer.automatic()["grid_entity"])
 
+    def test_energy_mapper_statistics_in_the_energy_dashboard(self):
+        """A relay-driven appliance whose estimate was replaced by its Energy
+        Mapper statistic stays a switched load, with its learned polarity,
+        even after the registry forgot it."""
+        stat = "energy_mapper:load_switch_radiator_energy"
+
+        class SwappedHA(FakeHA):
+            def snapshot(self):
+                snap = super().snapshot()
+                snap["states"].append({"entity_id": "switch.radiator", "state": "on", "attributes": {}})
+                snap["prefs"]["device_consumption"] = [{"stat_consumption": stat}]
+                return snap
+
+        with tempfile.TemporaryDirectory() as tmp:
+            analyzer, store = make_analyzer(tmp, SwappedHA(0))
+            store.save_registry(
+                {
+                    "signatures": [],
+                    "switched_loads": [
+                        {
+                            "entity_id": "switch.radiator",
+                            "name": "Radiator",
+                            "power_w": 1000,
+                            "on_states": ["off"],
+                        }
+                    ],
+                }
+            )
+            expected = [{"entity_id": "switch.radiator", "name": "Radiator", "on_states": ["off"]}]
+            self.assertEqual(analyzer.automatic()["switched_loads"], expected)
+            self.assertEqual(store.load_statistic_ids(), {})  # automatic() only reads
+            ctx = analyzer.prepare()
+            self.assertEqual(store.load_statistic_ids()[stat]["source_id"], "switch.radiator")
+            self.assertEqual(ctx.derived.config.switched_loads[0].power_w, 1000.0)
+            self.assertNotIn(stat, ctx.entities)  # a statistic, not an entity to read
+            self.assertEqual([f.kind for f in ctx.derived.findings], [])
+            # the registry forgot the radiator: the stored mapping keeps it
+            store.save_registry({"signatures": [], "switched_loads": []})
+            self.assertEqual(analyzer.automatic()["switched_loads"], expected)
+
 
 # ---------------------------------------------------------------------------
 # storage

@@ -18,6 +18,7 @@ from nilm_core.registry import update as update_registry
 from settings import SettingsError
 from settings import merge as merge_settings
 from settings import validate as validate_settings
+from statistic_ids import known_statistics
 from storage import ReportStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -174,7 +175,13 @@ class Analyzer:
         """The sensors the analysis would use without the settings: the
         Energy dashboard and the add-on options. Reads Home Assistant (HAError)."""
         snap = self.client.snapshot()
-        derived = derive(snap["prefs"], snap["states"], snap["registry"], derive_options(self.base_options))
+        derived = derive(
+            snap["prefs"],
+            snap["states"],
+            snap["registry"],
+            derive_options(self.base_options),
+            self.known_statistics(save=False),
+        )
         cfg = derived.config
         if cfg is None:  # no grid meter found
             return {
@@ -225,11 +232,29 @@ class Analyzer:
     def today(self) -> dt.date:
         return dt.datetime.fromtimestamp(self.clock(), self.tz).date()
 
+    def known_statistics(self, save: bool = True) -> dict:
+        """The Energy Mapper statistic ids of the appliances of the registry,
+        and those of the stored mapping (stored back when it changed)."""
+        previous = self.store.load_statistic_ids()
+        mapping = known_statistics(self.store.load_registry(), previous)
+        if save and mapping != previous:
+            try:
+                self.store.save_statistic_ids(mapping)
+            except OSError as err:
+                _LOGGER.warning("statistic ids not stored: %s", err)
+        return mapping
+
     def prepare(self) -> Context:
         """Read the Energy dashboard, states and registry; derive the configuration."""
         snap = self.client.snapshot()
         self.tz = local_tz((snap.get("config") or {}).get("time_zone"))
-        derived = derive(snap["prefs"], snap["states"], snap["registry"], derive_options(self.options))
+        derived = derive(
+            snap["prefs"],
+            snap["states"],
+            snap["registry"],
+            derive_options(self.options),
+            self.known_statistics(),
+        )
         if derived.config is None:
             raise AnalysisError(
                 "no_grid", "no grid power sensor: configure the Energy dashboard or grid_entity"

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.1
+
+- Automatic configuration: Energy Mapper's own statistics
+  (`energy_mapper:load_…` / `energy_mapper:signature_…`) in the Energy
+  dashboard are recognised (role `energy_mapper`). An appliance whose
+  estimate was replaced by its Energy Mapper statistic is no longer reported
+  as unavailable, is never subtracted, and its relay stays a switched load
+  with its learned polarity, without manual settings (#36). The mapping
+  statistic id -> appliance is kept in `/data/statistic_ids.json`; a
+  statistic the add-on cannot map gets the finding `unknown_statistic`.
+
 ## 0.4.0
 
 - New endpoint `GET /api/hourly/YYYY-MM-DD`: the energy of each appliance per

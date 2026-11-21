@@ -45,6 +45,10 @@ the grid meter, the solar production, the battery and the individual devices
 from it, and finds the power sensor (W) that goes with each energy sensor
 (kWh) of the dashboard.
 
+An appliance whose estimate you replaced, in the Energy dashboard, by its
+Energy Mapper statistic (`energy_mapper:load_…_energy`) stays measured: the
+add-on maps the statistic back to its relay, with the polarity it learned.
+
 All other options are manual overrides, for installations without an Energy
 dashboard or when the automatic choice is wrong. With the **Energy Mapper
 integration**, set them in its options instead (Settings → Devices & services
@@ -168,6 +172,7 @@ bounded, whatever the age of the installation:
 | Full daily report, with the per-minute curve (`reports/`, gzip) | `report_retention_days` (90 days) | ~2 MB |
 | Day summary: everything but the curve (`summaries/`, gzip) | until the weight of its activations falls below 1 % (~200 days with a 30-day half-life) | ~1 MB |
 | Signature registry (`registry.json`) | while a signature's weight is above 1 %; forever once it is named | tens of KB |
+| Energy Mapper statistic id of each published appliance (`statistic_ids.json`) | forever | a few KB |
 
 Pruning runs after each nightly analysis. The registry is rebuilt from the
 day summaries if it is missing or unreadable. Reports stored as plain JSON
@@ -181,7 +186,7 @@ announces itself to Home Assistant through Supervisor discovery.
 
 | Request | Answer |
 |---|---|
-| `GET /api/health` | `{"status": "ok", "version": "0.4.0", "last_run": <unix time or null>, "days": <number of full reports>, "signatures": <registry size>, "storage_bytes": <size of /data>}` |
+| `GET /api/health` | `{"status": "ok", "version": "0.4.1", "last_run": <unix time or null>, "days": <number of full reports>, "signatures": <registry size>, "storage_bytes": <size of /data>}` |
 | `GET /api/days` | `{"days": [...], "summary_days": [...], "generated": {"YYYY-MM-DD": <unix time>}}`: days with a full report, and older days with only a summary, oldest first; `generated` tells when each full report was made |
 | `GET /api/report/YYYY-MM-DD` | The report with the registry ids, or 404. For a day with only a summary: `curve` is empty and `curve_pruned` is `true` |
 | `GET /api/hourly/YYYY-MM-DD` | The energy of each appliance per hour of that day (below), or 404 when the day has no per-minute curve |

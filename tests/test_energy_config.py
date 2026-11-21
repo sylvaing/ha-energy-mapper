@@ -13,6 +13,15 @@ import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "energy_mapper" / "app"))
 
 from energy_config import _Index, derive, power_for, tracking_gaps  # noqa: E402
+from statistic_ids import (  # noqa: E402
+    KIND_LOAD,
+    KIND_SIGNATURE,
+    is_own,
+    kind_of,
+    known_statistics,
+    slugify,
+    statistic_id,
+)
 
 
 def sensor(entity_id, state="1", device_class=None, unit=None, **attrs):
@@ -225,6 +234,185 @@ class DeriveTests(unittest.TestCase):
         self.assertEqual(
             power_for("sensor.main_meter_channel_1_energy", idx), "sensor.main_meter_channel_1_power"
         )
+
+
+# Energy Mapper's own statistics in the Energy dashboard (issue #36)
+HEATER = "energy_mapper:load_switch_water_heater_energy"
+RADIATOR = "energy_mapper:load_switch_radiator_relay_energy"
+KETTLE = "energy_mapper:signature_short_2000w_energy"
+
+
+def learned_registry():
+    """An add-on registry: two learned switched loads (the radiator's
+    pilot wire heats while its relay is off) and a labelled signature."""
+    return {
+        "switched_loads": [
+            {
+                "entity_id": "switch.water_heater",
+                "name": "Water heater",
+                "power_w": 2000,
+                "on_states": ["on"],
+            },
+            {
+                "entity_id": "switch.radiator_relay",
+                "name": "Radiator",
+                "power_w": 1000,
+                "inverted": True,
+                "on_states": ["off"],
+            },
+        ],
+        "signatures": [
+            {"id": "short-2000w", "label": "Kettle", "power_w": 2000},
+            {"id": "long-500w", "label": None, "power_w": 500},
+        ],
+    }
+
+
+def swapped_installation():
+    """Both relay-driven estimates were replaced by Energy Mapper statistics."""
+    h = meter_with_channels()
+    h.add(sensor("switch.water_heater", "off"), "heater")
+    h.add(sensor("switch.radiator_relay", "on"), "radiator")
+    h.add(energy("sensor.fridge_plug_energy"), "plug")
+    h.add(power("sensor.fridge_plug_power"), "plug")
+    h.devices = [
+        {"stat_consumption": "sensor.fridge_plug_energy", "name": "Fridge"},
+        {"stat_consumption": HEATER},
+        {"stat_consumption": RADIATOR, "name": "Living room radiator"},
+        {"stat_consumption": KETTLE},
+    ]
+    return h
+
+
+class StatisticIdTests(unittest.TestCase):
+    def test_ids(self):
+        self.assertEqual(statistic_id(KIND_LOAD, "switch.water_heater"), HEATER)
+        self.assertEqual(statistic_id(KIND_SIGNATURE, "short-2000w"), KETTLE)
+        self.assertEqual(
+            statistic_id(KIND_SIGNATURE, "cyc-150w-2"), "energy_mapper:signature_cyc_150w_2_energy"
+        )
+        self.assertEqual(slugify("Input_Boolean.Pump__1"), "input_boolean_pump_1")
+        self.assertEqual(slugify("--"), "unknown")
+        self.assertEqual(kind_of(HEATER), KIND_LOAD)
+        self.assertEqual(kind_of(KETTLE), KIND_SIGNATURE)
+        self.assertIsNone(kind_of("energy_mapper:other"))
+        self.assertIsNone(kind_of("sensor.water_heater_energy"))
+        self.assertTrue(is_own("energy_mapper:other"))
+        self.assertFalse(is_own(None))
+
+    def test_known_statistics_keeps_forgotten_appliances(self):
+        mapping = known_statistics(learned_registry())
+        self.assertEqual(set(mapping), {HEATER, RADIATOR, KETTLE})  # unlabelled signature left out
+        self.assertEqual(mapping[RADIATOR]["source_id"], "switch.radiator_relay")
+        self.assertEqual(mapping[RADIATOR]["on_states"], ["off"])
+        self.assertEqual(
+            mapping[KETTLE], {"kind": KIND_SIGNATURE, "source_id": "short-2000w", "name": "Kettle"}
+        )
+        # the registry forgot the radiator (idle all summer): its entry stays
+        later = known_statistics({"switched_loads": learned_registry()["switched_loads"][:1]}, mapping)
+        self.assertEqual(later[RADIATOR], mapping[RADIATOR])
+        self.assertEqual(known_statistics(None), {})
+
+
+class OwnStatisticTests(unittest.TestCase):
+    def test_swapped_devices_stay_switched_loads(self):
+        h = swapped_installation()
+        d = derive(h.prefs(), h.states, h.registry, statistics=known_statistics(learned_registry()))
+        kinds = [f.kind for f in d.findings]
+        self.assertNotIn("unavailable", kinds)
+        self.assertNotIn("unknown_statistic", kinds)
+        self.assertNotIn("no_power_sensor", kinds)
+        loads = {s.entity_id: s for s in d.config.switched_loads}
+        self.assertEqual(set(loads), {"switch.water_heater", "switch.radiator_relay"})
+        self.assertEqual(loads["switch.water_heater"].on_states, ("on",))
+        self.assertEqual(loads["switch.water_heater"].name, "Water heater")  # from the registry
+        self.assertEqual(loads["switch.radiator_relay"].on_states, ("off",))  # learned polarity kept
+        self.assertEqual(loads["switch.radiator_relay"].name, "Living room radiator")  # dashboard name wins
+        # never subtracted: only the real sub-meter is
+        self.assertEqual([s.entity_id for s in d.config.submeters], ["sensor.fridge_plug_power"])
+        roles = {t.energy_entity: (t.role, t.source_entity) for t in d.tracked}
+        self.assertEqual(roles[HEATER], ("energy_mapper", "switch.water_heater"))
+        self.assertEqual(roles[RADIATOR], ("energy_mapper", "switch.radiator_relay"))
+        self.assertEqual(roles[KETTLE], ("energy_mapper", None))
+        # not compared with the measured energy (it is the measured energy)
+        report = {"start": 0, "end": 86400, "energy_kwh": {"known": {"Water heater": 4.6}}}
+        self.assertEqual(tracking_gaps(report, d.tracked, {HEATER: [(10, "0"), (80000, "40")]}), [])
+
+    def test_without_stored_mapping_the_entity_is_found_from_the_id(self):
+        h = swapped_installation()
+        h.devices = h.devices[:3]
+        d = derive(h.prefs(), h.states, h.registry)
+        loads = {s.entity_id: s.on_states for s in d.config.switched_loads}
+        # default polarity: the engine's automatic polarity finds the inversion
+        self.assertEqual(loads, {"switch.water_heater": ("on",), "switch.radiator_relay": ("on",)})
+        self.assertEqual([f.kind for f in d.findings if f.kind == "unavailable"], [])
+
+    def test_estimate_and_statistic_of_the_same_relay(self):
+        h = swapped_installation()
+        h.add(energy("sensor.radiator_energy", source_entity="switch.radiator_relay"), "est", "powercalc")
+        h.devices.append({"stat_consumption": "sensor.radiator_energy", "name": "Radiator estimate"})
+        d = derive(h.prefs(), h.states, h.registry, statistics=known_statistics(learned_registry()))
+        radiators = [s for s in d.config.switched_loads if s.entity_id == "switch.radiator_relay"]
+        self.assertEqual(len(radiators), 1)  # measured once
+        self.assertEqual(radiators[0].on_states, ("off",))
+
+    def test_nested_devices(self):
+        h = swapped_installation()
+        h.add(energy("sensor.heater_pump_energy"), "pump")
+        h.add(power("sensor.heater_pump_power"), "pump")
+        # a plug counted inside the Energy Mapper statistic, and the radiator
+        # statistic counted inside a sub-meter
+        h.devices.append(
+            {"stat_consumption": "sensor.heater_pump_energy", "name": "Pump", "included_in_stat": HEATER}
+        )
+        h.devices[2]["included_in_stat"] = "sensor.fridge_plug_energy"
+        d = derive(h.prefs(), h.states, h.registry, statistics=known_statistics(learned_registry()))
+        roles = {t.name: t.role for t in d.tracked}
+        self.assertEqual(roles["Pump"], "nested")
+        self.assertEqual(roles["Living room radiator"], "nested")
+        self.assertEqual([s.entity_id for s in d.config.switched_loads], ["switch.water_heater"])
+        self.assertEqual([s.entity_id for s in d.config.submeters], ["sensor.fridge_plug_power"])
+
+    def test_stale_statistics(self):
+        h = swapped_installation()
+        h.devices = [
+            {"stat_consumption": "energy_mapper:load_switch_removed_relay_energy", "name": "Old relay"},
+            {"stat_consumption": "energy_mapper:signature_long_900w_energy"},
+            {"stat_consumption": "energy_mapper:something_else"},
+        ]
+        mapping = known_statistics(learned_registry())
+        mapping["energy_mapper:load_switch_removed_relay_energy"] = {
+            "kind": KIND_LOAD,
+            "source_id": "switch.removed_relay",
+            "name": "Old relay",
+            "on_states": ["on"],
+        }
+        d = derive(h.prefs(), h.states, h.registry, statistics=mapping)
+        stale = [f for f in d.findings if f.kind == "unknown_statistic"]
+        self.assertEqual(len(stale), 3)
+        self.assertIn(
+            "Old relay: Energy Mapper statistic of an appliance it no longer knows", stale[0].detail
+        )
+        self.assertNotIn("unavailable", [f.kind for f in d.findings])
+        self.assertEqual(d.config.switched_loads, [])
+        self.assertEqual({t.role for t in d.tracked}, {"energy_mapper"})
+
+    def test_manual_switched_loads_still_win(self):
+        h = swapped_installation()
+        d = derive(
+            h.prefs(),
+            h.states,
+            h.registry,
+            {
+                "switched_loads": [
+                    {"entity_id": "switch.radiator_relay", "name": "Manual", "on_states": ["on"]}
+                ]
+            },
+            known_statistics(learned_registry()),
+        )
+        loads = {s.entity_id: (s.name, s.on_states) for s in d.config.switched_loads}
+        self.assertEqual(loads["switch.radiator_relay"], ("Manual", ("on",)))
+        self.assertEqual(len(d.config.switched_loads), 2)
 
 
 class GapTests(unittest.TestCase):

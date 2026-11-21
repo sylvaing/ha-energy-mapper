@@ -4,6 +4,7 @@
     summaries/YYYY-MM-DD.json.gz  the same without the curve, kept longer
     registry.json                 signature registry (nilm_core.registry)
     settings.json                 user settings pushed by the integration
+    statistic_ids.json            Energy Mapper statistic id -> appliance
     state.json                    small persistent state (last run...)
 
 Reports written by older versions as plain ``reports/YYYY-MM-DD.json`` are
@@ -78,6 +79,7 @@ class ReportStore:
         self._state_path = self.root / "state.json"
         self.registry_path = self.root / "registry.json"
         self.settings_path = self.root / "settings.json"
+        self.statistic_ids_path = self.root / "statistic_ids.json"
         # summaries already read, for the nightly registry update (read-only)
         self._cache: dict[str, dict] = {}
         self.migrate()
@@ -180,7 +182,7 @@ class ReportStore:
         for folder in (self.reports, self.summaries):
             with os.scandir(folder) as it:
                 total += sum(e.stat().st_size for e in it if e.is_file())
-        for path in (self.registry_path, self._state_path):
+        for path in (self.registry_path, self._state_path, self.statistic_ids_path):
             with contextlib.suppress(OSError):
                 total += path.stat().st_size
         return total
@@ -216,6 +218,18 @@ class ReportStore:
             _write_atomic(self.settings_path, settings)
         else:
             self.settings_path.unlink(missing_ok=True)
+
+    # -- Energy Mapper statistic ids (statistic_ids.known_statistics) ---------
+    def load_statistic_ids(self) -> dict:
+        """The stored mapping ({} when missing or unreadable)."""
+        try:
+            data = json.loads(self.statistic_ids_path.read_text())
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def save_statistic_ids(self, mapping: dict) -> None:
+        _write_atomic(self.statistic_ids_path, mapping)
 
     # -- small persistent state (last successful run) -------------------------
     def state(self) -> dict:

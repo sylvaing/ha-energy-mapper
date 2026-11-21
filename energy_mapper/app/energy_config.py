@@ -6,7 +6,9 @@ testable without Home Assistant:
 * ``prefs``: result of ``energy/get_prefs``;
 * ``states``: result of ``get_states`` (entity_id, state, attributes);
 * ``registry``: result of ``config/entity_registry/list`` (entity_id,
-  device_id, platform).
+  device_id, platform);
+* ``statistics``: the statistics Energy Mapper publishes, by id
+  (:func:`statistic_ids.known_statistics`).
 
 The Energy dashboard lists *energy* sensors (kWh). The engine needs *power*
 sensors (W), so each energy sensor is mapped to the power sensor of the same
@@ -16,10 +18,12 @@ device. Manual options always win over what is derived here.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from nilm_core import AnalysisConfig, SubmeterConfig, SwitchedLoadConfig
+from statistic_ids import KIND_LOAD, KIND_SIGNATURE, is_own, kind_of, statistic_id
 
 POWER_UNITS = {"W": 1.0, "kW": 1000.0, "mW": 0.001, "MW": 1_000_000.0}
 UNAVAILABLE = {"unavailable", "unknown"}
@@ -53,7 +57,8 @@ class TrackedDevice:
     name: str
     energy_entity: str
     power_entity: str | None
-    role: str  # submeter | switched | estimated | energy_only | unavailable | nested
+    # submeter | switched | estimated | energy_only | unavailable | nested | energy_mapper
+    role: str
     source_entity: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -183,16 +188,58 @@ def _number(value: str | None) -> float | None:
         return None
 
 
+def _own_statistic(
+    stat_id: str, name: str | None, statistics: Mapping[str, Mapping], idx: _Index, by_stat: dict
+) -> tuple[str, SwitchedLoadConfig | None, str | None, Finding | None]:
+    """An Energy Mapper statistic of the Energy dashboard -> (name, switched
+    load to keep measuring, its entity, finding). Never a sub-meter: its
+    energy is what the analysis itself attributes to the appliance."""
+    known = statistics.get(stat_id) or {}
+    kind = kind_of(stat_id)
+    if kind == KIND_LOAD:
+        entity = known.get("source_id") if known.get("kind") == KIND_LOAD else None
+        if not entity:
+            # not in the stored mapping (older add-on, lost data): the entity
+            # whose statistic id it is, if it still exists
+            if not by_stat:
+                by_stat.update({statistic_id(KIND_LOAD, e): e for e in idx.states})
+            entity = by_stat.get(stat_id)
+        if entity and entity in idx.states:
+            label = name or known.get("name") or idx.attrs(entity).get("friendly_name") or entity
+            on_states = tuple(known.get("on_states") or ("on",))
+            return label, SwitchedLoadConfig(entity, label, on_states), entity, None
+    elif kind == KIND_SIGNATURE and known.get("kind") == KIND_SIGNATURE:
+        return name or known.get("name") or stat_id, None, None, None
+    label = name or known.get("name") or stat_id
+    return (
+        label,
+        None,
+        None,
+        Finding(
+            "unknown_statistic",
+            stat_id,
+            f"{label}: Energy Mapper statistic of an appliance it no longer knows "
+            "(not used by the analysis; remove it from the Energy dashboard if it is obsolete)",
+        ),
+    )
+
+
 def derive(
     prefs: dict | None,
     states: list[dict],
     registry: list[dict],
     options: dict | None = None,
+    statistics: Mapping[str, Mapping] | None = None,
 ) -> DerivedConfig:
     """Build the analysis configuration. ``options`` are the user's manual
     settings (grid_entity, grid_export_entity, grid_invert, pv_entity,
-    battery_entity, battery_invert, submeters, switched_loads, thresholds)."""
+    battery_entity, battery_invert, submeters, switched_loads, thresholds).
+    ``statistics`` maps Energy Mapper's own statistic ids to their appliance
+    (an appliance whose estimate was replaced by its Energy Mapper statistic
+    in the Energy dashboard stays measured)."""
     options = options or {}
+    statistics = statistics or {}
+    by_stat: dict[str, str] = {}  # statistic id -> entity id, built on demand
     idx = _Index(states, registry)
     out = DerivedConfig(config=None)
     sources = (prefs or {}).get("energy_sources") or []
@@ -240,14 +287,27 @@ def derive(
     # --- devices -----------------------------------------------------------
     submeters: list[SubmeterConfig] = []
     switched: list[SwitchedLoadConfig] = []
+    own: dict[str, SwitchedLoadConfig] = {}  # from Energy Mapper statistics, by entity
     devices = (prefs or {}).get("device_consumption") or []
     parents = {d.get("stat_consumption") for d in devices}
     for d in devices:
         energy = d.get("stat_consumption")
         if not energy:
             continue
-        name = d.get("name") or idx.attrs(energy).get("friendly_name") or energy
         parent = d.get("included_in_stat")
+        if is_own(energy):
+            name, load, entity, finding = _own_statistic(energy, d.get("name"), statistics, idx, by_stat)
+            if finding:
+                out.findings.append(finding)
+            if parent and parent in parents:
+                # counted inside another tracked device: never subtract twice
+                out.tracked.append(TrackedDevice(name, energy, None, "nested", entity))
+                continue
+            if load:
+                own[load.entity_id] = load
+            out.tracked.append(TrackedDevice(name, energy, None, "energy_mapper", entity))
+            continue
+        name = d.get("name") or idx.attrs(energy).get("friendly_name") or energy
         src = idx.attrs(energy).get("source_entity")
         power = power_for(energy, idx)
         if not idx.available(energy):
@@ -272,6 +332,10 @@ def derive(
         role = "estimated" if src else "submeter"
         submeters.append(SubmeterConfig(power, name))
         out.tracked.append(TrackedDevice(name, energy, power, role, src))
+
+    # the same relay behind an estimate and an Energy Mapper statistic: the
+    # latter carries the learned polarity
+    switched = [s for s in switched if s.entity_id not in own] + list(own.values())
 
     # --- manual options win --------------------------------------------------
     grid = options.get("grid_entity") or (grids[0] if grids else None)
