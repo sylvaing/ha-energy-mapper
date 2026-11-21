@@ -35,6 +35,9 @@ sub-meters are measured.
 4. After each analysis the **signature registry** is updated: the
    activations of all the stored days are clustered together to learn the
    appliances of the home across days (see below), and old data is pruned.
+5. Then the signatures to review are compared with the state changes of the
+   Home Assistant entities that may tell when an appliance runs (see
+   [Entity suggestions](#entity-suggestions)).
 
 Days run from midnight to midnight in the time zone of Home Assistant.
 
@@ -176,6 +179,8 @@ bounded, whatever the age of the installation:
 | Signature registry (`registry.json`) | while a signature's weight is above 1 %; forever once it is named; the 100 most recently ignored ones after they fade out | tens of KB |
 | Energy Mapper statistic id of each published appliance (`statistic_ids.json`) | forever | a few KB |
 | The user's appliances, pushed by the integration (`appliances.json`) | until replaced | a few KB |
+| State changes of the candidate entities, per day (`changes/`, gzip) | 31 days | ~10–100 KB per day |
+| Entity suggestions of the signatures to review (`suggestions.json`) | replaced every night | a few KB |
 
 Pruning runs after each nightly analysis. The registry is rebuilt from the
 day summaries if it is missing or unreadable. Reports stored as plain JSON
@@ -189,7 +194,7 @@ announces itself to Home Assistant through Supervisor discovery.
 
 | Request | Answer |
 |---|---|
-| `GET /api/health` | `{"status": "ok", "version": "0.6.0", "last_run": <unix time or null>, "days": <number of full reports>, "signatures": <registry size>, "storage_bytes": <size of /data>}` |
+| `GET /api/health` | `{"status": "ok", "version": "0.7.0", "last_run": <unix time or null>, "days": <number of full reports>, "signatures": <registry size>, "storage_bytes": <size of /data>}` |
 | `GET /api/days` | `{"days": [...], "summary_days": [...], "generated": {"YYYY-MM-DD": <unix time>}}`: days with a full report, and older days with only a summary, oldest first; `generated` tells when each full report was made |
 | `GET /api/report/YYYY-MM-DD` | The report with the registry ids, or 404. For a day with only a summary: `curve` is empty and `curve_pruned` is `true` |
 | `GET /api/hourly/YYYY-MM-DD` | The energy of each appliance per hour of that day (below), or 404 when the day has no per-minute curve |
@@ -199,7 +204,7 @@ announces itself to Home Assistant through Supervisor discovery.
 | `PUT /api/settings` | Replaces the settings (JSON object, below): `{"settings": {...}}` as stored, or 400 `invalid_settings` |
 | `GET /api/appliances` | The user's appliances: `{"appliances": [...]}` (below) |
 | `PUT /api/appliances` | Replaces them: `{"appliances": [...]}` as stored, or 400 `invalid_appliances` |
-| `GET /api/review` | The signatures to review, waiting and ignored (below) |
+| `GET /api/review` | The signatures to review, waiting and ignored, with their entity suggestions (below) |
 | `POST /api/review` | `{"id", "action": "validate", "wait", "ignore" or "restore", "appliance"?}`: records a decision: `{"signature": {...}}` with its `review_state`; 404 `not_found`, 400 `invalid_review` |
 | `POST /api/signatures` | `{"kind": "steady" or "cycling", "band": "short", "medium" or "long", "power_w", "label"}`: the signature of an appliance not seen yet: `{"signature": {...}, "created": true}`; an existing unnamed signature at that power is returned as is (`created: false`); 409 `conflict` when it already belongs to another appliance |
 
@@ -296,6 +301,7 @@ Accepted keys (all optional; `null`, `""` and `[]` mean "absent"):
 | `report_retention_days` | 7 to 3650 |
 | `review_min_uses`, `review_min_days` | 2 to 1000 and 1 to 365: a signature is proposed for review once seen this many times on this many different days (5 and 3) |
 | `review_wait_days`, `review_wait_factor` | 1 to 365 and 1.2 to 10: a signature put on hold comes back after this many days, or once its uses reached this multiple of the number it had (14 and 2) |
+| `review_suggest_score` | 50 to 100 (%): an entity is suggested for a signature when its state changes at this share of the signature's starts and stops (80) |
 
 An unknown key or an invalid value refuses the whole request (400,
 `{"error": "invalid_settings", "message": "<key>: ..."}`); the body is limited
@@ -308,7 +314,8 @@ to 64 KB. `GET /api/settings` answers:
   "defaults": {"analysis_time": "04:30", "backfill_days": 30, "half_life_days": 30,
                "report_retention_days": 90, "peak_window_days": 30, "grid_invert": false,
                "battery_invert": false, "step_threshold_w": 300.0, "peak_threshold_w": null,
-               "review_min_uses": 5, "review_min_days": 3, "review_wait_days": 14, "review_wait_factor": 2.0},
+               "review_min_uses": 5, "review_min_days": 3, "review_wait_days": 14, "review_wait_factor": 2.0,
+               "review_suggest_score": 80},
   "automatic": {"grid_entity": "sensor.grid_power", "grid_export_entity": null,
                 "pv_entity": null, "battery_entity": null, "submeters": [],
                 "switched_loads": [{"entity_id": "switch.water_heater", "name": "Water heater", "on_states": ["on"]}]}
@@ -382,7 +389,13 @@ again later keeps the decision. `GET /api/review` answers the signatures
   "criteria": {"min_uses": 5, "min_days": 3, "wait_days": 14, "wait_factor": 2.0},
   "now": 1810000000.0,
   "counts": {"proposed": 2, "waiting": 1, "ignored": 0, "validated": 4},
-  "signatures": [{"id": "medium-2100w", "review_state": "proposed", "...": "registry fields"}]
+  "signatures": [{"id": "medium-2100w", "review_state": "proposed", "...": "registry fields",
+                  "suggestions": [{"entity_id": "fan.attic", "score": 0.92, "on_share": 1.0,
+                                   "off_share": 0.83, "explained": 0.9, "matches": 11, "steps": 12,
+                                   "days": 5, "days_compared": 6, "on_states": ["on"],
+                                   "inverted": false}]}],
+  "suggest": {"computed_at": 1810000000.0, "days": 30, "candidates": 42, "min_score": 0.8,
+              "unrecorded_domains": ["media_player"], "unrecorded_entities": 3}
 }
 ```
 
@@ -390,6 +403,36 @@ again later keeps the decision. `GET /api/review` answers the signatures
 appliance (`appliance`) the integration created for it: the add-on only
 records the decision, the appliance itself is pushed with
 `PUT /api/appliances`.
+
+### Entity suggestions
+
+Every night, after the registry update, the add-on compares the signatures
+`proposed` and `waiting` (at most 50) with the state changes of the
+**candidate entities**: lights, switches, input booleans, fans, climate and
+water heater entities (their state: the HVAC or operation mode), media
+players, binary sensors, and sensors of the `enum` device class (an
+operation state). Diagnostic and configuration entities, Energy Mapper's own
+entities, the entities the analysis already uses, those linked to an
+appliance and the excluded switched loads are left out (at most 500).
+
+The changes of a day are read once from the recorder (right after the day is
+analysed; the days of the last 30 analysed before are read at the next
+nightly run) and kept 31 days in `/data/changes`. An entity changing more
+than 100 times a day is not compared that day.
+
+For each signature and entity, over the last 30 days: each start (*on*
+step) and end (*off* step) of the signature's activations is matched when
+the entity changes within twice the meter's sampling interval (60 to 300 s)
+into one of its *on states* (the states it enters more often at on steps
+than at off steps; *off* for a pilot-wire relay) for an on step, or into
+another state for an off step. `score` is the share of the steps matched,
+`on_share` and `off_share` the same per kind of step, and `explained` the
+share of the entity's own changes that happen near a step. An entity is
+suggested when `score` is at least `review_suggest_score` (80 %), at least 5
+steps are matched on 3 different days, and `explained` is at least 30 % (an
+entity that changes all the time is never suggested); the best 3 are kept.
+`suggest.unrecorded_domains` lists the candidate domains none of whose
+entities is recorded (recorder exclusions).
 
 Error codes: `invalid_day` (400: not a date, or a day that is not over),
 `no_grid` (422: no grid power sensor found), `no_data` (422: no grid data in

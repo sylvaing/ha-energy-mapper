@@ -14,6 +14,8 @@ from const import VERSION
 from energy_config import DerivedConfig, derive, tracking_gaps
 from ha_client import HAError
 from nilm_core import analyze, parse_numeric
+from nilm_core.correlation import CorrelationConfig
+from nilm_core.correlation import suggest as correlate
 from nilm_core.registry import (
     RegistryConfig,
     day_max_w,
@@ -28,11 +30,22 @@ from review import Criteria
 from review import annotated as annotated_review
 from review import decide as decide_review
 from review import listing as review_listing
+from review import state as review_state
 from settings import SettingsError
 from settings import merge as merge_settings
 from settings import validate as validate_settings
 from statistic_ids import known_statistics
 from storage import ReportStore
+from suggest import (
+    CORRELATION_DAYS,
+    SUGGESTIONS_VERSION,
+    annotate_listing,
+    candidates,
+    changes_file,
+    day_changes_of,
+    linked_entities,
+    unrecorded,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -46,6 +59,9 @@ DEFAULT_PEAK_WINDOW_DAYS = 30
 MAX_START_GAP_S = 3600
 # consecutive days without data after which the backfill stops
 MAX_EMPTY_DAYS = 3
+# entity suggestions (#41): signatures compared per night, at most
+MAX_SUGGESTED_SIGNATURES = 50
+SUGGESTED_STATES = ("proposed", "waiting")
 
 
 class AnalysisError(Exception):
@@ -147,6 +163,8 @@ class Context:
     derived: DerivedConfig
     tz: dt.tzinfo
     entities: list[str] = field(default_factory=list)
+    # entities compared with the signatures to review (suggest.py)
+    candidates: list[str] = field(default_factory=list)
 
 
 class Analyzer:
@@ -245,9 +263,16 @@ class Analyzer:
         return {a["key"] for a in self.appliances}
 
     def review(self) -> dict:
-        """The signatures to review (review.py)."""
+        """The signatures to review (review.py), with their entity
+        suggestions (suggest.py)."""
         registry = self.store.load_registry() or empty_registry(self.registry_config)
-        return review_listing(registry, self.clock(), self.review_criteria, self._appliance_keys())
+        listing = review_listing(registry, self.clock(), self.review_criteria, self._appliance_keys())
+        return annotate_listing(listing, self.store.load_suggestions(), linked_entities(self.appliances))
+
+    @property
+    def correlation_config(self) -> CorrelationConfig:
+        score = self._int_option("review_suggest_score", 80)
+        return CorrelationConfig(min_score=min(max(score, 50), 100) / 100)
 
     def decide(self, sid: str, action: str, appliance: str | None = None) -> dict | None:
         """Record a review decision on a registry signature; returns it with
@@ -362,7 +387,11 @@ class Analyzer:
             learned = memory.get(load.entity_id, {}).get("power_w")
             if learned and not load.power_w:
                 load.power_w = float(learned)
-        return Context(derived, self.tz, list(dict.fromkeys(entities)))
+        # entities that may be a signature: not those already in use
+        used = set(entities) | linked_entities(self.appliances)
+        used |= set(self.options.get("excluded_switched_loads") or [])
+        found = candidates(snap["states"], snap["registry"], used)
+        return Context(derived, self.tz, list(dict.fromkeys(entities)), found)
 
     def _day_max(self, day: str) -> float | None:
         if day not in self._maxima:
@@ -403,6 +432,7 @@ class Analyzer:
         )
         self.store.save(day.isoformat(), report)
         self._maxima[day.isoformat()] = day_max_w(report)
+        self._store_changes_safely(day, ctx)
         self.store.set_state(last_run=self.clock())
         _LOGGER.info(
             "%s analysed: house %.1f kWh, base %d W, %d signatures, %d known loads",
@@ -422,7 +452,100 @@ class Analyzer:
                 raise AnalysisError("invalid_day", f"{day} is not over yet")
             report = self._run_day(day, ctx)
             self._maintain_safely()
+            self._suggest_safely(ctx)
             return report
+
+    # -- entity suggestions (#41) -----------------------------------------------
+    def _store_changes(self, day: dt.date, ctx: Context) -> None:
+        """Read and keep the state changes of the candidate entities on one day."""
+        if not ctx.candidates:
+            return
+        start, end = day_bounds(day, ctx.tz)
+        histories = self.client.history(ctx.candidates, start, end)
+        cfg = self.correlation_config
+        self.store.save_changes(
+            day.isoformat(), changes_file(day.isoformat(), histories, ctx.candidates, start, end, cfg)
+        )
+
+    def _store_changes_safely(self, day: dt.date, ctx: Context) -> None:
+        """Changes of a day just analysed: a failure only costs its suggestions."""
+        try:
+            self._store_changes(day, ctx)
+        except Exception as err:  # HAError, or a malformed history
+            _LOGGER.warning("%s: state changes of the candidate entities not read: %s", day, err)
+
+    def _needs_suggestions(self) -> bool:
+        stored = self.store.load_suggestions() or {}
+        return stored.get("day") != self.today().isoformat() and bool(self.store.summary_days())
+
+    def suggest(self, ctx: Context | None) -> dict:
+        """Score the candidate entities of the signatures to review over the
+        last ``CORRELATION_DAYS`` days and store the suggestions. With a
+        context, the days of the window without stored changes are read
+        first (one history request per day); without one, the candidates of
+        the previous run and the stored changes only are used."""
+        today = self.today()
+        t0 = time.perf_counter()
+        summaries = self.store.summaries_all()
+        days = [d for d in summaries if 0 < (today - dt.date.fromisoformat(d)).days <= CORRELATION_DAYS]
+        previous = self.store.load_suggestions() or {}
+        found = ctx.candidates if ctx is not None else list(previous.get("entities") or [])
+        fetched = 0
+        if ctx is not None and found:
+            have = set(self.store.changes_days())
+            for day in sorted(days, reverse=True):
+                if day in have:
+                    continue
+                try:
+                    self._store_changes(dt.date.fromisoformat(day), ctx)
+                except HAError as err:
+                    _LOGGER.warning("state changes of the candidate entities not read: %s", err)
+                    break
+                fetched += 1
+        files = {d: f for d in days if (f := self.store.load_changes(d)) is not None}
+        registry = self.store.load_registry() or empty_registry(self.registry_config)
+        now, criteria, keys = self.clock(), self.review_criteria, self._appliance_keys()
+        sids = [
+            s["id"]
+            for s in registry.get("signatures") or []
+            if review_state(s, now, criteria, keys) in SUGGESTED_STATES
+        ][:MAX_SUGGESTED_SIGNATURES]
+        cfg = self.correlation_config
+        linked = linked_entities(self.appliances)
+        changes = {
+            day: {e: ch for e, ch in per.items() if e in found and e not in linked}
+            for day, per in day_changes_of(files).items()
+        }
+        result = correlate({d: summaries[d] for d in days}, registry, sids, changes, cfg) if sids else {}
+        data = {
+            "version": SUGGESTIONS_VERSION,
+            "day": today.isoformat(),
+            "computed_at": now,
+            "days": len(files),
+            "candidates": len(found),
+            "min_score": cfg.min_score,
+            "unrecorded": unrecorded(files, found),
+            "entities": found,
+            "signatures": result,
+        }
+        self.store.save_suggestions(data)
+        _LOGGER.info(
+            "suggestions: %d of %d signature(s) matched with %d candidate entities over %d day(s) "
+            "(%d read) in %.2f s",
+            len(result),
+            len(sids),
+            len(found),
+            len(files),
+            fetched,
+            time.perf_counter() - t0,
+        )
+        return data
+
+    def _suggest_safely(self, ctx: Context | None) -> None:
+        try:
+            self.suggest(ctx)
+        except Exception:
+            _LOGGER.exception("entity suggestions failed")
 
     # -- registry and retention ----------------------------------------------
     def _summary_tz(self, summaries: dict[str, dict]) -> dt.tzinfo:
@@ -442,7 +565,10 @@ class Analyzer:
         today = self.today()
         config = self.registry_config
         removed = self.store.prune(
-            today, self.report_retention_days, forget_after_days(config.half_life_days, config.forget_weight)
+            today,
+            self.report_retention_days,
+            forget_after_days(config.half_life_days, config.forget_weight),
+            CORRELATION_DAYS + 1,
         )
         for day in removed["summaries"]:
             self._maxima.pop(day, None)
@@ -506,6 +632,9 @@ class Analyzer:
             if not missing:
                 if self._needs_maintenance():
                     self._maintain_safely()
+                if self._needs_suggestions():
+                    # from the stored changes only: no Home Assistant request
+                    self._suggest_safely(None)
                 return {"analysed": done, "failed": failed}
             ctx = self.prepare()
             # the time zone may have changed with prepare()
@@ -533,6 +662,8 @@ class Analyzer:
                     failed.append(day.isoformat())
             if done or self._needs_maintenance():
                 self._maintain_safely()
+            if done or self._needs_suggestions():
+                self._suggest_safely(ctx)
             return {"analysed": done, "failed": failed}
 
 

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.7.0
+
+- Entity suggestions for the signatures to review (#41), with the integration
+  0.5.0: every night the signatures proposed (and waiting) are compared with
+  the state changes of the Home Assistant entities that may tell when an
+  appliance runs (lights, switches, input booleans, fans, climate, water
+  heaters, media players, binary sensors, `enum` sensors). An entity whose
+  state changes at 80 % of a signature's starts and stops (at least 5 times on
+  3 days), and whose own changes mostly happen then, is suggested, with the
+  states in which the appliance runs. `GET /api/review` gives `suggestions`
+  per signature and `suggest` (with the candidate domains that are not
+  recorded).
+- The changes of the candidate entities are read once per day from the
+  recorder and kept 31 days in `/data/changes`; the suggestions in
+  `/data/suggestions.json`.
+- New setting `review_suggest_score` (80).
+- History requests for many entities are split, so that a request stays
+  short.
+
 ## 0.6.0
 
 - Review of the signatures in the Energy Mapper panel (#10), with the

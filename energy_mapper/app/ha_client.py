@@ -22,6 +22,8 @@ from ws_client import WebSocket, WebSocketError
 _LOGGER = logging.getLogger(__name__)
 
 SUPERVISOR_URL = "http://supervisor"
+# entity ids per history request: Home Assistant refuses request lines over 8 KiB
+MAX_FILTER_CHARS = 3000
 
 
 class HAError(Exception):
@@ -155,9 +157,13 @@ class HAClient:
 
     def history(self, entities: list[str], start: float, end: float) -> dict[str, list[tuple[float, str]]]:
         """Every recorded state of ``entities`` in [start, end], plus the
-        state at ``start``."""
-        if not entities:
-            return {}
+        state at ``start`` (several requests for a long list of entities)."""
+        out: dict[str, list[tuple[float, str]]] = {}
+        for chunk in chunks(entities, MAX_FILTER_CHARS):
+            out.update(self._history(chunk, start, end))
+        return out
+
+    def _history(self, entities: list[str], start: float, end: float) -> dict[str, list[tuple[float, str]]]:
         iso = lambda ts: dt.datetime.fromtimestamp(ts, dt.UTC).isoformat()  # noqa: E731
         query = urlencode(
             {
@@ -168,6 +174,23 @@ class HAClient:
         )
         path = f"/history/period/{quote(iso(start))}?{query}&minimal_response&no_attributes"
         return parse_history(self._get(path), window_start=start)
+
+
+def chunks(entities: list[str], max_chars: int) -> list[list[str]]:
+    """``entities`` (duplicates removed) split into lists whose
+    comma-separated length stays under ``max_chars`` (one entity at least)."""
+    out: list[list[str]] = []
+    cur: list[str] = []
+    size = 0
+    for e in dict.fromkeys(entities):
+        if cur and size + len(e) + 1 > max_chars:
+            out.append(cur)
+            cur, size = [], 0
+        cur.append(e)
+        size += len(e) + 1
+    if cur:
+        out.append(cur)
+    return out
 
 
 def post_discovery(token: str, host: str, port: int, timeout: float = 10.0) -> None:

@@ -15,8 +15,9 @@ GET  /api/appliances          {"appliances": [...]}: the user's appliances (appl
 PUT  /api/appliances          replaces them: {"appliances": <as stored>}
 POST /api/signatures          {"kind", "band", "power_w", "label"}: the signature of an
                               appliance expected before it is seen: {"signature", "created"}
-GET  /api/review              {"criteria", "now", "counts", "signatures"}: the signatures to
-                              review, waiting and ignored (review.py)
+GET  /api/review              {"criteria", "now", "counts", "signatures", "suggest"}: the
+                              signatures to review, waiting and ignored (review.py), with
+                              their entity "suggestions" (suggest.py)
 POST /api/review              {"id", "action": validate|wait|ignore|restore, "appliance"?}:
                               {"signature": <with its review_state>}
 """

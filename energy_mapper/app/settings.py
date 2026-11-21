@@ -34,6 +34,8 @@ NUMBER_KEYS = {
     "review_min_days": (1, 365, True),
     "review_wait_days": (1, 365, True),
     "review_wait_factor": (1.2, 10, False),
+    # entity suggestions (#41): share of the steps (%) an entity must match
+    "review_suggest_score": (50, 100, True),
 }
 KEYS = (
     *SENSOR_KEYS,
@@ -62,6 +64,7 @@ DEFAULTS: dict = {
     "review_min_days": 3,
     "review_wait_days": 14,
     "review_wait_factor": 2.0,
+    "review_suggest_score": 80,
 }
 
 

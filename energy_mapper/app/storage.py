@@ -2,6 +2,9 @@
 
     reports/YYYY-MM-DD.json.gz    full daily report, with the per-minute curve
     summaries/YYYY-MM-DD.json.gz  the same without the curve, kept longer
+    changes/YYYY-MM-DD.json.gz    state changes of the candidate entities (suggest.py),
+                                  kept for the correlation window only
+    suggestions.json              entity suggestions of the signatures to review
     registry.json                 signature registry (nilm_core.registry)
     settings.json                 user settings pushed by the integration
     statistic_ids.json            Energy Mapper statistic id -> appliance
@@ -80,6 +83,8 @@ class ReportStore:
         self.summaries = self.root / "summaries"
         self.reports.mkdir(parents=True, exist_ok=True)
         self.summaries.mkdir(parents=True, exist_ok=True)
+        self.changes = self.root / "changes"
+        self.suggestions_path = self.root / "suggestions.json"
         self._state_path = self.root / "state.json"
         self.registry_path = self.root / "registry.json"
         self.settings_path = self.root / "settings.json"
@@ -165,11 +170,14 @@ class ReportStore:
         self._cache[day] = json.loads(json.dumps(summary))  # a copy, as read back
 
     # -- retention ------------------------------------------------------------
-    def prune(self, today: dt.date, report_days: int, summary_days: float) -> dict:
-        """Delete full reports older than ``report_days`` days and summaries
+    def prune(
+        self, today: dt.date, report_days: int, summary_days: float, changes_days: float | None = None
+    ) -> dict:
+        """Delete full reports older than ``report_days`` days, summaries
         older than ``summary_days`` days (a summary is never deleted while
-        its full report is kept)."""
-        removed = {"reports": [], "summaries": []}
+        its full report is kept) and entity changes older than
+        ``changes_days`` days (or without a summary)."""
+        removed = {"reports": [], "summaries": [], "changes": []}
         for day in self.days():
             if (today - dt.date.fromisoformat(day)).days > report_days:
                 self._report_path(day).unlink(missing_ok=True)
@@ -180,17 +188,56 @@ class ReportStore:
                 self._summary_path(day).unlink(missing_ok=True)
                 self._cache.pop(day, None)
                 removed["summaries"].append(day)
+        kept = set(self.summary_days())
+        for day in self.changes_days():
+            old = changes_days is not None and (today - dt.date.fromisoformat(day)).days > changes_days
+            if old or day not in kept:
+                self._changes_path(day).unlink(missing_ok=True)
+                removed["changes"].append(day)
         return removed
 
     def size_bytes(self) -> int:
         total = 0
-        for folder in (self.reports, self.summaries):
+        for folder in (self.reports, self.summaries, self.changes):
+            if not folder.is_dir():
+                continue
             with os.scandir(folder) as it:
                 total += sum(e.stat().st_size for e in it if e.is_file())
-        for path in (self.registry_path, self._state_path, self.statistic_ids_path):
+        for path in (self.registry_path, self._state_path, self.statistic_ids_path, self.suggestions_path):
             with contextlib.suppress(OSError):
                 total += path.stat().st_size
         return total
+
+    # -- entity changes and suggestions (suggest.py) ---------------------------
+    def _changes_path(self, day: str) -> pathlib.Path:
+        return self.changes / f"{day}{GZ}"
+
+    def changes_days(self) -> list[str]:
+        return _days_in(self.changes) if self.changes.is_dir() else []
+
+    def load_changes(self, day: str) -> dict | None:
+        if not parse_day(day):
+            return None
+        try:
+            data = _read(self._changes_path(day))
+        except (OSError, ValueError, EOFError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def save_changes(self, day: str, data: dict) -> None:
+        if not parse_day(day):
+            raise ValueError(f"bad day: {day!r}")
+        _write_atomic(self._changes_path(day), data, compress=True)
+
+    def load_suggestions(self) -> dict | None:
+        try:
+            data = json.loads(self.suggestions_path.read_text())
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def save_suggestions(self, data: dict) -> None:
+        _write_atomic(self.suggestions_path, data)
 
     # -- signature registry ---------------------------------------------------
     def load_registry(self) -> dict | None:
