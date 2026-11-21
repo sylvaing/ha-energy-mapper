@@ -5,6 +5,7 @@
     registry.json                 signature registry (nilm_core.registry)
     settings.json                 user settings pushed by the integration
     statistic_ids.json            Energy Mapper statistic id -> appliance
+    appliances.json               the user's appliances, pushed by the integration
     state.json                    small persistent state (last run...)
 
 Reports written by older versions as plain ``reports/YYYY-MM-DD.json`` are
@@ -22,6 +23,9 @@ import os
 import pathlib
 import re
 import tempfile
+
+from appliances import AppliancesError
+from appliances import validate as validate_appliances
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -80,6 +84,7 @@ class ReportStore:
         self.registry_path = self.root / "registry.json"
         self.settings_path = self.root / "settings.json"
         self.statistic_ids_path = self.root / "statistic_ids.json"
+        self.appliances_path = self.root / "appliances.json"
         # summaries already read, for the nightly registry update (read-only)
         self._cache: dict[str, dict] = {}
         self.migrate()
@@ -240,3 +245,22 @@ class ReportStore:
 
     def set_state(self, **values) -> None:
         _write_atomic(self._state_path, {**self.state(), **values})
+
+    # -- the user's appliances, declared by the integration -------------------
+    def load_appliances(self) -> list[dict]:
+        """The stored appliances, re-validated ([] when missing or invalid)."""
+        try:
+            data = json.loads(self.appliances_path.read_text())
+        except FileNotFoundError:
+            return []
+        except (OSError, ValueError) as err:
+            _LOGGER.warning("unreadable appliances file, ignored: %s", err)
+            return []
+        try:
+            return validate_appliances(data)
+        except AppliancesError as err:
+            _LOGGER.warning("invalid appliances file, ignored: %s", err)
+            return []
+
+    def save_appliances(self, appliances: list[dict]) -> None:
+        _write_atomic(self.appliances_path, {"appliances": appliances})

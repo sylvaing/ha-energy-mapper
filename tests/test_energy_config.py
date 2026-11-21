@@ -415,6 +415,58 @@ class OwnStatisticTests(unittest.TestCase):
         self.assertEqual(len(d.config.switched_loads), 2)
 
 
+class DeclaredApplianceTests(unittest.TestCase):
+    """Appliances declared by the integration (#11) over #36."""
+
+    def appliances(self):
+        return [
+            # the heater statistic, now re-linked to a signature (merged away)
+            {
+                "key": "load:switch.water_heater",
+                "name": "Boiler",
+                "statistic_id": HEATER,
+                "sources": [{"type": "signature", "id": "long-500w"}],
+            },
+            # the radiator, renamed; its learned polarity is kept
+            {
+                "key": "load:switch.radiator_relay",
+                "name": "Bedroom radiator",
+                "statistic_id": RADIATOR,
+                "sources": [{"type": "switched_load", "entity_id": "switch.radiator_relay"}],
+            },
+        ]
+
+    def test_declared_appliances_win_and_are_known(self):
+        mapping = known_statistics(learned_registry(), None, self.appliances())
+        self.assertEqual(mapping[HEATER]["kind"], KIND_SIGNATURE)
+        self.assertEqual(mapping[HEATER]["appliance"], "load:switch.water_heater")
+        self.assertEqual(mapping[RADIATOR]["name"], "Bedroom radiator")
+        self.assertEqual(mapping[RADIATOR]["on_states"], ["off"])
+        h = swapped_installation()
+        h.devices[2].pop("name")
+        d = derive(h.prefs(), h.states, h.registry, statistics=mapping)
+        self.assertNotIn("unknown_statistic", [f.kind for f in d.findings])
+        loads = {s.entity_id: (s.name, s.on_states) for s in d.config.switched_loads}
+        self.assertEqual(loads, {"switch.radiator_relay": ("Bedroom radiator", ("off",))})
+
+    def test_marker_of_a_deleted_appliance_is_dropped(self):
+        mapping = known_statistics(learned_registry(), None, self.appliances())
+        later = known_statistics(learned_registry(), mapping, [])
+        self.assertNotIn("appliance", later[HEATER])
+        self.assertEqual(later[HEATER]["source_id"], "switch.water_heater")  # from the registry
+
+    def test_excluded_switch_is_not_measured_from_its_statistic(self):
+        h = swapped_installation()
+        d = derive(
+            h.prefs(),
+            h.states,
+            h.registry,
+            {"excluded_switched_loads": ["switch.radiator_relay"]},
+            known_statistics(learned_registry()),
+        )
+        self.assertEqual([s.entity_id for s in d.config.switched_loads], ["switch.water_heater"])
+
+
 class GapTests(unittest.TestCase):
     def test_underestimated_switched_device(self):
         h = meter_with_channels()

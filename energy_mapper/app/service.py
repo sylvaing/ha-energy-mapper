@@ -9,11 +9,20 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from appliances import analysis_options, apply_to_registry
 from const import VERSION
 from energy_config import DerivedConfig, derive, tracking_gaps
 from ha_client import HAError
 from nilm_core import analyze, parse_numeric
-from nilm_core.registry import RegistryConfig, day_max_w, forget_after_days, peak_reference
+from nilm_core.registry import (
+    RegistryConfig,
+    day_max_w,
+    empty_registry,
+    expected_signature,
+    forget_after_days,
+    nearest_signature,
+    peak_reference,
+)
 from nilm_core.registry import update as update_registry
 from settings import SettingsError
 from settings import merge as merge_settings
@@ -69,6 +78,10 @@ def derive_options(options: dict) -> dict:
         loads.append({"entity_id": entity, "name": item.get("name") or entity, "on_states": states or ["on"]})
     if loads:
         out["switched_loads"] = loads
+    excluded = [s.strip() for s in options.get("excluded_switched_loads") or [] if s and s.strip()]
+    if excluded:
+        out["excluded_switched_loads"] = excluded
+    out = analysis_options(out, options.get("appliances") or [])
     for key in ("step_threshold_w", "peak_threshold_w"):
         if options.get(key):
             out[key] = float(options[key])
@@ -151,15 +164,20 @@ class Analyzer:
             self.settings = {}
         if self.settings:
             _LOGGER.info("settings from the integration: %s", ", ".join(sorted(self.settings)))
+        # the user's appliances, declared by the integration (appliances.py)
+        self.appliances: list[dict] = store.load_appliances()
         self.clock = clock
         self.lock = threading.Lock()
+        # registry writes outside the analysis (labels): never waits for an analysis
+        self._registry_lock = threading.Lock()
         self.tz: dt.tzinfo = local_tz(None)
         self._maxima: dict[str, float | None] = {}  # daily maxima already read
 
     @property
     def options(self) -> dict:
-        """The effective options: the add-on options with the settings on top."""
-        return merge_settings(self.base_options, self.settings)
+        """The effective options: the add-on options with the settings on
+        top, and the user's appliances."""
+        return {**merge_settings(self.base_options, self.settings), "appliances": self.appliances}
 
     @options.setter
     def options(self, value: dict) -> None:
@@ -170,6 +188,35 @@ class Analyzer:
         self.store.save_settings(settings)
         self.settings = settings
         _LOGGER.info("settings updated: %s", ", ".join(sorted(settings)) or "none (add-on options)")
+
+    def set_appliances(self, appliances: list[dict]) -> None:
+        """Store already validated appliances and apply them to the registry
+        (labels); the next analysis uses their switched loads and sub-meters."""
+        with self._registry_lock:
+            self.store.save_appliances(appliances)
+            self.appliances = appliances
+            registry = self.store.load_registry()
+            if registry is not None and apply_to_registry(registry, appliances, self.clock()):
+                self.store.save_registry(registry)
+        _LOGGER.info("appliances updated: %d", len(appliances))
+
+    def expect_signature(self, kind: str, band: str, power_w: float, label: str) -> tuple[dict, bool]:
+        """A signature for an appliance the user declares before it is seen
+        ("Kettle, 2000 W"): the unlabelled signature it would be matched to
+        when there is one, else a new expected signature. Returns (signature,
+        created). Raises ``ValueError`` when the nearest signature already
+        belongs to an appliance."""
+        with self._registry_lock:
+            registry = self.store.load_registry() or empty_registry(self.registry_config)
+            near = nearest_signature(registry, kind, band, power_w)
+            if near is not None:
+                if near.get("label"):
+                    raise ValueError(near["id"])
+                return near, False
+            sig = expected_signature(registry, kind, band, power_w, label, self.clock())
+            registry["signatures"].append(sig)
+            self.store.save_registry(registry)
+            return sig, True
 
     def automatic(self) -> dict:
         """The sensors the analysis would use without the settings: the
@@ -233,10 +280,11 @@ class Analyzer:
         return dt.datetime.fromtimestamp(self.clock(), self.tz).date()
 
     def known_statistics(self, save: bool = True) -> dict:
-        """The Energy Mapper statistic ids of the appliances of the registry,
-        and those of the stored mapping (stored back when it changed)."""
+        """The Energy Mapper statistic ids of the appliances of the registry
+        and of those declared by the integration, and those of the stored
+        mapping (stored back when it changed)."""
         previous = self.store.load_statistic_ids()
-        mapping = known_statistics(self.store.load_registry(), previous)
+        mapping = known_statistics(self.store.load_registry(), previous, self.appliances)
         if save and mapping != previous:
             try:
                 self.store.save_statistic_ids(mapping)
@@ -362,7 +410,10 @@ class Analyzer:
         registry = update_registry(
             previous, summaries, now, config, local_hour=lambda ts: dt.datetime.fromtimestamp(ts, tz).hour
         )
-        self.store.save_registry(registry)
+        with self._registry_lock:
+            # the appliances may have changed during the update
+            apply_to_registry(registry, self.appliances, now)
+            self.store.save_registry(registry)
         self.store.set_state(last_maintenance=today.isoformat())
         _LOGGER.info(
             "registry %s: %d signature(s) from %d day(s) in %.2f s; pruned %d report(s), %d summary(ies)",

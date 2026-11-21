@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.0
+
+- The user's appliances, managed in Home Assistant by the Energy Mapper
+  integration 0.3.0 (one config subentry each, #11): new endpoints
+  `GET /api/appliances` and `PUT /api/appliances`, stored in
+  `/data/appliances.json`. Signature sources give their signature its name
+  (`label`, and the appliance's key as `appliance`; labels no appliance
+  declares are cleared, and a declared signature lost from the registry is
+  recreated); switched-load sources are analysed as switched loads named after
+  the appliance; sub-meter sources are subtracted before the analysis.
+- New endpoint `POST /api/signatures`: an appliance declared before it is seen
+  ("Kettle, 2000 W"): an *expected* signature, named and never forgotten, whose
+  id is taken by the first cluster of its group within 12 % of its power.
+- New setting `excluded_switched_loads` (#33): switches of the Energy dashboard
+  that are not measured as switched loads (their estimate is subtracted like
+  any other). The integration adds the switch of a deleted appliance.
+- Tracking gaps compare a switched load by entity, so a renamed one is still
+  checked.
+
 ## 0.4.1
 
 - Automatic configuration: Energy Mapper's own statistics

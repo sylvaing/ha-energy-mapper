@@ -11,6 +11,10 @@ POST /api/analyze?day=YYYY-MM-DD
                               {"day", "ok": true} or {"day", "ok": false, "error", "message"}
 GET  /api/settings            {"settings", "options", "defaults", "automatic"}
 PUT  /api/settings            replaces the settings: {"settings": <as stored>}
+GET  /api/appliances          {"appliances": [...]}: the user's appliances (appliances.py)
+PUT  /api/appliances          replaces them: {"appliances": <as stored>}
+POST /api/signatures          {"kind", "band", "power_w", "label"}: the signature of an
+                              appliance expected before it is seen: {"signature", "created"}
 """
 
 from __future__ import annotations
@@ -20,10 +24,12 @@ import logging
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
+from appliances import AppliancesError
+from appliances import validate as validate_appliances
 from const import VERSION
 from ha_client import HAError
 from nilm_core.hourly import hourly_breakdown
-from nilm_core.registry import annotate_report, empty_registry
+from nilm_core.registry import GROUPS, annotate_report, empty_registry
 from service import AnalysisError, Analyzer
 from settings import KEYS as SETTINGS_KEYS
 from settings import SettingsError
@@ -54,6 +60,33 @@ def _settings(analyzer: Analyzer) -> dict:
         "defaults": settings_defaults(base),
         "automatic": automatic,
     }
+
+
+def _expect_signature(analyzer: Analyzer, body: bytes) -> tuple[int, dict]:
+    try:
+        data = json.loads(body or b"null")
+    except ValueError:
+        return 400, {"error": "invalid_json", "message": "the body is not JSON"}
+    if not isinstance(data, dict):
+        return 400, {"error": "invalid_signature", "message": "expected a JSON object"}
+    group = (data.get("kind"), data.get("band") or ("session" if data.get("kind") == "cycling" else None))
+    power = data.get("power_w")
+    label = data.get("label")
+    if group not in GROUPS:
+        return 400, {"error": "invalid_signature", "message": "kind/band: unknown group"}
+    if isinstance(power, bool) or not isinstance(power, int | float) or not 50 <= power <= 100000:
+        return 400, {"error": "invalid_signature", "message": "power_w: expected 50 to 100000"}
+    if not isinstance(label, str) or not label.strip() or len(label) > 100:
+        return 400, {"error": "invalid_signature", "message": "label: expected a text of 1 to 100 characters"}
+    try:
+        sig, created = analyzer.expect_signature(group[0], group[1], float(power), label.strip())
+    except ValueError as err:
+        return 409, {
+            "error": "conflict",
+            "message": f"a signature of another appliance is at this power: {err}",
+            "id": str(err),
+        }
+    return 200, {"signature": sig, "created": created}
 
 
 def route(
@@ -154,7 +187,32 @@ def route(
         analyzer.set_settings(settings)
         return 200, {"settings": settings}
 
-    known = {"/api/health", "/api/days", "/api/analyze", "/api/signatures", "/api/settings"}
+    if path == "/api/appliances" and method == "GET":
+        return 200, {"appliances": analyzer.appliances}
+
+    if path == "/api/appliances" and method == "PUT":
+        try:
+            data = json.loads(body or b"null")
+        except ValueError:
+            return 400, {"error": "invalid_json", "message": "the body is not JSON"}
+        try:
+            appliances = validate_appliances(data)
+        except AppliancesError as err:
+            return 400, {"error": "invalid_appliances", "message": str(err)}
+        analyzer.set_appliances(appliances)
+        return 200, {"appliances": appliances}
+
+    if path == "/api/signatures" and method == "POST":
+        return _expect_signature(analyzer, body)
+
+    known = {
+        "/api/health",
+        "/api/days",
+        "/api/analyze",
+        "/api/signatures",
+        "/api/settings",
+        "/api/appliances",
+    }
     if path in known or path.startswith(("/api/report/", "/api/hourly/")):
         return 405, {"error": "method_not_allowed"}
     return 404, {"error": "not_found"}

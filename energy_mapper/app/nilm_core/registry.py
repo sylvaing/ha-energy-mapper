@@ -551,3 +551,64 @@ def annotate_report(report: dict, registry: Mapping | None) -> dict:
             if part.get("kind") == "signature":
                 part["registry_id"] = by_start.get(part.get("since"))
     return report
+
+
+# ---------------------------------------------------------------------------
+# user appliances: labels and expected signatures
+# ---------------------------------------------------------------------------
+# kind, band of the groups a signature can be in
+GROUPS = (("steady", "short"), ("steady", "medium"), ("steady", "long"), ("cycling", "session"))
+# typical duration of an expected signature, before its first use is seen
+_BAND_DURATION_S = {"short": 120, "medium": 1200, "long": 7200, "session": 1800}
+
+
+def nearest_signature(registry: Mapping | None, kind: str, band: str, power_w: float) -> dict | None:
+    """The signature of ``registry`` an activation of this group and power
+    would be matched to (the clustering's rule), or None."""
+    registry = registry or {}
+    tol = float(registry.get("power_tol") or RegistryConfig.power_tol)
+    group = _group_of(kind, band)
+    sigs = {s["id"]: s for s in registry.get("signatures") or [] if _group_of(s["kind"], s["band"]) == group}
+    centers = sorted((float(s["power_w"]), sid) for sid, s in sigs.items() if s.get("power_w"))
+    sid = _nearest(centers, float(power_w), tol)
+    return sigs.get(sid) if sid else None
+
+
+def expected_signature(
+    registry: Mapping | None, kind: str, band: str, power_w: float, label: str | None, now: float
+) -> dict:
+    """A signature the user expects before it is seen ("Kettle, 2000 W"):
+    no activation, weight 0, kept while labelled. The first cluster of the
+    same group within the power tolerance takes its id (labelled signatures
+    are matched first), so the appliance is recognised from its first use."""
+    kind, band = _group_of(kind, band)
+    used = {s["id"] for s in (registry or {}).get("signatures") or []}
+    base = signature_id(kind, band, power_w)
+    sid, n = base, 1
+    while sid in used:
+        n += 1
+        sid = f"{base}-{n}"
+    cycling = kind == "cycling"
+    return {
+        "id": sid,
+        "kind": kind,
+        "band": band,
+        "label": label,
+        "power_w": round(power_w),
+        "duration_s": _BAND_DURATION_S[band],
+        "on_s": None,
+        "period_s": None,
+        "duty": 0.5 if cycling else None,
+        "weight": 0.0,
+        "count": 0,
+        "days_seen": 0,
+        "per_week": 0.0,
+        "first_seen": None,
+        "last_seen": None,
+        "hours": [0.0] * 24,
+        "energy_kwh": 0.0,
+        "weighted_energy_kwh": 0.0,
+        "examples": [],
+        "created_at": now,
+        "expected": True,
+    }

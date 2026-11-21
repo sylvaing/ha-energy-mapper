@@ -488,7 +488,7 @@ class AddonRegistryTests(unittest.TestCase):
         status, report = route(analyzer, store, "GET", "/api/report/2027-01-05")
         self.assertEqual((status, report["curve"], report["curve_pruned"]), (200, [], True))
         self.assertEqual(report["activations"][0]["registry_id"], "short-2000w")
-        self.assertEqual(route(analyzer, store, "POST", "/api/signatures")[0], 405)
+        self.assertEqual(route(analyzer, store, "DELETE", "/api/signatures")[0], 405)
 
 
 # ---------------------------------------------------------------------------

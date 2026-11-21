@@ -30,7 +30,15 @@ NUMBER_KEYS = {
     "report_retention_days": (7, 3650, True),
     "peak_window_days": (1, 365, True),
 }
-KEYS = (*SENSOR_KEYS, *BOOL_KEYS, "submeters", "switched_loads", *NUMBER_KEYS, "analysis_time")
+KEYS = (
+    *SENSOR_KEYS,
+    *BOOL_KEYS,
+    "submeters",
+    "switched_loads",
+    "excluded_switched_loads",
+    *NUMBER_KEYS,
+    "analysis_time",
+)
 
 # used for a key that is neither in the settings nor in the add-on options
 # (step_threshold_w: the default of the analysis; peak_threshold_w: None means
@@ -135,6 +143,9 @@ def validate(data) -> dict:
             if len(set(seen)) != len(seen):
                 raise SettingsError("switched_loads: the same entity is listed twice")
             out[key] = loads
+        elif key == "excluded_switched_loads":
+            items = [_entity(f"{key}[{i}]", v) for i, v in enumerate(_list(key, value))]
+            out[key] = list(dict.fromkeys(items))
     return out
 
 

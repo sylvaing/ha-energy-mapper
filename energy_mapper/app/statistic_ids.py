@@ -22,7 +22,7 @@ so the learned polarity of a relay is not lost.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 DOMAIN = "energy_mapper"
@@ -64,13 +64,26 @@ def kind_of(stat_id: str) -> str | None:
     return None
 
 
-def known_statistics(registry: Mapping[str, Any] | None, previous: Mapping[str, Any] | None = None) -> dict:
+def known_statistics(
+    registry: Mapping[str, Any] | None,
+    previous: Mapping[str, Any] | None = None,
+    appliances: Iterable[Mapping[str, Any]] | None = None,
+) -> dict:
     """``{statistic id: {"kind", "source_id", "name", "on_states"}}``: the
     statistics the integration publishes for the appliances of ``registry``
     (every learned switched load, every labelled signature), over the
     ``previous`` mapping (entries of appliances the registry forgot are kept;
-    ``on_states`` only for switched loads, empty when not learned yet)."""
-    out: dict[str, dict] = {k: dict(v) for k, v in (previous or {}).items() if isinstance(v, Mapping)}
+    ``on_states`` only for switched loads, empty when not learned yet).
+
+    The ``appliances`` declared by the integration come last and win: their
+    statistic id keeps its identity across renames, re-links and merges, so
+    its entry names the appliance (``appliance``: its key) and its current
+    first relay (``kind`` load) or signature. Only current appliances carry
+    ``appliance``: the marker of a deleted one is dropped."""
+    out: dict[str, dict] = {}
+    for k, v in (previous or {}).items():
+        if isinstance(v, Mapping):
+            out[k] = {f: x for f, x in v.items() if f != "appliance"}
     registry = registry or {}
     for load in registry.get("switched_loads") or []:
         entity = load.get("entity_id")
@@ -92,4 +105,22 @@ def known_statistics(registry: Mapping[str, Any] | None, previous: Mapping[str, 
             "source_id": sig["id"],
             "name": str(sig["label"]),
         }
+    for appliance in appliances or ():
+        sid = appliance.get("statistic_id")
+        if not sid or not is_own(sid):
+            continue
+        srcs = appliance.get("sources") or []
+        relay = next((x for x in srcs if x.get("type") == "switched_load"), None)
+        sig = next((x for x in srcs if x.get("type") == "signature"), None)
+        entry: dict[str, Any] = {"name": appliance.get("name") or sid, "appliance": appliance.get("key")}
+        if relay:
+            learned = out.get(statistic_id(KIND_LOAD, relay["entity_id"])) or out.get(sid) or {}
+            entry.update(
+                kind=KIND_LOAD,
+                source_id=relay["entity_id"],
+                on_states=list(relay.get("on_states") or learned.get("on_states") or []),
+            )
+        else:
+            entry.update(kind=KIND_SIGNATURE, source_id=sig["id"] if sig else None)
+        out[sid] = entry
     return dict(sorted(out.items()))

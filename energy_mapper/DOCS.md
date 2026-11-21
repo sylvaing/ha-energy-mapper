@@ -133,7 +133,7 @@ Each signature keeps:
 |---|---|
 | `id` | Stable identity, for example `short-2000w` (steady, under 10 min), `medium-...` (10 to 60 min), `long-...` (over 1 h) or `cyc-1400w` (cycling session). |
 | `kind`, `band` | `steady` or `cycling`; `short`, `medium`, `long` or `session`. |
-| `label` | Name given by the user (`null` for now). A named signature is never forgotten. |
+| `label`, `appliance` | Name and key of the Home Assistant appliance this signature belongs to (`null` when none). A named signature is never forgotten. |
 | `power_w`, `duration_s` | Typical power and duration (weighted medians). |
 | `on_s`, `period_s`, `duty` | Typical cycle of a cycling session (`null` for steady loads). |
 | `weight` | Weighted number of uses (each use counts 1 when new, 0.5 after one half-life). |
@@ -144,6 +144,7 @@ Each signature keeps:
 | `energy_kwh`, `weighted_energy_kwh` | Energy of the stored uses, raw and weighted. |
 | `examples` | The most recent uses: `day`, `start`, `end` (unix time), `power_w`. |
 | `created_at` | When the id was given (unix time). |
+| `expected` | `true` for a signature declared by the user before it is seen ("Kettle, 2000 W"): no use yet; the first cluster of its group within 12 % of its power takes its id and name. |
 
 The id stays the same from one night to the next as long as the cluster is
 still there: the clusters of the night are matched to the signatures of the
@@ -173,6 +174,7 @@ bounded, whatever the age of the installation:
 | Day summary: everything but the curve (`summaries/`, gzip) | until the weight of its activations falls below 1 % (~200 days with a 30-day half-life) | ~1 MB |
 | Signature registry (`registry.json`) | while a signature's weight is above 1 %; forever once it is named | tens of KB |
 | Energy Mapper statistic id of each published appliance (`statistic_ids.json`) | forever | a few KB |
+| The user's appliances, pushed by the integration (`appliances.json`) | until replaced | a few KB |
 
 Pruning runs after each nightly analysis. The registry is rebuilt from the
 day summaries if it is missing or unreadable. Reports stored as plain JSON
@@ -186,7 +188,7 @@ announces itself to Home Assistant through Supervisor discovery.
 
 | Request | Answer |
 |---|---|
-| `GET /api/health` | `{"status": "ok", "version": "0.4.1", "last_run": <unix time or null>, "days": <number of full reports>, "signatures": <registry size>, "storage_bytes": <size of /data>}` |
+| `GET /api/health` | `{"status": "ok", "version": "0.5.0", "last_run": <unix time or null>, "days": <number of full reports>, "signatures": <registry size>, "storage_bytes": <size of /data>}` |
 | `GET /api/days` | `{"days": [...], "summary_days": [...], "generated": {"YYYY-MM-DD": <unix time>}}`: days with a full report, and older days with only a summary, oldest first; `generated` tells when each full report was made |
 | `GET /api/report/YYYY-MM-DD` | The report with the registry ids, or 404. For a day with only a summary: `curve` is empty and `curve_pruned` is `true` |
 | `GET /api/hourly/YYYY-MM-DD` | The energy of each appliance per hour of that day (below), or 404 when the day has no per-minute curve |
@@ -194,6 +196,9 @@ announces itself to Home Assistant through Supervisor discovery.
 | `POST /api/analyze?day=YYYY-MM-DD` | Analyses that day now: `{"day": "...", "ok": true}`, or `{"day": "...", "ok": false, "error": "<code>", "message": "..."}` |
 | `GET /api/settings` | The settings pushed by the integration and what applies without them (below) |
 | `PUT /api/settings` | Replaces the settings (JSON object, below): `{"settings": {...}}` as stored, or 400 `invalid_settings` |
+| `GET /api/appliances` | The user's appliances: `{"appliances": [...]}` (below) |
+| `PUT /api/appliances` | Replaces them: `{"appliances": [...]}` as stored, or 400 `invalid_appliances` |
+| `POST /api/signatures` | `{"kind": "steady" or "cycling", "band": "short", "medium" or "long", "power_w", "label"}`: the signature of an appliance not seen yet: `{"signature": {...}, "created": true}`; an existing unnamed signature at that power is returned as is (`created: false`); 409 `conflict` when it already belongs to another appliance |
 
 `GET /api/signatures` answers:
 
@@ -279,6 +284,7 @@ Accepted keys (all optional; `null`, `""` and `[]` mean "absent"):
 | `grid_invert`, `battery_invert` | `true` or `false` |
 | `submeters` | List of `sensor.` entity ids (replaces those of the Energy dashboard) |
 | `switched_loads` | List of `{"entity_id", "name"?, "on_states"?: [...]}` (added to, or replacing, those of the Energy dashboard) |
+| `excluded_switched_loads` | List of entity ids: switches of the Energy dashboard not measured as switched loads (their estimate is subtracted like any other); a switched load of `switched_loads` or of an appliance is still measured |
 | `step_threshold_w` | 50 to 10000 |
 | `peak_threshold_w` | 100 to 100000 |
 | `analysis_time` | `HH:MM` (or `HH:MM:SS`, stored as `HH:MM`); applies after the next analysis |
@@ -308,6 +314,39 @@ the scalar keys without settings (add-on option, else default), and
 `automatic` the sensors the analysis uses without settings (Energy dashboard
 and add-on options), read live from Home Assistant (`null` when it cannot be
 read).
+
+### Appliances
+
+The appliances are managed in Home Assistant (one config subentry each) and
+the integration pushes the whole list after every change, with
+`PUT /api/appliances`; the add-on stores it in `/data/appliances.json` and
+applies it:
+
+```json
+{"appliances": [
+  {"key": "load:switch.water_heater", "name": "Water heater",
+   "statistic_id": "energy_mapper:load_switch_water_heater_energy",
+   "sources": [{"type": "switched_load", "entity_id": "switch.water_heater", "on_states": ["on"]}]},
+  {"key": "signature:short-2000w", "name": "Kettle",
+   "sources": [{"type": "signature", "id": "short-2000w", "kind": "steady", "band": "short", "power_w": 2000}]},
+  {"key": "signature:long-500w", "name": "Dryer",
+   "sources": [{"type": "submeter", "entity_id": "sensor.dryer_plug_power"}]}
+]}
+```
+
+- a **signature** source gets the appliance's name as `label` in the registry
+  (labels no appliance declares are cleared: deleting an appliance in Home
+  Assistant forgets its name). A declared signature missing from the registry
+  is recreated from its `kind`, `band` and `power_w`;
+- a **switched load** source is analysed as a switched load named after the
+  appliance (on-states: the declared ones, else those of the settings, else
+  `on`; the polarity is still detected automatically);
+- a **sub-meter** source is subtracted before the analysis, in addition to the
+  sub-meters of the settings or of the Energy dashboard.
+
+An appliance with several sources is the result of a merge: the integration
+adds their energy. A source belongs to one appliance only; the keys are
+unique; at most 200 appliances of 20 sources.
 
 Error codes: `invalid_day` (400: not a date, or a day that is not over),
 `no_grid` (422: no grid power sensor found), `no_data` (422: no grid data in

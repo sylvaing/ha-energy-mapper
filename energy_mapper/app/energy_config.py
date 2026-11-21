@@ -195,6 +195,14 @@ def _own_statistic(
     load to keep measuring, its entity, finding). Never a sub-meter: its
     energy is what the analysis itself attributes to the appliance."""
     known = statistics.get(stat_id) or {}
+    if known.get("appliance"):
+        # an appliance declared in Home Assistant: known whatever its links
+        label = name or known.get("name") or stat_id
+        entity = known.get("source_id") if known.get("kind") == KIND_LOAD else None
+        if entity and entity in idx.states:
+            on_states = tuple(known.get("on_states") or ("on",))
+            return label, SwitchedLoadConfig(entity, label, on_states), entity, None
+        return label, None, entity, None
     kind = kind_of(stat_id)
     if kind == KIND_LOAD:
         entity = known.get("source_id") if known.get("kind") == KIND_LOAD else None
@@ -233,7 +241,9 @@ def derive(
 ) -> DerivedConfig:
     """Build the analysis configuration. ``options`` are the user's manual
     settings (grid_entity, grid_export_entity, grid_invert, pv_entity,
-    battery_entity, battery_invert, submeters, switched_loads, thresholds).
+    battery_entity, battery_invert, submeters, switched_loads, thresholds;
+    excluded_switched_loads: switches never measured as switched loads;
+    extra_submeters: (entity, name) always subtracted).
     ``statistics`` maps Energy Mapper's own statistic ids to their appliance
     (an appliance whose estimate was replaced by its Energy Mapper statistic
     in the Energy dashboard stays measured)."""
@@ -288,6 +298,9 @@ def derive(
     submeters: list[SubmeterConfig] = []
     switched: list[SwitchedLoadConfig] = []
     own: dict[str, SwitchedLoadConfig] = {}  # from Energy Mapper statistics, by entity
+    # switched loads the user excluded: an estimate driven by such a switch is
+    # subtracted like any other estimate instead of being measured
+    excluded = set(options.get("excluded_switched_loads") or [])
     devices = (prefs or {}).get("device_consumption") or []
     parents = {d.get("stat_consumption") for d in devices}
     for d in devices:
@@ -303,7 +316,7 @@ def derive(
                 # counted inside another tracked device: never subtract twice
                 out.tracked.append(TrackedDevice(name, energy, None, "nested", entity))
                 continue
-            if load:
+            if load and load.entity_id not in excluded:
                 own[load.entity_id] = load
             out.tracked.append(TrackedDevice(name, energy, None, "energy_mapper", entity))
             continue
@@ -318,7 +331,7 @@ def derive(
             # counted inside another tracked device: never subtract twice
             out.tracked.append(TrackedDevice(name, energy, power, "nested", src))
             continue
-        if src and src.split(".")[0] in SWITCH_DOMAINS:
+        if src and src.split(".")[0] in SWITCH_DOMAINS and src not in excluded:
             # estimated from a switch: the engine measures it from the switch
             switched.append(SwitchedLoadConfig(src, name))
             out.tracked.append(TrackedDevice(name, energy, power, "switched", src))
@@ -349,6 +362,10 @@ def derive(
     battery = options.get("battery_entity") or battery
     if options.get("submeters") is not None:
         submeters = [SubmeterConfig(e, e) for e in options["submeters"]]
+    # sub-meters of the user's appliances: always added
+    for entity, label in options.get("extra_submeters") or []:
+        if all(m.entity_id != entity for m in submeters):
+            submeters.append(SubmeterConfig(entity, label))
     for item in options.get("switched_loads") or []:
         entity = item["entity_id"]
         switched = [s for s in switched if s.entity_id != entity]
@@ -390,10 +407,12 @@ def tracking_gaps(
     few watts for a 2 kW water heater)."""
     out: list[Finding] = []
     measured = report.get("energy_kwh", {}).get("known", {})
+    # switched loads by entity: their name may differ from the device's
+    by_entity = {k.get("entity_id"): k.get("name") for k in report.get("known_loads") or []}
     for t in tracked:
         if t.role != "switched":
             continue
-        got = measured.get(t.name)
+        got = measured.get(by_entity.get(t.source_entity, t.name))
         rows = [(ts, _number(v)) for ts, v in histories.get(t.energy_entity, [])]
         rows = [(ts, v) for ts, v in rows if v is not None and report["start"] <= ts < report["end"]]
         if got is None or len(rows) < 2:
