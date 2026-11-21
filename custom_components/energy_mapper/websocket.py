@@ -145,6 +145,8 @@ async def ws_analyze(
             # the day's report changes (or appears)
             if (entry := _entry(hass)) is not None and entry.state is ConfigEntryState.LOADED:
                 entry.runtime_data.day_stats.pop(msg["day"], None)
+                # its hourly statistics and the appliance sensors follow
+                entry.runtime_data.coordinator.async_schedule_sync()
 
     await _relay(hass, connection, msg, analyze)
 

@@ -21,4 +21,10 @@ async def async_get_config_entry_diagnostics(
             "health": coordinator.data,
             "settings_synced": coordinator.settings_synced,
         },
+        "appliances": {
+            key: {**a.as_dict(), "statistic_id": a.statistic_id, "last_seen": coordinator.last_seen.get(key)}
+            for key, a in coordinator.appliances.items()
+        },
+        "imported_days": coordinator.imported,
+        "latest_day": coordinator.latest.get("day"),
     }

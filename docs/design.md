@@ -1,6 +1,6 @@
 # Energy Mapper: design
 
-This document describes how Energy Mapper works as of v0 (add-on 0.3.0, integration 0.1.0):
+This document describes how Energy Mapper works as of add-on 0.4.0 and integration 0.2.0:
 the architecture, the analysis engine, how the Energy dashboard is used, storage, the APIs
 and the reasons behind the main choices. User documentation: the [README](../README.md) and
 the [add-on documentation](../energy_mapper/DOCS.md).
@@ -14,7 +14,7 @@ the [add-on documentation](../energy_mapper/DOCS.md).
 5. [Using the Energy dashboard](#5-using-the-energy-dashboard)
 6. [Storage and retention](#6-storage-and-retention)
 7. [Add-on HTTP API](#7-add-on-http-api)
-8. [Integration websocket API](#8-integration-websocket-api)
+8. [Integration: websocket API, appliances and statistics](#8-integration-websocket-api-appliances-and-statistics)
 9. [Settings and precedence](#9-settings-and-precedence)
 10. [Design choices](#10-design-choices)
 11. [Known limits](#11-known-limits)
@@ -54,6 +54,7 @@ flowchart LR
       CO[Coordinator: health poll, settings push]
       WS[Websocket commands]
       PS[Panel registration and static bundle]
+      SE[Appliance devices and sensors]
     end
   end
   subgraph FE["Browser / companion app"]
@@ -67,7 +68,9 @@ flowchart LR
   end
   P -- "hass.callWS" --> WS
   WS -- HTTP --> API
-  CO -- "GET /api/health, PUT /api/settings" --> API
+  CO -- "GET /api/health, PUT /api/settings, GET /api/days, /api/signatures, /api/hourly" --> API
+  CO -- "external statistics (hourly kWh)" --> REC
+  CO --> SE
   CF -- "GET/PUT /api/settings" --> API
   SV -- "REST history, websocket (read-only), via the Supervisor proxy" --> REC
   SV --> EN
@@ -81,11 +84,12 @@ flowchart LR
 |---|---|---|
 | `nilm_core` | `energy_mapper/app/nilm_core/` | The engine: pure functions on lists of `(timestamp, value)`, standard library only, no Home Assistant import, no I/O, no clock. Testable and replayable offline. |
 | Add-on service | `energy_mapper/app/` | Reads Home Assistant through the Supervisor (`homeassistant_api: true`, no token to create), derives the configuration from the Energy dashboard, runs the nightly analysis, maintains the signature registry and the storage, serves the internal HTTP API, announces itself through Supervisor discovery. |
-| Integration | `custom_components/energy_mapper/` | Finds the add-on (discovery or manual address), keeps the user's settings in its config entry and pushes them to the add-on, relays the add-on API to the frontend as websocket commands, registers the sidebar panel. No computation, no entities in v0. |
+| Integration | `custom_components/energy_mapper/` | Finds the add-on (discovery or manual address), keeps the user's settings in its config entry and pushes them to the add-on, relays the add-on API to the frontend as websocket commands, registers the sidebar panel, publishes the appliances as devices with sensors and imports their hourly energy into the long-term statistics (§ 8.1). No analysis. |
 | Panel | `frontend/` → `custom_components/energy_mapper/frontend/energy-mapper-panel.js` | Sidebar panel running inside the Home Assistant frontend, built with the same libraries (Lit 3, ECharts 6) and styled only with Home Assistant theme variables. |
 
-The integration and the panel never talk to Home Assistant's recorder for the analysis, and
-the add-on never talks to the browser: the user only ever sees Home Assistant.
+The integration and the panel never talk to Home Assistant's recorder for the analysis (the
+integration only writes the appliances' statistics to it), and the add-on never talks to the
+browser: the user only ever sees Home Assistant.
 
 ## 3. Data flow
 
@@ -377,9 +381,10 @@ JSON in and out; request bodies are limited to 64 KB (413 above).
 
 | Request | Answer |
 |---|---|
-| `GET /api/health` | `200 {"status": "ok", "version": "0.3.0", "last_run": <unix time \| null>, "days": <full reports>, "signatures": <registry size>, "storage_bytes": <int>}` |
-| `GET /api/days` | `200 {"days": [...], "summary_days": [...]}`: days with a full report, and older days with only a summary, ascending |
+| `GET /api/health` | `200 {"status": "ok", "version": "0.4.0", "last_run": <unix time \| null>, "days": <full reports>, "signatures": <registry size>, "storage_bytes": <int>}` |
+| `GET /api/days` | `200 {"days": [...], "summary_days": [...], "generated": {day: <unix time>}}`: days with a full report, and older days with only a summary, ascending; `generated`: when each full report was made (`generated_at`) |
 | `GET /api/report/YYYY-MM-DD` | `200` the report with registry ids; `400 {"error": "invalid_day"}`; `404 {"error": "not_found"}` |
+| `GET /api/hourly/YYYY-MM-DD` | `200` the hourly breakdown of the day (`nilm_core/hourly.py`, § 8.1); `400 invalid_day`; `404 not_found` when the day has no per-minute curve |
 | `GET /api/signatures` | `200` the registry: `{version, updated_at, half_life_days, power_tol, days, first_day, last_day, signatures: [...], switched_loads: [...], peak: {window_days, relative, reference_w, threshold_w, days} \| null}` |
 | `POST /api/analyze?day=YYYY-MM-DD` | `200 {"day", "ok": true}`, else `{"day", "ok": false, "error", "message"}` with `invalid_day` 400 (not a date, or not over), `no_grid` / `no_data` / `partial_day` 422, `ha_error` 502, `internal` 500 |
 | `GET /api/settings` | `200 {"settings", "options", "defaults", "automatic"}` (§ 9) |
@@ -394,7 +399,7 @@ Other paths answer `404 {"error": "not_found"}`, other methods on known paths
 `http://supervisor/discovery` (retried after 10 s, 30 s, 1 min, 5 min); the integration's
 `async_step_hassio` receives it.
 
-## 8. Integration websocket API
+## 8. Integration: websocket API, appliances and statistics
 
 Registered once in `async_setup`. Every command needs an authenticated user; `analyze` needs an
 administrator. Except `status` and `day_stats`, each command relays one add-on request and
@@ -426,7 +431,93 @@ Other parts of the integration:
 - **Panel**: `panel_custom` registration (`/energy-mapper`, element `energy-mapper-panel`,
   icon `mdi:home-lightning-bolt-outline`, not admin-only), bundle served from
   `/energy_mapper_frontend/` with a content hash in the URL.
-- **Diagnostics**: entry data and options, last health, availability, sync state.
+- **Diagnostics**: entry data and options, last health, availability, sync state, appliances
+  and imported days.
+
+### 8.1 Appliances, sensors and hourly statistics
+
+The analysis is nightly, so a day's values are only known the next morning. A
+`total_increasing` sensor updated once a day would put the whole day into the hour of the
+analysis in the Energy dashboard. The hourly energy of each appliance is therefore imported
+into the recorder's **long-term statistics** as **external statistics**, with the timestamp of
+each hour, the way utility integrations publish delayed meter data; the sensors only show the
+last analysed day.
+
+**Appliances** (`appliances.py`): the registry's switched loads (those whose power has been
+learned at least once, so a configured switch that never matched a step is not one yet) and
+its signatures with a user `label` (set by the review flow, #10/#11). Identity:
+
+| | Device identifier / unique id base | Statistic id |
+|---|---|---|
+| Switched load | `load:<entity_id>` | `energy_mapper:load_<slug of entity_id>_energy` |
+| Labelled signature | `signature:<registry id>` | `energy_mapper:signature_<slug of registry id>_energy` |
+
+Renaming (a new `name` in the settings or a new label) only changes the device name and the
+statistic's name; the ids stay.
+
+**Where the hourly series are computed: in the add-on** (`GET /api/hourly/DAY`,
+`nilm_core/hourly.py`), because it owns the report format and the registry matcher, and the
+answer is a few KB instead of the 200 KB per-minute curve (a 90-day backfill would otherwise
+move about 20 MB to Home Assistant). For each curve row (one minute), switched-load watts are
+keyed by entity id (the curve keys them by name, mapped with `known_loads`), and the watts of
+each *daily* signature are shared among its activations running in that minute in proportion
+of their energy, each share going to the **registry id** of its activation
+(`registry.Matcher`, the rule of `annotate_report`); unmatched activations go to `?`. Rows are
+summed per **UTC hour** (`floor(t / 3600)`), so a DST day has 23 or 25 hours and needs no
+special case; in a time zone with a half-hour offset the first and last hours are shared with
+the neighbouring days, and the integration adds both days' parts. The registry ids are those
+of the registry at the time of the import: past days are not re-attributed when the registry
+moves on.
+
+**Synchronisation** (`coordinator.py`), in a background task after each successful health
+poll (every 5 minutes) and after `energy_mapper/analyze`:
+
+1. `GET /api/days` and `GET /api/signatures`. A day is *changed* when it was never imported or
+   its `generated` time differs from the one imported (new day, or `POST /api/analyze`).
+2. `GET /api/hourly/DAY` for the changed days (4 at a time), and the last day for the sensors.
+3. The appliances are derived; the recorder metadata of source `energy_mapper` tells which
+   already have statistics. An appliance without statistics is new: it is **backfilled** with
+   every stored day that has a curve (up to `report_retention_days`), oldest first, in one
+   import.
+4. Each appliance imports the hours of its days (zeros included, so a re-import overwrites an
+   hour that became empty).
+5. Appliances gone from the registry lose their device (and so their entities) and their
+   statistics (`async_clear_statistics`, only ids of source `energy_mapper`). A registry that
+   was never written (`updated_at` null: a new or unreadable add-on store) removes nothing.
+6. The imported days, the appliances, the last day's values and each appliance's last use are
+   kept in `.storage/energy_mapper.<entry id>`, so the sensors have their values after a
+   restart and nothing is imported twice.
+
+**Monotonic sums** (`statistics.py`): importing hours `H` of a statistic reads the stored
+rows from one week before `min(H)` (further back only if that week is empty) and takes the
+sum of the last row before `min(H)`. The rows at or after `min(H)` keep their hourly value
+(`state` holds the hour's kWh) unless they are in `H`, and the cumulative sums are recomputed
+from there; only the hours of `H` and the later rows whose sum moved are written. So a
+re-analysed day replaces its hours instead of adding to them, the days after it shift by the
+difference, and the sums never decrease (hourly values are never negative).
+
+Metadata: `has_sum`, `mean_type` none, `unit_class` `energy` (on the Home Assistant versions that have it; required from 2026.11),
+kWh, `source` `energy_mapper`, `name` the appliance name.
+
+**Devices and sensors** (`sensor.py`): a service device *Energy Mapper* (the entry) and one
+device per appliance linked to it (`via_device`). All sensors use `has_entity_name` with
+translated names (English, French), so their entity ids follow the appliance name; they are
+unavailable while the add-on is unreachable and keep their values otherwise.
+
+| Sensor | Device | Value |
+|---|---|---|
+| `sensor.<appliance>_energy_yesterday` | appliance | kWh of the last analysed day (attribute `day`) |
+| `sensor.<appliance>_uses_yesterday` | appliance | Activations (signature) or on-periods (switched load) that day |
+| `sensor.<appliance>_last_seen` | appliance | Timestamp: end of the last minute with energy, over the imported days |
+| `sensor.<appliance>_typical_power` | appliance | Learned power, W (diagnostic) |
+| `sensor.energy_mapper_unexplained_energy_yesterday` | service | The day's `other`, kWh |
+| `sensor.energy_mapper_base_load` | service | The day's base load, W |
+| `sensor.energy_mapper_last_analysis` | service | Timestamp of the add-on's last analysis |
+
+The sensors have no `state_class`: they create no statistics of their own, the hourly
+statistics are the energy history. The house total is already in Home Assistant (the grid
+meter) and is not duplicated. Live power and on/off entities come with real-time detection
+(#17).
 
 ## 9. Settings and precedence
 
@@ -506,6 +597,10 @@ cannot be read).
 - The analysis depends on the recorder history; the backfill is limited by `purge_keep_days`.
 - The first backfill analyses newest first, so its days do not benefit from the peak window.
 - Finding details are produced in English by the add-on.
+- Appliance statistics are attributed with the registry of the night they are imported;
+  a past day is re-attributed only when it is analysed again. A switched load removed from
+  the settings stays an appliance until the registry forgets it (about 200 days with a 30-day
+  half-life) or until it is removed explicitly (#11).
 - The options flow cannot express "no sub-meters" or remove a switched load that comes from
   the Energy dashboard: an empty field falls back to the automatic value.
 

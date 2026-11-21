@@ -16,6 +16,9 @@ OPT_SETTINGS: Final = "settings"
 DEFAULT_URL: Final = "http://local-energy-mapper:8099"
 UPDATE_INTERVAL: Final = timedelta(minutes=5)
 
+# hourly statistics: days fetched at once from the add-on
+HOURLY_CONCURRENCY: Final = 4
+
 # request timeouts (seconds): an analysis reads a whole day of history
 TIMEOUT: Final = 30
 TIMEOUT_ANALYZE: Final = 600

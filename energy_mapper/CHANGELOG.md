@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0
+
+- New endpoint `GET /api/hourly/YYYY-MM-DD`: the energy of each appliance per
+  UTC hour of a day (switched loads by entity id, signatures by registry id),
+  computed from the report's per-minute curve. The Energy Mapper integration
+  0.2.0 imports it into Home Assistant's long-term statistics.
+- `GET /api/days` also answers `generated`: when each full report was made,
+  so the integration sees new and re-analysed days.
+
 ## 0.3.0
 
 - Settings pushed by the Energy Mapper integration: new endpoints

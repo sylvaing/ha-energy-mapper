@@ -14,7 +14,9 @@ telemetry.
 
 The reports are shown by the **Energy Mapper integration** (installed with
 HACS), which finds this add-on automatically and adds the Energy Mapper panel
-to the sidebar. Installation, configuration and how to read the panel: see
+to the sidebar. The integration also turns the switched loads and the named
+signatures into devices with sensors and **hourly energy statistics** that
+can be added to the Energy dashboard. Installation, configuration and how to read the panel: see
 the [README](https://github.com/sylvaing/ha-energy-mapper#readme). How the
 analysis works: see the
 [design document](https://github.com/sylvaing/ha-energy-mapper/blob/main/docs/design.md).
@@ -179,9 +181,10 @@ announces itself to Home Assistant through Supervisor discovery.
 
 | Request | Answer |
 |---|---|
-| `GET /api/health` | `{"status": "ok", "version": "0.3.0", "last_run": <unix time or null>, "days": <number of full reports>, "signatures": <registry size>, "storage_bytes": <size of /data>}` |
-| `GET /api/days` | `{"days": [...], "summary_days": [...]}`: days with a full report, and older days with only a summary, oldest first |
+| `GET /api/health` | `{"status": "ok", "version": "0.4.0", "last_run": <unix time or null>, "days": <number of full reports>, "signatures": <registry size>, "storage_bytes": <size of /data>}` |
+| `GET /api/days` | `{"days": [...], "summary_days": [...], "generated": {"YYYY-MM-DD": <unix time>}}`: days with a full report, and older days with only a summary, oldest first; `generated` tells when each full report was made |
 | `GET /api/report/YYYY-MM-DD` | The report with the registry ids, or 404. For a day with only a summary: `curve` is empty and `curve_pruned` is `true` |
+| `GET /api/hourly/YYYY-MM-DD` | The energy of each appliance per hour of that day (below), or 404 when the day has no per-minute curve |
 | `GET /api/signatures` | The signature registry (below) |
 | `POST /api/analyze?day=YYYY-MM-DD` | Analyses that day now: `{"day": "...", "ok": true}`, or `{"day": "...", "ok": false, "error": "<code>", "message": "..."}` |
 | `GET /api/settings` | The settings pushed by the integration and what applies without them (below) |
@@ -223,6 +226,36 @@ announces itself to Home Assistant through Supervisor discovery.
 
 Signatures are sorted by decreasing weight. Before the first analysis the
 lists are empty and `peak` is `null`.
+
+### Hourly energy
+
+`GET /api/hourly/YYYY-MM-DD` splits the day's per-minute curve into UTC hours,
+the way Home Assistant stores long-term statistics (24 hours, 23 or 25 on DST
+days; with a half-hour time zone offset the first and last hours are shared
+with the neighbouring days, each day counting only its own minutes):
+
+```json
+{
+  "day": "2027-05-09", "start": 1809900000.0, "end": 1809986400.0,
+  "time_zone": "Europe/Paris", "generated_at": 1809990000.0, "resolution_s": 60,
+  "hours": [
+    {"start": 1809900000, "house": 0.41, "base": 0.21, "other": 0.05,
+     "known": {"switch.water_heater": 0.15}, "signatures": {"short-2000w": 0.0333}}
+  ],
+  "energy_kwh": {"house": 9.8, "base": 4.9, "other": 1.2, "base_w": 205,
+                 "known": {"switch.water_heater": 3.6}, "signatures": {"short-2000w": 0.21}},
+  "last_active": {"known": {"switch.water_heater": 1809930000.0}, "signatures": {"short-2000w": 1809980000.0}},
+  "uses": {"known": {"switch.water_heater": 1}, "signatures": {"short-2000w": 3}},
+  "names": {"switch.water_heater": "Water heater"}
+}
+```
+
+Energies are in kWh. Switched loads are keyed by entity id and signatures by
+**registry id**: each minute of a daily signature is shared among its
+activations running in that minute, in proportion of their energy, and each
+share goes to the registry signature of its activation (`?` when it matches
+none). `last_active` is the end of the last minute with some energy, `uses`
+the number of activations (signatures) or on-periods (switched loads).
 
 ### Settings
 

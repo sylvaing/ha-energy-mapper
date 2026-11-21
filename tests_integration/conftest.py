@@ -50,6 +50,16 @@ def addon_settings(settings: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 @pytest.fixture(autouse=True)
+def mock_recorder_before_hass(async_test_recorder) -> None:
+    """Prepare the test recorder before ``hass`` is set up."""
+
+
+@pytest.fixture(autouse=True)
+def auto_recorder(mock_recorder_before_hass, recorder_mock) -> None:
+    """An in-memory recorder: the integration depends on it to import statistics."""
+
+
+@pytest.fixture(autouse=True)
 def auto_enable_custom_integrations(enable_custom_integrations):
     """Load the integration from custom_components/."""
     return

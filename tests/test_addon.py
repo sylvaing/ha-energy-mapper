@@ -666,7 +666,9 @@ class ApiTests(unittest.TestCase):
             (status, body["status"], body["version"], body["last_run"], body["days"], body["signatures"]),
             (200, "ok", VERSION, None, 0, 0),
         )
-        self.assertEqual(self.call("GET", "/api/days"), (200, {"days": [], "summary_days": []}))
+        self.assertEqual(
+            self.call("GET", "/api/days"), (200, {"days": [], "summary_days": [], "generated": {}})
+        )
         self.assertEqual(
             self.call("POST", "/api/analyze?day=2027-03-08"), (200, {"day": "2027-03-08", "ok": True})
         )
@@ -675,9 +677,11 @@ class ApiTests(unittest.TestCase):
         )
         status, body = self.call("GET", "/api/health")
         self.assertEqual((status, body["days"], body["last_run"]), (200, 2, NOW))
+        status, body = self.call("GET", "/api/days")
         self.assertEqual(
-            self.call("GET", "/api/days"), (200, {"days": ["2027-03-08", "2027-03-09"], "summary_days": []})
+            (status, body["days"], body["summary_days"]), (200, ["2027-03-08", "2027-03-09"], [])
         )
+        self.assertEqual(set(body["generated"]), {"2027-03-08", "2027-03-09"})
         status, body = self.call("GET", "/api/health")
         self.assertGreaterEqual(body["signatures"], 1)  # the registry was updated
         self.assertGreater(body["storage_bytes"], 0)
@@ -752,7 +756,8 @@ class ApiTests(unittest.TestCase):
                 self.assertEqual(json.load(resp), {"day": "2027-03-09", "ok": True})
             with urllib.request.urlopen(base + "/api/days", timeout=10) as resp:
                 self.assertEqual(resp.headers["Content-Type"], "application/json")
-                self.assertEqual(json.load(resp), {"days": ["2027-03-09"], "summary_days": []})
+                body = json.load(resp)
+                self.assertEqual((body["days"], body["summary_days"]), (["2027-03-09"], []))
             with self.assertRaises(urllib.error.HTTPError) as cm:
                 urllib.request.urlopen(base + "/api/report/2027-03-01", timeout=10)
             self.assertEqual(cm.exception.code, 404)

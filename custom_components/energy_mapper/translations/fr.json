@@ -104,5 +104,50 @@
         "on_states": "États de marche"
       }
     }
+  },
+  "entity": {
+    "sensor": {
+      "energy_yesterday": {
+        "name": "Énergie hier",
+        "state_attributes": {
+          "day": {
+            "name": "Jour"
+          }
+        }
+      },
+      "uses_yesterday": {
+        "name": "Utilisations hier",
+        "state_attributes": {
+          "day": {
+            "name": "Jour"
+          }
+        }
+      },
+      "last_seen": {
+        "name": "Dernière utilisation"
+      },
+      "typical_power": {
+        "name": "Puissance habituelle"
+      },
+      "unexplained_energy_yesterday": {
+        "name": "Énergie inexpliquée hier",
+        "state_attributes": {
+          "day": {
+            "name": "Jour"
+          }
+        }
+      },
+      "base_load": {
+        "name": "Consommation de fond",
+        "state_attributes": {
+          "day": {
+            "name": "Jour"
+          }
+        }
+      },
+      "last_analysis": {
+        "name": "Dernière analyse"
+      }
+    }
   }
 }

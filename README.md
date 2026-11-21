@@ -8,9 +8,9 @@ house consumption into base load, measured devices, switch-driven appliances and
 
 *[Version française plus bas](#français).*
 
-> **Status: v0, experimental.** The nightly report is complete; validating appliances,
-> per-appliance entities and the Energy dashboard integration come next (see the
-> [roadmap](#roadmap)). Feedback from installations other than the developer's is very welcome.
+> **Status: experimental.** The nightly report is complete, and switched appliances now get
+> their own devices, sensors and hourly energy for the Energy dashboard; validating signatures
+> as appliances comes next (see the [roadmap](#roadmap)). Feedback from installations other than the developer's is very welcome.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/sylvaing/ha-energy-mapper/main/docs/images/panel-dark.png">
@@ -26,6 +26,7 @@ house consumption into base load, measured devices, switch-driven appliances and
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Reading the panel](#reading-the-panel)
+- [Appliances in Home Assistant](#appliances-in-home-assistant)
 - [Privacy](#privacy)
 - [Limits](#limits)
 - [Roadmap](#roadmap)
@@ -60,10 +61,11 @@ Technical details: [design document](docs/design.md) and the
 
 - **meter** anything. Every figure for a signature or a switched load is an **estimate** from
   one meter; only sub-meters are measured. Do not use it for billing;
-- name appliances. A signature is `short-2000w`, not "kettle": naming signatures and turning
-  them into entities is the next milestone (v1);
-- create entities, change your configuration or write to the Energy dashboard (v0 is
-  read-only: the add-on never calls a service);
+- name appliances. A signature is `short-2000w`, not "kettle": naming signatures (which then
+  become appliances like the switched ones) is the next step of v1;
+- change your configuration or the Energy dashboard: the add-on never calls a service, and the
+  integration only adds its own devices, sensors and statistics (you choose to add them to the
+  Energy dashboard);
 - work in real time: the analysis runs at night on the previous day (live detection is
   planned for v2).
 
@@ -91,7 +93,8 @@ thermostat), which are grouped into one session with their duty cycle.
   **aarch64** (Raspberry Pi 4/5 included: a day is analysed in a few seconds at most).
   Home Assistant Container and Core are not supported yet: a standalone image is planned in
   [#19](https://github.com/sylvaing/ha-energy-mapper/issues/19).
-- **Home Assistant 2025.10 or later** for the integration (developed and tested on 2026.10 and
+- **Home Assistant 2025.10 or later** for the integration, add-on **0.4.0 or later** for the
+  appliance statistics (developed and tested on 2026.10 and
   2026.11; the panel uses Home Assistant's own date picker when available, and a plain date
   field otherwise).
 - [HACS](https://hacs.xyz) to install the integration (or a manual copy).
@@ -214,12 +217,44 @@ curve.
 
 <img alt="The panel on a phone-sized screen (synthetic data)" src="https://raw.githubusercontent.com/sylvaing/ha-energy-mapper/main/docs/images/panel-mobile-light.png" width="320">
 
+## Appliances in Home Assistant
+
+Each **appliance** Energy Mapper knows gets a device, under the *Energy Mapper* service
+device: the **switched loads** (once their power has been learned) and, with the review flow,
+the **signatures you name**. A device keeps its identity when it is renamed, and disappears
+with its sensors and statistics only when the appliance is removed.
+
+| Sensor | Value |
+|---|---|
+| *Appliance* Energy yesterday | kWh of the last analysed day (attribute `day`) |
+| *Appliance* Uses yesterday | Number of uses that day (on-periods of a switched load) |
+| *Appliance* Last seen | When it last used energy |
+| *Appliance* Typical power | The learned power (diagnostic) |
+| Energy Mapper Unexplained energy yesterday | What no appliance explains, kWh |
+| Energy Mapper Base load | The always-on power of the last analysed day |
+| Energy Mapper Last analysis | When the add-on last analysed a day |
+
+**Energy dashboard:** the analysis runs at night, so an energy sensor would put the whole day
+into the hour of the analysis. Instead, the hourly energy of each appliance is written into
+Home Assistant's long-term statistics with the right hours (like the delayed data of utility
+integrations), as `energy_mapper:load_switch_water_heater_energy` for example. In **Settings →
+Dashboards → Energy → Individual devices → Add device**, pick the statistic named after the
+appliance. A day's hours appear the morning after, once the night's analysis is done. When an appliance appears, all the stored days (up to `report_retention_days`) are
+imported at once; a day analysed again replaces its hours without double counting.
+
+Do not add an appliance that is already tracked in the Energy dashboard by another sensor
+(for example a powercalc estimate of the same switch): it would be counted twice. Replacing
+it is planned ([#13](https://github.com/sylvaing/ha-energy-mapper/issues/13)). Live power and
+on/off states come with real-time detection
+([#17](https://github.com/sylvaing/ha-energy-mapper/issues/17)).
+
 ## Privacy
 
 - **Everything stays local.** No cloud service, no account, no telemetry: the add-on only
   talks to Home Assistant through the Supervisor, and the integration only to the add-on.
 - The add-on only **reads** Home Assistant (states, entity registry, Energy dashboard settings
-  and recorder history); it never calls a service.
+  and recorder history); it never calls a service. The integration writes only its own
+  devices, sensors and statistics.
 - Its data (daily reports, day summaries, the signature registry, the settings) lives in the
   add-on's `/data` folder, is **included in Home Assistant backups**, and stays bounded (a few
   MB) whatever the age of the installation.
@@ -248,11 +283,11 @@ curve.
 
 See the [milestones](https://github.com/sylvaing/ha-energy-mapper/milestones):
 
-- [**v0 – Nightly report**](https://github.com/sylvaing/ha-energy-mapper/milestone/1): this
-  version. Read-only nightly analysis, sidebar panel, no entities.
+- [**v0 – Nightly report**](https://github.com/sylvaing/ha-energy-mapper/milestone/1): done.
+  Read-only nightly analysis, sidebar panel.
 - [**v1 – Validate & track**](https://github.com/sylvaing/ha-energy-mapper/milestone/2): name
   a signature or link it to an existing switch or power sensor (Repairs), one entry per
-  appliance, power/energy/running entities, "take over tracking" in the Energy dashboard,
+  appliance, per-appliance entities and hourly energy statistics (switched loads done), "take over tracking" in the Energy dashboard,
   learning from measured devices, a nightly self-test with a success rate, variable loads, and
   a benchmark on public NILM datasets ([#28](https://github.com/sylvaing/ha-energy-mapper/issues/28)).
 - [**v2 – Live**](https://github.com/sylvaing/ha-energy-mapper/milestone/3): real-time
@@ -329,8 +364,9 @@ analyse la veille, répartit la consommation de la maison entre consommation de 
 appareils mesurés, appareils pilotés par un interrupteur et « signatures » récurrentes, et
 explique les pics. Tout reste en local.
 
-> **État : v0, expérimental.** Le rapport de nuit est complet ; la validation des appareils,
-> les entités par appareil et l'intégration au tableau Énergie viennent ensuite (voir la
+> **État : expérimental.** Le rapport de nuit est complet, et les appareils pilotés ont
+> désormais leurs appareils, capteurs et énergie heure par heure pour le tableau Énergie ; la
+> validation des signatures comme appareils vient ensuite (voir la
 > [feuille de route](#feuille-de-route)). Les retours d'autres installations que celle du
 > développeur sont très bienvenus.
 
@@ -372,9 +408,11 @@ l'add-on).
   **estimation** à partir d'un seul compteur ; seuls les sous-compteurs sont mesurés. Ne
   l'utilisez pas pour facturer ;
 - nomme pas les appareils : une signature s'appelle `short-2000w`, pas « bouilloire ».
-  Nommer les signatures et en faire des entités, c'est la prochaine étape (v1) ;
-- crée aucune entité, ne modifie pas votre configuration et n'écrit pas dans le tableau
-  Énergie (la v0 est en lecture seule : l'add-on n'appelle jamais de service) ;
+  Nommer les signatures (qui deviennent alors des appareils comme les appareils pilotés),
+  c'est la prochaine étape de la v1 ;
+- modifie pas votre configuration ni le tableau Énergie : l'add-on n'appelle jamais de
+  service, et l'intégration n'ajoute que ses propres appareils, capteurs et statistiques
+  (c'est vous qui les ajoutez au tableau Énergie) ;
 - fonctionne pas en temps réel : l'analyse tourne la nuit sur la veille (la détection en
   direct est prévue en v2).
 
@@ -405,7 +443,8 @@ regroupés en une seule session avec leur rapport cyclique.
   **aarch64** (Raspberry Pi 4/5 compris : une journée s'analyse en quelques secondes au plus).
   Home Assistant Container et Core ne sont pas encore pris en charge : une image autonome est
   prévue dans [#19](https://github.com/sylvaing/ha-energy-mapper/issues/19).
-- **Home Assistant 2025.10 ou plus récent** pour l'intégration (développée et testée sur
+- **Home Assistant 2025.10 ou plus récent** pour l'intégration, add-on **0.4.0 ou plus
+  récent** pour les statistiques des appareils (développée et testée sur
   2026.10 et 2026.11 ; le panneau utilise le sélecteur de date de Home Assistant quand il est
   disponible, un simple champ de date sinon).
 - [HACS](https://hacs.xyz) pour installer l'intégration (ou une copie manuelle).
@@ -535,12 +574,47 @@ français) et ses formats de nombres et d'heures, et s'adapte aux écrans étroi
 Les jours plus anciens que la conservation des rapports gardent leurs totaux, pics et
 signatures, sans la courbe.
 
+### Les appareils dans Home Assistant
+
+Chaque **appareil** connu d'Energy Mapper a son appareil Home Assistant, rattaché à
+l'appareil de service *Energy Mapper* : les **appareils pilotés** (dès que leur puissance a été
+apprise) et, avec la validation, les **signatures que vous nommez**. Un appareil garde son
+identité quand il est renommé, et ne disparaît avec ses capteurs et ses statistiques que
+quand l'appareil est supprimé.
+
+| Capteur | Valeur |
+|---|---|
+| *Appareil* Énergie hier | kWh du dernier jour analysé (attribut `day`) |
+| *Appareil* Utilisations hier | Nombre d'utilisations ce jour-là (périodes de marche d'un appareil piloté) |
+| *Appareil* Dernière utilisation | Quand il a consommé pour la dernière fois |
+| *Appareil* Puissance habituelle | La puissance apprise (diagnostic) |
+| Energy Mapper Énergie inexpliquée hier | Ce qu'aucun appareil n'explique, en kWh |
+| Energy Mapper Consommation de fond | La puissance permanente du dernier jour analysé |
+| Energy Mapper Dernière analyse | La dernière analyse d'un jour par l'add-on |
+
+**Tableau Énergie :** l'analyse tourne la nuit, un capteur d'énergie mettrait donc toute la
+journée dans l'heure de l'analyse. À la place, l'énergie heure par heure de chaque appareil
+est écrite dans les statistiques long terme de Home Assistant avec les bonnes heures (comme
+les données différées des intégrations de fournisseurs d'énergie), par exemple
+`energy_mapper:load_switch_water_heater_energy`. Dans **Paramètres → Tableaux de bord →
+Énergie → Appareils individuels → Ajouter un appareil**, choisissez la statistique qui porte
+le nom de l'appareil. Ses heures apparaissent le lendemain matin. Quand un appareil apparaît,
+tous les jours conservés (jusqu'à `report_retention_days`) sont importés d'un coup ; un jour
+analysé à nouveau remplace ses heures sans double comptage.
+
+N'ajoutez pas un appareil déjà suivi dans le tableau Énergie par un autre capteur (par
+exemple une estimation powercalc du même interrupteur) : il serait compté deux fois. Le
+remplacement est prévu ([#13](https://github.com/sylvaing/ha-energy-mapper/issues/13)). La
+puissance et l'état de marche en direct viendront avec la détection en temps réel
+([#17](https://github.com/sylvaing/ha-energy-mapper/issues/17)).
+
 ### Vie privée
 
 - **Tout reste en local.** Aucun service en ligne, aucun compte, aucune télémétrie : l'add-on
   ne parle qu'à Home Assistant, par le Supervisor, et l'intégration qu'à l'add-on.
 - L'add-on ne fait que **lire** Home Assistant (états, registre des entités, réglages du
   tableau Énergie et historique du *recorder*) ; il n'appelle jamais de service.
+  L'intégration n'écrit que ses propres appareils, capteurs et statistiques.
 - Ses données (rapports quotidiens, résumés, registre des signatures, réglages) sont dans le
   dossier `/data` de l'add-on, **incluses dans les sauvegardes de Home Assistant**, et restent
   bornées (quelques Mo) quel que soit l'âge de l'installation.
@@ -571,11 +645,12 @@ signatures, sans la courbe.
 
 Voir les [jalons](https://github.com/sylvaing/ha-energy-mapper/milestones) :
 
-- [**v0 – Rapport de nuit**](https://github.com/sylvaing/ha-energy-mapper/milestone/1) : cette
-  version. Analyse de nuit en lecture seule, panneau, aucune entité.
+- [**v0 – Rapport de nuit**](https://github.com/sylvaing/ha-energy-mapper/milestone/1) :
+  terminé. Analyse de nuit en lecture seule, panneau.
 - [**v1 – Valider et suivre**](https://github.com/sylvaing/ha-energy-mapper/milestone/2) :
   nommer une signature ou la relier à un interrupteur ou un capteur de puissance existant
-  (Réparations), une entrée par appareil, entités de puissance, d'énergie et de marche,
+  (Réparations), une entrée par appareil, entités par appareil et statistiques d'énergie
+  heure par heure (faites pour les appareils pilotés),
   « reprendre le suivi » dans le tableau Énergie, apprentissage à partir des appareils
   mesurés, auto-contrôle de nuit avec un taux de réussite, charges variables, et évaluation
   sur des jeux de données NILM publics ([#28](https://github.com/sylvaing/ha-energy-mapper/issues/28)).

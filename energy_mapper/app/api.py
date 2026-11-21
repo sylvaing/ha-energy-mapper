@@ -2,8 +2,10 @@
 
 GET  /api/health              {"status": "ok", "version", "last_run", "days",
                                "signatures", "storage_bytes"}
-GET  /api/days                {"days": [...], "summary_days": [...]} (ascending)
+GET  /api/days                {"days": [...], "summary_days": [...], "generated": {day: ts}}
+                              (ascending; generated: when each full report was made)
 GET  /api/report/YYYY-MM-DD   the stored report with registry ids (404 if absent)
+GET  /api/hourly/YYYY-MM-DD   hourly kWh per appliance (nilm_core.hourly; 404 if no curve)
 GET  /api/signatures          the signature registry
 POST /api/analyze?day=YYYY-MM-DD
                               {"day", "ok": true} or {"day", "ok": false, "error", "message"}
@@ -20,6 +22,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from const import VERSION
 from ha_client import HAError
+from nilm_core.hourly import hourly_breakdown
 from nilm_core.registry import annotate_report, empty_registry
 from service import AnalysisError, Analyzer
 from settings import KEYS as SETTINGS_KEYS
@@ -76,7 +79,12 @@ def route(
     if path == "/api/days" and method == "GET":
         full = store.days()
         kept = set(full)
-        return 200, {"days": full, "summary_days": [d for d in store.summary_days() if d not in kept]}
+        summaries = store.summaries_all()
+        return 200, {
+            "days": full,
+            "summary_days": [d for d in store.summary_days() if d not in kept],
+            "generated": {d: (summaries.get(d) or {}).get("generated_at") for d in full},
+        }
 
     if path == "/api/signatures" and method == "GET":
         return 200, store.load_registry() or empty_registry(analyzer.registry_config)
@@ -94,6 +102,16 @@ def route(
             report["curve"] = []
             report["curve_pruned"] = True
         return 200, annotate_report(report, store.load_registry())
+
+    if path.startswith("/api/hourly/") and method == "GET":
+        day = path.removeprefix("/api/hourly/")
+        if not parse_day(day):
+            return 400, {"error": "invalid_day", "message": "expected YYYY-MM-DD"}
+        report = store.load(day)
+        if report is None or not report.get("curve"):
+            message = f"no per-minute curve for {day}" if store.has(day) else f"no report for {day}"
+            return 404, {"error": "not_found", "message": message}
+        return 200, hourly_breakdown(report, store.load_registry())
 
     if path == "/api/analyze" and method == "POST":
         value = (query.get("day") or [""])[0]
@@ -137,7 +155,7 @@ def route(
         return 200, {"settings": settings}
 
     known = {"/api/health", "/api/days", "/api/analyze", "/api/signatures", "/api/settings"}
-    if path in known or path.startswith("/api/report/"):
+    if path in known or path.startswith(("/api/report/", "/api/hourly/")):
         return 405, {"error": "method_not_allowed"}
     return 404, {"error": "not_found"}
 

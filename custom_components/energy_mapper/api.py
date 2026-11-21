@@ -92,6 +92,10 @@ class EnergyMapperClient:
     async def report(self, day: str) -> dict[str, Any]:
         return await self._request("GET", f"/api/report/{day}")
 
+    async def hourly(self, day: str) -> dict[str, Any]:
+        """Hourly kWh per appliance of a day with a curve (add-on 0.4.0+)."""
+        return await self._request("GET", f"/api/hourly/{day}")
+
     async def analyze(self, day: str) -> dict[str, Any]:
         return await self._request("POST", "/api/analyze", params={"day": day}, timeout=TIMEOUT_ANALYZE)
 

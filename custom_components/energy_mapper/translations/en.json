@@ -104,5 +104,50 @@
         "on_states": "On-states"
       }
     }
+  },
+  "entity": {
+    "sensor": {
+      "energy_yesterday": {
+        "name": "Energy yesterday",
+        "state_attributes": {
+          "day": {
+            "name": "Day"
+          }
+        }
+      },
+      "uses_yesterday": {
+        "name": "Uses yesterday",
+        "state_attributes": {
+          "day": {
+            "name": "Day"
+          }
+        }
+      },
+      "last_seen": {
+        "name": "Last seen"
+      },
+      "typical_power": {
+        "name": "Typical power"
+      },
+      "unexplained_energy_yesterday": {
+        "name": "Unexplained energy yesterday",
+        "state_attributes": {
+          "day": {
+            "name": "Day"
+          }
+        }
+      },
+      "base_load": {
+        "name": "Base load",
+        "state_attributes": {
+          "day": {
+            "name": "Day"
+          }
+        }
+      },
+      "last_analysis": {
+        "name": "Last analysis"
+      }
+    }
   }
 }
