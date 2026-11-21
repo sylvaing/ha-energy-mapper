@@ -1,6 +1,6 @@
 # Energy Mapper: design
 
-This document describes how Energy Mapper works as of add-on 0.4.1 and integration 0.2.0:
+This document describes how Energy Mapper works as of add-on 0.5.0 and integration 0.3.0:
 the architecture, the analysis engine, how the Energy dashboard is used, storage, the APIs
 and the reasons behind the main choices. User documentation: the [README](../README.md) and
 the [add-on documentation](../energy_mapper/DOCS.md).
@@ -68,7 +68,7 @@ flowchart LR
   end
   P -- "hass.callWS" --> WS
   WS -- HTTP --> API
-  CO -- "GET /api/health, PUT /api/settings, GET /api/days, /api/signatures, /api/hourly" --> API
+  CO -- "GET /api/health, PUT /api/settings, PUT /api/appliances, GET /api/days, /api/signatures, /api/hourly" --> API
   CO -- "external statistics (hourly kWh)" --> REC
   CO --> SE
   CF -- "GET/PUT /api/settings" --> API
@@ -321,6 +321,7 @@ read.
 | `submeter` | Measured device with a power sensor | Subtracted before the analysis |
 | `estimated` | Estimated device (has a `source_entity`) not driven by a switch, with a power sensor (lights…) | Subtracted like a sub-meter |
 | `switched` | Estimated from a `switch` or `input_boolean` | A switched load: measured from the steps at its transitions |
+| `estimated` (excluded) | Estimated from a switch listed in `excluded_switched_loads` | Subtracted like any estimate (§ 8.2) |
 | `nested` | `included_in_stat` points to another tracked device | Not subtracted (never twice) |
 | `energy_only` | No power sensor found | Not used; finding `no_power_sensor` |
 | `unavailable` | Energy sensor unavailable | Not used; finding `unavailable` |
@@ -348,7 +349,9 @@ reported, typically an estimate configured at a few watts for a 2 kW water heate
 
 **Manual settings always win**: grid sensor (then no extra grid meters are summed), export,
 PV, battery, signs, sub-meters (replace the derived list), switched loads (added, or
-replacing the one with the same entity), thresholds. Without an Energy dashboard and without a
+replacing the one with the same entity), thresholds. Then the **user's appliances** (§ 8.2)
+apply: their switched-load sources are switched loads named after the appliance, their
+sub-meter sources are added to the sub-meters. Without an Energy dashboard and without a
 grid setting, the analysis fails with `no_grid`.
 
 ## 6. Storage and retention
@@ -362,6 +365,7 @@ Everything is under the add-on's `/data` (included in Home Assistant backups):
 | `registry.json` | Signature registry | While a signature's weight is above 1 %; forever once labelled (v1) | tens of KB |
 | `settings.json` | Settings pushed by the integration | Until replaced (`PUT {}` deletes it) | < 64 KB |
 | `statistic_ids.json` | Energy Mapper statistic id → appliance (§ 5) | Forever (one line per appliance ever published) | KB |
+| `appliances.json` | The user's appliances pushed by the integration (§ 8.2) | Until replaced | KB |
 | `state.json` | `last_run`, `last_maintenance` | – | bytes |
 | `options.json` | Add-on options (written by the Supervisor) | – | bytes |
 
@@ -397,7 +401,7 @@ JSON in and out; request bodies are limited to 64 KB (413 above).
 
 | Request | Answer |
 |---|---|
-| `GET /api/health` | `200 {"status": "ok", "version": "0.4.1", "last_run": <unix time \| null>, "days": <full reports>, "signatures": <registry size>, "storage_bytes": <int>}` |
+| `GET /api/health` | `200 {"status": "ok", "version": "0.5.0", "last_run": <unix time \| null>, "days": <full reports>, "signatures": <registry size>, "storage_bytes": <int>}` |
 | `GET /api/days` | `200 {"days": [...], "summary_days": [...], "generated": {day: <unix time>}}`: days with a full report, and older days with only a summary, ascending; `generated`: when each full report was made (`generated_at`) |
 | `GET /api/report/YYYY-MM-DD` | `200` the report with registry ids; `400 {"error": "invalid_day"}`; `404 {"error": "not_found"}` |
 | `GET /api/hourly/YYYY-MM-DD` | `200` the hourly breakdown of the day (`nilm_core/hourly.py`, § 8.1); `400 invalid_day`; `404 not_found` when the day has no per-minute curve |
@@ -405,6 +409,9 @@ JSON in and out; request bodies are limited to 64 KB (413 above).
 | `POST /api/analyze?day=YYYY-MM-DD` | `200 {"day", "ok": true}`, else `{"day", "ok": false, "error", "message"}` with `invalid_day` 400 (not a date, or not over), `no_grid` / `no_data` / `partial_day` 422, `ha_error` 502, `internal` 500 |
 | `GET /api/settings` | `200 {"settings", "options", "defaults", "automatic"}` (§ 9) |
 | `PUT /api/settings` | Replaces the settings: `200 {"settings": <as stored>}`; `400 {"error": "invalid_settings" \| "invalid_json", "message"}` |
+| `GET /api/appliances` | `200 {"appliances": [...]}`: the user's appliances (§ 8.2) |
+| `PUT /api/appliances` | Replaces them: `200 {"appliances": <as stored>}`; `400 {"error": "invalid_appliances" \| "invalid_json", "message"}` |
+| `POST /api/signatures` | `{"kind", "band", "power_w", "label"}`: the signature of an appliance not seen yet: `200 {"signature", "created"}` (an existing unnamed signature at that power is returned, `created: false`); `409 {"error": "conflict", "message", "id"}` when that signature belongs to another appliance; `400 invalid_signature` |
 
 Other paths answer `404 {"error": "not_found"}`, other methods on known paths
 `405 {"error": "method_not_allowed"}`. The registry signature fields are documented in the
@@ -459,17 +466,18 @@ into the recorder's **long-term statistics** as **external statistics**, with th
 each hour, the way utility integrations publish delayed meter data; the sensors only show the
 last analysed day.
 
-**Appliances** (`appliances.py`): the registry's switched loads (those whose power has been
-learned at least once, so a configured switch that never matched a step is not one yet) and
-its signatures with a user `label` (set by the review flow, #10/#11). Identity:
+**Appliances** are the config subentries of the entry (§ 8.2). Each has one or more
+sources; its hourly energy is the sum of its switched-load and signature sources (a sub-meter
+source is measured by its own sensor and gets nothing here). Identity, given at creation from
+the first source and never changed afterwards (renames, link changes and merges keep it):
 
-| | Device identifier / unique id base | Statistic id |
+| Created from | Key: device identifier, subentry unique id, unique id base | Statistic id |
 |---|---|---|
 | Switched load | `load:<entity_id>` | `energy_mapper:load_<slug of entity_id>_energy` |
-| Labelled signature | `signature:<registry id>` | `energy_mapper:signature_<slug of registry id>_energy` |
+| Signature | `signature:<registry id>` | `energy_mapper:signature_<slug of registry id>_energy` |
 
-Renaming (a new `name` in the settings or a new label) only changes the device name and the
-statistic's name; the ids stay.
+A key already taken (an appliance re-linked away from that source) gets a suffix (`-2`). The
+statistic id is stored in the subentry: after a link change it no longer follows the rule.
 
 **Where the hourly series are computed: in the add-on** (`GET /api/hourly/DAY`,
 `nilm_core/hourly.py`), because it owns the report format and the registry matcher, and the
@@ -491,17 +499,18 @@ poll (every 5 minutes) and after `energy_mapper/analyze`:
 1. `GET /api/days` and `GET /api/signatures`. A day is *changed* when it was never imported or
    its `generated` time differs from the one imported (new day, or `POST /api/analyze`).
 2. `GET /api/hourly/DAY` for the changed days (4 at a time), and the last day for the sensors.
-3. The appliances are derived; the recorder metadata of source `energy_mapper` tells which
-   already have statistics. An appliance without statistics is new: it is **backfilled** with
-   every stored day that has a curve (up to `report_retention_days`), oldest first, in one
-   import.
+3. The appliances are updated (§ 8.2: adoption, discovery); the recorder metadata of source
+   `energy_mapper` tells which already have statistics. An appliance without statistics is
+   new: it is **backfilled** with every stored day that has a curve (up to
+   `report_retention_days`), oldest first, in one import.
 4. Each appliance imports the hours of its days (zeros included, so a re-import overwrites an
    hour that became empty).
-5. Appliances gone from the registry lose their device (and so their entities) and their
-   statistics (`async_clear_statistics`, only ids of source `energy_mapper`). A registry that
-   was never written (`updated_at` null: a new or unreadable add-on store) removes nothing.
-6. The imported days, the appliances, the last day's values and each appliance's last use are
-   kept in `.storage/energy_mapper.<entry id>`, so the sensors have their values after a
+5. Statistics of source `energy_mapper` that no appliance owns are cleared
+   (`async_clear_statistics`), and devices of no appliance removed. The registry never removes
+   an appliance: only the user does (§ 8.2).
+6. The appliances are pushed to the add-on when they changed (`PUT /api/appliances`).
+7. The imported days, the learned powers, the last day's values and each appliance's last use
+   are kept in `.storage/energy_mapper.<entry id>`, so the sensors have their values after a
    restart and nothing is imported twice.
 
 **Monotonic sums** (`statistics.py`): importing hours `H` of a statistic reads the stored
@@ -516,7 +525,8 @@ Metadata: `has_sum`, `mean_type` none, `unit_class` `energy` (on the Home Assist
 kWh, `source` `energy_mapper`, `name` the appliance name.
 
 **Devices and sensors** (`sensor.py`): a service device *Energy Mapper* (the entry) and one
-device per appliance linked to it (`via_device`). All sensors use `has_entity_name` with
+device per appliance linked to it (`via_device`), in the appliance's subentry; an appliance
+measured only by a sub-meter keeps its device without sensors. All sensors use `has_entity_name` with
 translated names (English, French), so their entity ids follow the appliance name; they are
 unavailable while the add-on is unreachable and keep their values otherwise.
 
@@ -534,6 +544,67 @@ The sensors have no `state_class`: they create no statistics of their own, the h
 statistics are the energy history. The house total is already in Home Assistant (the grid
 meter) and is not duplicated. Live power and on/off entities come with real-time detection
 (#17).
+
+### 8.2 Appliances: one config subentry each
+
+**Source of truth: Home Assistant.** Each appliance is a config subentry (type `appliance`)
+of the Energy Mapper entry: `title` = name, `unique_id` = key, `data` =
+`{key, statistic_id, sources}`. Its device and entities belong to the subentry
+(`config_subentry_id`), so the integration page lists the appliances, and Home Assistant
+removes the device and entities with the subentry. The add-on owns what is *learned*
+(signatures, powers, polarities); the user's *decisions* (names, links, merges, deletions,
+exclusions) live in Home Assistant, in its backups, and are pushed to the add-on, which only
+applies them. Sources:
+
+| Source | Data | Hourly energy | In the add-on |
+|---|---|---|---|
+| `switched_load` | `entity_id`, `on_states` only when forced | `known[entity_id]` | A switched load named after the appliance |
+| `signature` | registry `id`, its `kind`, `band`, `power_w` | `signatures[id]` | `label` = name, `appliance` = key; recreated from group and power if missing |
+| `submeter` | `entity_id` (a power sensor) | none: the sensor has it | Added to the sub-meters |
+
+**Sync, add-on → Home Assistant** (`coordinator.py`, each synchronisation):
+
+1. *Adoption*, once per entry (until the first successful push): the appliances the add-on
+   holds (`GET /api/appliances`) that no subentry covers become subentries, so a reinstalled
+   integration keeps the user's appliances.
+2. *Discovery*: every learned switched load not excluded and every labelled signature without
+   `appliance` (a label set before #11 or by another client) that no subentry covers gets a
+   subentry, named after the switched load or the label. A label with `appliance` belongs to
+   one of our appliances: when none has that key, it was deleted and the next push clears it.
+   The review in the panel (#10) creates its appliances through the same helper
+   (`EnergyMapperCoordinator.async_add_appliance`).
+
+**Sync, Home Assistant → add-on**: the list of appliances, sorted, is pushed with
+`PUT /api/appliances` after each synchronisation when it differs from the last push (so after
+every change of a subentry, which schedules one). The add-on stores it in
+`appliances.json`, applies the labels to the registry at once and after each nightly update
+(the update matches labelled signatures first), and uses the switched loads and sub-meters
+from the next analysis. An add-on older than 0.5.0 answers 404/405: nothing is pushed, the
+appliances still work in Home Assistant.
+
+**Changes**, from the integration page (subentry flows, `config_flow.py`) and handled by the
+entry's update listener (`async_subentries_changed`):
+
+| Action | Flow | Effect |
+|---|---|---|
+| Add | *Add appliance*: a switch (`add_relay`), or not seen yet (`add_expected`: name, power, typical use) | New subentry. Not seen yet: `POST /api/signatures` creates an *expected* signature (weight 0, named, never forgotten) that the first cluster of its group within 12 % takes; an unnamed signature already at that power is used instead; one of another appliance is refused. A source already used by another appliance is refused (merge instead) |
+| Rename | *Reconfigure → Rename* | Title; device name, statistic metadata name (empty import), add-on label or switched-load name follow. Entity ids (registry), unique ids, key and statistic id do not change |
+| Change the link | *Reconfigure → Link to a switch / a power sensor* | Sources replaced. Same statistic: the past hours stay, new hours come from the new source (a re-analysed past day uses the new source). A relay no appliance uses any more is excluded; a signature loses its label at the push. A sub-meter-only appliance keeps its device and statistic history; its sensors are removed and no hours are imported |
+| Merge | *Reconfigure → Merge another appliance into this one* | Under the synchronisation lock: every hour of the other appliance's statistic is added to this one's (read from the recorder, so the whole history, not only the retained days; sums recomputed), its sources join this one's, then its subentry is removed (device, entities, statistic). Merging is a union of sources, not a merge of registry clusters: two clusters at different powers would split again at the next nightly re-clustering |
+| Delete | Home Assistant's own *Delete* on the subentry | Home Assistant removes the device and entities; the listener clears the statistic, excludes the relays no appliance uses any more (`excluded_switched_loads`, removed from the manual `switched_loads`), the push clears the labels. No comeback: discovery skips excluded relays and labels with `appliance` |
+
+**Exclusions** (`excluded_switched_loads`, a setting, #33 minimal): the add-on does not
+measure an Energy dashboard estimate driven by an excluded switch as a switched load (it is
+subtracted like any estimate); a manual or appliance switched load is still measured. The
+options flow shows the list; removing a switch from it lets it be found again. Adding an
+appliance on an excluded switch removes the exclusion.
+
+**Migration** (entry 1.1 → 1.2, `async_migrate_entry`): each device of the entry with an
+appliance key (and each appliance of the 0.2 store without a device) becomes a subentry with
+that key, name and the statistic id of the rule; the device moves into it
+(`new_config_subentry_id`), its entities too (`config_subentry_id`). Entity ids, unique ids and
+statistic ids do not change, nothing is re-imported. The add-on gets the appliances at the
+first push; until then it keeps working from its settings.
 
 ## 9. Settings and precedence
 
@@ -558,7 +629,8 @@ flowchart LR
 
 Accepted keys and ranges: `grid_entity`, `grid_export_entity`, `pv_entity`, `battery_entity`
 (`sensor.*`), `grid_invert`, `battery_invert` (bool), `submeters` (`sensor.*` list),
-`switched_loads` (`{entity_id, name?, on_states?}` list), `step_threshold_w` 50–10000,
+`switched_loads` (`{entity_id, name?, on_states?}` list), `excluded_switched_loads` (entity id
+list, § 8.2), `step_threshold_w` 50–10000,
 `peak_threshold_w` 100–100000, `analysis_time` `HH:MM`, `backfill_days` 0–365,
 `half_life_days` and `peak_window_days` 1–365, `report_retention_days` 7–3650. `null`, `""`
 and `[]` mean absent; unknown keys refuse the whole request. A new `analysis_time` applies
@@ -614,16 +686,17 @@ cannot be read).
 - The first backfill analyses newest first, so its days do not benefit from the peak window.
 - Finding details are produced in English by the add-on.
 - Appliance statistics are attributed with the registry of the night they are imported;
-  a past day is re-attributed only when it is analysed again. A switched load removed from
-  the settings stays an appliance until the registry forgets it (about 200 days with a 30-day
-  half-life) or until it is removed explicitly (#11).
-- The options flow cannot express "no sub-meters" or remove a switched load that comes from
-  the Energy dashboard: an empty field falls back to the automatic value.
+  a past day is re-attributed only when it is analysed again (with the appliance's current
+  sources, after a link change).
+- An appliance linked to a power sensor gets no statistics or sensors from Energy Mapper: its
+  energy is the sensor's own.
+- The options flow cannot express "no sub-meters": an empty field falls back to the automatic
+  value (#33). Excluding a switch is possible.
 
 ## 12. Roadmap pointers
 
 | Milestone | Issues |
 |---|---|
-| [v1 – Validate & track](https://github.com/sylvaing/ha-energy-mapper/milestone/2) | Repairs to validate a signature (#10), one config subentry per appliance (#11), per-appliance entities (#12), take over tracking in the Energy dashboard (#13), learn from measured devices (#14), nightly self-test (#15), variable loads (#16), public-dataset benchmark with NILMTK metrics (#28) |
+| [v1 – Validate & track](https://github.com/sylvaing/ha-energy-mapper/milestone/2) | Review of the signatures in the panel (#10), one config subentry per appliance (#11, done), per-appliance entities (#12, done), take over tracking in the Energy dashboard (#13), learn from measured devices (#14), nightly self-test (#15), variable loads (#16), public-dataset benchmark with NILMTK metrics (#28) |
 | [v2 – Live](https://github.com/sylvaing/ha-energy-mapper/milestone/3) | Real-time detection (#17), per-phase analysis (#18), multi-phase appliance cycles (#26) |
 | [v3 – Publish](https://github.com/sylvaing/ha-energy-mapper/milestone/4) | Standalone Docker image for Container/Core (#19), release process and store listings (#20) |

@@ -22,9 +22,18 @@ async def async_get_config_entry_diagnostics(
             "settings_synced": coordinator.settings_synced,
         },
         "appliances": {
-            key: {**a.as_dict(), "statistic_id": a.statistic_id, "last_seen": coordinator.last_seen.get(key)}
+            key: {
+                "name": a.name,
+                "subentry_id": a.subentry_id,
+                "statistic_id": a.statistic_id,
+                "sources": [s.as_dict() for s in a.sources],
+                "power_w": a.power_w,
+                "last_seen": coordinator.last_seen.get(key),
+            }
             for key, a in coordinator.appliances.items()
         },
+        "appliances_pushed": coordinator.declared,
+        "appliances_api": coordinator.appliances_api,
         "imported_days": coordinator.imported,
         "latest_day": coordinator.latest.get("day"),
     }

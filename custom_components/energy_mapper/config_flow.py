@@ -7,7 +7,15 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import voluptuous as vol
-from homeassistant.config_entries import ConfigEntryState, ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigEntryState,
+    ConfigFlow,
+    ConfigFlowResult,
+    ConfigSubentryFlow,
+    OptionsFlow,
+    SubentryFlowResult,
+)
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import section
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -20,6 +28,9 @@ from homeassistant.helpers.selector import (
     NumberSelectorMode,
     ObjectSelector,
     ObjectSelectorConfig,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
@@ -28,6 +39,17 @@ from homeassistant.helpers.selector import (
 from homeassistant.helpers.service_info.hassio import HassioServiceInfo
 
 from .api import EnergyMapperApiError, EnergyMapperClient, EnergyMapperConnectionError
+from .appliances import (
+    KIND_LOAD,
+    KIND_SUBMETER,
+    SUBENTRY_TYPE,
+    Appliance,
+    Source,
+    link_text,
+    new_appliance,
+    relay,
+)
+from .appliances import signature as signature_source
 from .const import (
     ANALYSIS_KEYS,
     BOOL_KEYS,
@@ -72,6 +94,8 @@ class EnergyMapperConfigFlow(ConfigFlow, domain=DOMAIN):
     """Set up the connection to the add-on (single instance)."""
 
     VERSION = 1
+    # 1.2: one config subentry per appliance (migrated in __init__.py)
+    MINOR_VERSION = 2
 
     def __init__(self) -> None:
         self._url: str | None = None
@@ -81,6 +105,13 @@ class EnergyMapperConfigFlow(ConfigFlow, domain=DOMAIN):
     @callback
     def async_get_options_flow(config_entry: EnergyMapperConfigEntry) -> EnergyMapperOptionsFlow:
         return EnergyMapperOptionsFlow()
+
+    @classmethod
+    @callback
+    def async_get_supported_subentry_types(
+        cls, config_entry: ConfigEntry
+    ) -> dict[str, type[ConfigSubentryFlow]]:
+        return {SUBENTRY_TYPE: ApplianceSubentryFlow}
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Manual address (an add-on not discovered, or a standalone container)."""
@@ -179,7 +210,14 @@ OPTIONS_SCHEMA = vol.Schema(
             {"collapsed": False},
         ),
         vol.Required("loads"): section(
-            vol.Schema({vol.Optional("switched_loads"): SWITCHED_LOADS}),
+            vol.Schema(
+                {
+                    vol.Optional("switched_loads"): SWITCHED_LOADS,
+                    vol.Optional("excluded_switched_loads"): EntitySelector(
+                        EntitySelectorConfig(domain=SWITCH_DOMAINS, multiple=True)
+                    ),
+                }
+            ),
             {"collapsed": False},
         ),
         vol.Required("thresholds"): section(
@@ -207,7 +245,7 @@ OPTIONS_SCHEMA = vol.Schema(
 )
 SECTIONS = {
     "sensors": (*SENSOR_KEYS, *BOOL_KEYS, "submeters"),
-    "loads": ("switched_loads",),
+    "loads": ("switched_loads", "excluded_switched_loads"),
     "thresholds": THRESHOLD_KEYS,
     "analysis": ANALYSIS_KEYS,
 }
@@ -238,6 +276,8 @@ def suggested_values(addon: dict[str, Any]) -> dict[str, dict[str, Any]]:
     loads.update({x["entity_id"]: _load(x) for x in settings.get("switched_loads") or []})
     if loads:
         flat["switched_loads"] = list(loads.values())
+    if settings.get("excluded_switched_loads"):
+        flat["excluded_switched_loads"] = list(settings["excluded_switched_loads"])
     for key in (*BOOL_KEYS, *THRESHOLD_KEYS, *ANALYSIS_KEYS):
         value = settings.get(key, defaults.get(key))
         if value is not None:
@@ -268,6 +308,10 @@ def settings_from_form(user_input: dict[str, Any], addon: dict[str, Any]) -> dic
     loads = [x for x in loads if x not in known]
     if loads:
         out["switched_loads"] = list({x["entity_id"]: x for x in loads}.values())
+    # switched loads the user removed: never measured nor proposed again (#33)
+    excluded = list(dict.fromkeys(flat.get("excluded_switched_loads") or []))
+    if excluded:
+        out["excluded_switched_loads"] = excluded
     for key in (*BOOL_KEYS, *THRESHOLD_KEYS, *ANALYSIS_KEYS):
         value = flat.get(key)
         if value is None or value == "":
@@ -323,4 +367,252 @@ class EnergyMapperOptionsFlow(OptionsFlow):
             data_schema=self.add_suggested_values_to_schema(OPTIONS_SCHEMA, values),
             errors=errors,
             description_placeholders=placeholders,
+        )
+
+
+# ---------------------------------------------------------------------------
+# appliances: one config subentry each
+# ---------------------------------------------------------------------------
+USAGES = ["short", "medium", "long", "cycling"]
+
+
+def _name_schema() -> dict:
+    return {vol.Required("name"): TextSelector()}
+
+
+def _name(user_input: dict[str, Any], errors: dict[str, str]) -> str:
+    name = str(user_input.get("name") or "").strip()
+    if not name or len(name) > 100:
+        errors["name"] = "invalid_name"
+    return name
+
+
+def _relay_schema() -> dict:
+    return {
+        vol.Required("entity_id"): EntitySelector(EntitySelectorConfig(domain=SWITCH_DOMAINS)),
+        vol.Optional("on_states"): TextSelector(TextSelectorConfig(multiple=True)),
+    }
+
+
+class ApplianceSubentryFlow(ConfigSubentryFlow):
+    """Add an appliance by hand, or rename it, change its link, merge another
+    one into it. Deleting is Home Assistant's own action on the subentry."""
+
+    def _coordinator(self):
+        entry = self._get_entry()
+        if entry.state is not ConfigEntryState.LOADED:
+            return None
+        return entry.runtime_data.coordinator
+
+    def _others(self, exclude: str | None = None) -> dict[str, Appliance]:
+        coordinator = self._coordinator()
+        return {
+            sid: a
+            for sid, a in (coordinator.appliances_by_subentry() if coordinator else {}).items()
+            if sid != exclude
+        }
+
+    def _owner(self, source: Source, exclude: str | None = None) -> Appliance | None:
+        """The other appliance that already has this source."""
+        return next((a for a in self._others(exclude).values() if a.has(source)), None)
+
+    def _create(self, name: str, sources: list[Source]) -> SubentryFlowResult:
+        taken = {s.unique_id for s in self._get_entry().subentries.values() if s.unique_id}
+        appliance = new_appliance(name, sources, taken)
+        return self.async_create_entry(title=name, data=appliance.subentry_data(), unique_id=appliance.key)
+
+    # -- add ------------------------------------------------------------------
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
+        if self._coordinator() is None:
+            return self.async_abort(reason="not_loaded")
+        return self.async_show_menu(step_id="user", menu_options=["add_relay", "add_expected"])
+
+    async def async_step_add_relay(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
+        """An appliance driven by a switch (water heater on a relay...)."""
+        errors: dict[str, str] = {}
+        placeholders = {"other": ""}
+        if user_input is not None:
+            name = _name(user_input, errors)
+            source = relay(user_input["entity_id"], user_input.get("on_states"))
+            if owner := self._owner(source):
+                errors["entity_id"] = "already_linked"
+                placeholders["other"] = owner.name
+            elif not errors:
+                return self._create(name, [source])
+        schema = vol.Schema({**_name_schema(), **_relay_schema()})
+        return self.async_show_form(
+            step_id="add_relay",
+            data_schema=self.add_suggested_values_to_schema(schema, user_input or {}),
+            errors=errors,
+            description_placeholders=placeholders,
+        )
+
+    async def async_step_add_expected(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
+        """An appliance not seen yet, described by its power ("Kettle, 2000 W"):
+        the add-on recognises it from its first use."""
+        errors: dict[str, str] = {}
+        placeholders = {"other": ""}
+        if user_input is not None and (name := _name(user_input, errors)):
+            coordinator = self._coordinator()
+            if coordinator is None:
+                return self.async_abort(reason="not_loaded")
+            usage = user_input["usage"]
+            kind, band = ("cycling", "session") if usage == "cycling" else ("steady", usage)
+            try:
+                answer = await coordinator.client.expect_signature(
+                    kind, band, float(user_input["power_w"]), name
+                )
+            except EnergyMapperConnectionError:
+                errors["base"] = "cannot_connect"
+            except EnergyMapperApiError as err:
+                if err.code == "conflict":
+                    errors["power_w"] = "already_linked"
+                    sid = err.message.rsplit(": ", 1)[-1]
+                    other = next(
+                        (a.name for a in self._others().values() for s in a.sources if s.id == sid), None
+                    )
+                    placeholders["other"] = other or sid
+                else:
+                    errors["base"] = "addon_too_old" if err.status in (404, 405) else "cannot_connect"
+            else:
+                source = signature_source(answer["signature"])
+                if owner := self._owner(source):
+                    errors["power_w"] = "already_linked"
+                    placeholders["other"] = owner.name
+                else:
+                    return self._create(name, [source])
+        schema = vol.Schema(
+            {
+                **_name_schema(),
+                vol.Required("power_w"): _number(50, 100000, 10, "W"),
+                vol.Required("usage", default="short"): SelectSelector(
+                    SelectSelectorConfig(
+                        options=USAGES, translation_key="usage", mode=SelectSelectorMode.LIST
+                    )
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="add_expected",
+            data_schema=self.add_suggested_values_to_schema(schema, user_input or {}),
+            errors=errors,
+            description_placeholders=placeholders,
+        )
+
+    # -- edit -----------------------------------------------------------------
+    def _current(self) -> Appliance:
+        sub = self._get_reconfigure_subentry()
+        return Appliance.from_data(sub.data, sub.title, sub.subentry_id)
+
+    def _placeholders(self) -> dict[str, str]:
+        a = self._current()
+        return {"name": a.name, "link": link_text(a), "other": ""}
+
+    async def async_step_reconfigure(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
+        if self._coordinator() is None:
+            return self.async_abort(reason="not_loaded")
+        return self.async_show_menu(
+            step_id="reconfigure",
+            menu_options=["rename", "link_relay", "link_sensor", "merge"],
+            description_placeholders=self._placeholders(),
+        )
+
+    async def async_step_rename(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
+        """Device, entity and statistic names follow; their ids do not change."""
+        errors: dict[str, str] = {}
+        if user_input is not None and (name := _name(user_input, errors)) and not errors:
+            return self.async_update_and_abort(
+                self._get_entry(), self._get_reconfigure_subentry(), title=name
+            )
+        schema = vol.Schema(_name_schema())
+        return self.async_show_form(
+            step_id="rename",
+            data_schema=self.add_suggested_values_to_schema(
+                schema, user_input or {"name": self._current().name}
+            ),
+            errors=errors,
+            description_placeholders=self._placeholders(),
+        )
+
+    def _relink(self, source: Source) -> SubentryFlowResult:
+        current = self._current()
+        data = Appliance(current.key, current.name, current.statistic_id, (source,)).subentry_data()
+        return self.async_update_and_abort(self._get_entry(), self._get_reconfigure_subentry(), data=data)
+
+    async def async_step_link_relay(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
+        """Driven by this switch from now on (replaces the current link)."""
+        current = self._current()
+        errors: dict[str, str] = {}
+        placeholders = self._placeholders()
+        if user_input is not None:
+            source = relay(user_input["entity_id"], user_input.get("on_states"))
+            if owner := self._owner(source, current.subentry_id):
+                errors["entity_id"] = "already_linked"
+                placeholders["other"] = owner.name
+            else:
+                return self._relink(source)
+        suggested = user_input
+        if suggested is None:
+            loads = [s for s in current.sources if s.type == KIND_LOAD]
+            suggested = (
+                {"entity_id": loads[0].id, "on_states": list(loads[0].on_states or [])} if loads else {}
+            )
+        return self.async_show_form(
+            step_id="link_relay",
+            data_schema=self.add_suggested_values_to_schema(vol.Schema(_relay_schema()), suggested),
+            errors=errors,
+            description_placeholders=placeholders,
+        )
+
+    async def async_step_link_sensor(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
+        """Measured by this power sensor from now on: it becomes a sub-meter."""
+        current = self._current()
+        errors: dict[str, str] = {}
+        placeholders = self._placeholders()
+        if user_input is not None:
+            source = Source(KIND_SUBMETER, user_input["entity_id"])
+            if owner := self._owner(source, current.subentry_id):
+                errors["entity_id"] = "already_linked"
+                placeholders["other"] = owner.name
+            else:
+                return self._relink(source)
+        schema = vol.Schema({vol.Required("entity_id"): _power_sensor()})
+        meters = [s.id for s in current.sources if s.type == KIND_SUBMETER]
+        return self.async_show_form(
+            step_id="link_sensor",
+            data_schema=self.add_suggested_values_to_schema(
+                schema, user_input or ({"entity_id": meters[0]} if meters else {})
+            ),
+            errors=errors,
+            description_placeholders=placeholders,
+        )
+
+    async def async_step_merge(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
+        """Another appliance is the same one: it joins this one."""
+        current = self._current()
+        others = self._others(current.subentry_id)
+        if not others:
+            return self.async_abort(reason="nothing_to_merge")
+        if user_input is not None:
+            coordinator = self._coordinator()
+            if coordinator is None:
+                return self.async_abort(reason="not_loaded")
+            await coordinator.async_merge(current.subentry_id, user_input["other"])
+            return self.async_abort(
+                reason="merged",
+                description_placeholders={"name": current.name, "other": others[user_input["other"]].name},
+            )
+        options = [
+            {"value": sid, "label": f"{a.name} ({link_text(a)})"}
+            for sid, a in sorted(others.items(), key=lambda x: x[1].name.lower())
+        ]
+        schema = vol.Schema(
+            {
+                vol.Required("other"): SelectSelector(
+                    SelectSelectorConfig(options=options, mode=SelectSelectorMode.LIST)
+                )
+            }
+        )
+        return self.async_show_form(
+            step_id="merge", data_schema=schema, description_placeholders=self._placeholders()
         )

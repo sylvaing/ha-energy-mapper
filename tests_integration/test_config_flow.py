@@ -131,7 +131,8 @@ FORM = {
         "switched_loads": [
             {"entity_id": "switch.water_heater", "name": "Water heater", "on_states": ["on"]},
             {"entity_id": "switch.radiator", "name": "Radiator", "on_states": ["off"]},
-        ]
+        ],
+        "excluded_switched_loads": ["switch.pump", "switch.pump"],
     },
     "thresholds": {"step_threshold_w": 200},
     "analysis": {"analysis_time": "03:15:00", "backfill_days": 30, "half_life_days": 20},
@@ -140,6 +141,7 @@ EXPECTED = {
     "pv_entity": "sensor.other_solar_power",
     "battery_invert": True,
     "switched_loads": [{"entity_id": "switch.radiator", "name": "Radiator", "on_states": ["off"]}],
+    "excluded_switched_loads": ["switch.pump"],
     "step_threshold_w": 200.0,
     "analysis_time": "03:15",
     "half_life_days": 20,
@@ -158,7 +160,12 @@ def test_settings_from_form() -> None:
 
 
 def test_suggested_values() -> None:
-    values = suggested_values(addon_settings({"pv_entity": "sensor.pv2", "backfill_days": 5}))
+    values = suggested_values(
+        addon_settings(
+            {"pv_entity": "sensor.pv2", "backfill_days": 5, "excluded_switched_loads": ["switch.pump"]}
+        )
+    )
+    assert values["loads"]["excluded_switched_loads"] == ["switch.pump"]
     assert values["sensors"]["grid_entity"] == AUTOMATIC["grid_entity"]
     assert values["sensors"]["pv_entity"] == "sensor.pv2"
     assert values["sensors"]["submeters"] == AUTOMATIC["submeters"]

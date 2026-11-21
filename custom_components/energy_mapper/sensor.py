@@ -21,7 +21,7 @@ from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .appliances import KIND_LOAD, Appliance
+from .appliances import KIND_LOAD, Appliance, source_value
 from .const import DOMAIN
 from .coordinator import EnergyMapperConfigEntry, EnergyMapperCoordinator
 
@@ -36,11 +36,12 @@ def _ts(value: Any) -> dt.datetime | None:
 
 
 def _latest(coordinator: EnergyMapperCoordinator, section: str, appliance: Appliance, default: Any) -> Any:
-    """A value of ``appliance`` on the last analysed day, None when no day is analysed."""
+    """A value of ``appliance`` (the sum of its sources) on the last analysed
+    day, None when no day is analysed."""
     if not coordinator.latest.get("day"):
         return None
-    values = (coordinator.latest.get(section) or {}).get(appliance.hourly_kind) or {}
-    return values.get(appliance.source_id, default)
+    value = source_value(coordinator.latest.get(section) or {}, appliance, default)
+    return round(value, 4) if isinstance(value, float) else value
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -144,16 +145,23 @@ async def async_setup_entry(
     )
     async_add_entities(ServiceSensor(coordinator, d) for d in SERVICE_SENSORS)
 
-    added: set[str] = set()
+    # subentry id -> key of the appliance whose entities were added
+    added: dict[str, str] = {}
 
     @callback
     def add_appliances() -> None:
-        added.intersection_update(coordinator.appliances)  # removed ones may come back
-        new = [a for key, a in coordinator.appliances.items() if key not in added]
-        if not new:
-            return
-        added.update(a.key for a in new)
-        async_add_entities(ApplianceSensor(coordinator, a, d, via) for a in new for d in APPLIANCE_SENSORS)
+        # appliances whose sensors were removed (deleted, or measured by a sub-meter) may come back
+        current = {a.subentry_id: a for a in coordinator.appliances.values() if a.estimated}
+        for subentry_id in set(added) - set(current):
+            del added[subentry_id]
+        for subentry_id, a in current.items():
+            if subentry_id is None or added.get(subentry_id) == a.key:
+                continue
+            added[subentry_id] = a.key
+            async_add_entities(
+                [ApplianceSensor(coordinator, a, d, via) for d in APPLIANCE_SENSORS],
+                config_subentry_id=subentry_id,
+            )
 
     add_appliances()
     entry.async_on_unload(coordinator.async_add_listener(add_appliances))
@@ -208,13 +216,18 @@ class ApplianceSensor(_Base):
             identifiers={(DOMAIN, appliance.key)},
             name=appliance.name,
             manufacturer=MANUFACTURER,
-            model="Switched appliance" if appliance.kind == KIND_LOAD else "Recognised appliance",
+            model=(
+                "Switched appliance"
+                if all(s.type == KIND_LOAD for s in appliance.estimated)
+                else "Recognised appliance"
+            ),
             **via,
         )
 
     @property
     def _appliance(self) -> Appliance | None:
-        return self.coordinator.appliances.get(self._key)
+        appliance = self.coordinator.appliances.get(self._key)
+        return appliance if appliance is not None and appliance.estimated else None
 
     @property
     def available(self) -> bool:

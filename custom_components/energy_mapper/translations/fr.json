@@ -54,10 +54,12 @@
           "loads": {
             "name": "Appareils pilotés",
             "data": {
-              "switched_loads": "Appareils pilotés par un interrupteur"
+              "switched_loads": "Appareils pilotés par un interrupteur",
+              "excluded_switched_loads": "Interrupteurs exclus"
             },
             "data_description": {
-              "switched_loads": "Appareils dont l'état indique quand ils fonctionnent. Ceux du tableau Énergie sont toujours repris ; une ligne ici en ajoute un ou le modifie. États de marche : les états dans lesquels il fonctionne (on par défaut ; off pour le relais du fil pilote d'un radiateur)."
+              "switched_loads": "Appareils dont l'état indique quand ils fonctionnent. Ceux du tableau Énergie sont toujours repris ; une ligne ici en ajoute un ou le modifie. États de marche : les états dans lesquels il fonctionne (on par défaut ; off pour le relais du fil pilote d'un radiateur).",
+              "excluded_switched_loads": "Interrupteurs jamais mesurés ni proposés comme appareils, par exemple le relais d'un appareil supprimé. Retirez-en un pour le mesurer à nouveau."
             }
           },
           "thresholds": {
@@ -96,12 +98,117 @@
       "cannot_connect": "Impossible de joindre le module complémentaire : démarrez-le, puis rouvrez les réglages."
     }
   },
+  "config_subentries": {
+    "appliance": {
+      "initiate_flow": {
+        "user": "Ajouter un appareil",
+        "reconfigure": "Modifier l'appareil"
+      },
+      "entry_type": "Appareil",
+      "step": {
+        "user": {
+          "title": "Ajouter un appareil",
+          "description": "Les appareils trouvés par l'analyse sont ajoutés automatiquement. Ajoutez-en un à la main quand vous le connaissez déjà.",
+          "menu_options": {
+            "add_relay": "Piloté par un interrupteur (relais, fil pilote…)",
+            "add_expected": "Pas encore vu : décrire sa puissance"
+          }
+        },
+        "add_relay": {
+          "title": "Appareil piloté par un interrupteur",
+          "description": "L'analyse mesure sa puissance à chaque commutation de l'entité.",
+          "data": {
+            "name": "Nom",
+            "entity_id": "Interrupteur",
+            "on_states": "États de marche"
+          },
+          "data_description": {
+            "entity_id": "L'entité dont l'état indique quand l'appareil peut fonctionner.",
+            "on_states": "États dans lesquels il fonctionne. Vide : détectés automatiquement (off pour le relais d'un radiateur à fil pilote)."
+          }
+        },
+        "add_expected": {
+          "title": "Appareil pas encore vu",
+          "description": "Décrivez-le : sa première utilisation sera reconnue à sa puissance.",
+          "data": {
+            "name": "Nom",
+            "power_w": "Puissance",
+            "usage": "Une utilisation typique"
+          },
+          "data_description": {
+            "power_w": "La puissance indiquée sur l'appareil, par exemple 2000 W pour une bouilloire."
+          }
+        },
+        "reconfigure": {
+          "title": "{name}",
+          "description": "Lié à : {link}. Supprimez l'appareil depuis son menu dans la liste.",
+          "menu_options": {
+            "rename": "Renommer",
+            "link_relay": "Lier à un interrupteur",
+            "link_sensor": "Lier à un capteur de puissance (sous-compteur)",
+            "merge": "Fusionner un autre appareil dans celui-ci"
+          }
+        },
+        "rename": {
+          "title": "Renommer {name}",
+          "description": "L'appareil, ses entités et sa statistique d'énergie prennent le nouveau nom ; leurs identifiants ne changent pas.",
+          "data": {
+            "name": "Nom"
+          }
+        },
+        "link_relay": {
+          "title": "Lier {name} à un interrupteur",
+          "description": "Désormais son énergie est mesurée à chaque commutation de cette entité (il est lié à : {link}). L'énergie déjà enregistrée est conservée.",
+          "data": {
+            "entity_id": "Interrupteur",
+            "on_states": "États de marche"
+          },
+          "data_description": {
+            "on_states": "États dans lesquels il fonctionne. Vide : détectés automatiquement (off pour le relais d'un radiateur à fil pilote)."
+          }
+        },
+        "link_sensor": {
+          "title": "Lier {name} à un capteur de puissance",
+          "description": "Le capteur le mesure : il est soustrait avant l'analyse, et ses capteurs ici s'arrêtent (utilisez l'énergie du capteur lui-même dans le tableau Énergie). La statistique d'énergie déjà enregistrée est conservée.",
+          "data": {
+            "entity_id": "Capteur de puissance"
+          }
+        },
+        "merge": {
+          "title": "Fusionner dans {name}",
+          "description": "L'appareil choisi est le même que {name} : ses liens rejoignent celui-ci, son énergie passée est ajoutée à la sienne, puis il est supprimé. {name} garde son nom et ses entités.",
+          "data": {
+            "other": "Appareil"
+          }
+        }
+      },
+      "error": {
+        "already_linked": "Déjà lié à l'appareil {other} : fusionnez-le plutôt.",
+        "cannot_connect": "Impossible de joindre le module complémentaire.",
+        "addon_too_old": "Mettez à jour le module complémentaire Energy Mapper en 0.5.0 ou plus récent.",
+        "invalid_name": "Saisissez un nom de 1 à 100 caractères."
+      },
+      "abort": {
+        "not_loaded": "Energy Mapper ne fonctionne pas : démarrez d'abord le module complémentaire.",
+        "nothing_to_merge": "Il n'y a pas d'autre appareil.",
+        "merged": "{other} a été fusionné dans {name}."
+      }
+    }
+  },
   "selector": {
     "switched_loads": {
       "fields": {
         "entity_id": "Entité",
         "name": "Nom",
         "on_states": "États de marche"
+      }
+    },
+    "usage": {
+      "options": {
+        "short": "Courte (moins de 10 min, ex. bouilloire)",
+        "medium": "Moyenne (10 min à 1 h)",
+        "long": "Longue (plus d'1 h)",
+        "cycling": "Marche/arrêt en cycles (plaque, four)"
       }
     }
   },

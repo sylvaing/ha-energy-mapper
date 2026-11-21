@@ -34,7 +34,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import EnergyConverter
 
-from .appliances import Appliance
+from .appliances import Appliance, source_value
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -50,7 +50,8 @@ type Row = tuple[int, float, float]  # (hour start, kWh in the hour, cumulative 
 def hourly_values(
     appliance: Appliance, payloads: Mapping[str, Mapping[str, Any]], days: Iterable[str]
 ) -> dict[int, float]:
-    """kWh of ``appliance`` in each UTC hour of ``days`` (zeros included, so a
+    """kWh of ``appliance`` (the sum of its estimated sources) in each UTC
+    hour of ``days`` (zeros included, so a
     re-import overwrites a value that disappeared). ``payloads`` are hourly
     answers by day; an hour shared with a neighbouring day (time zones with a
     half-hour offset) adds the neighbour's part when its payload is given."""
@@ -62,9 +63,7 @@ def hourly_values(
         for hour in payload.get("hours") or []:
             start = int(hour["start"])
             if start in values:
-                values[start] += float(
-                    (hour.get(appliance.hourly_kind) or {}).get(appliance.source_id) or 0.0
-                )
+                values[start] += float(source_value(hour, appliance, 0.0))
     return {h: round(v, 6) for h, v in sorted(values.items())}
 
 
@@ -169,6 +168,44 @@ async def async_import(hass: HomeAssistant, appliance: Appliance, values: Mappin
         )
     _LOGGER.debug("%s: %d hourly rows written", appliance.statistic_id, len(rows))
     return len(rows)
+
+
+def _all_values(hass: HomeAssistant, statistic_ids: set[str]) -> dict[int, float]:
+    """Hourly values of the statistics, added hour by hour. Runs in the recorder executor."""
+    stats = statistics_during_period(
+        hass, dt_util.utc_from_timestamp(0), None, statistic_ids, "hour", None, {"state", "sum"}
+    )
+    values: dict[int, float] = {}
+    for rows in stats.values():
+        previous = 0.0
+        for r in rows:
+            start = int(r["start"])
+            if r.get("state") is not None:
+                value = float(r["state"])
+            elif r.get("sum") is not None:
+                value = float(r["sum"]) - previous
+            else:
+                value = 0.0
+            if r.get("sum") is not None:
+                previous = float(r["sum"])
+            values[start] = round(values.get(start, 0.0) + max(value, 0.0), 6)
+    return values
+
+
+async def async_merge(hass: HomeAssistant, target: Appliance, other_ids: Iterable[str]) -> int:
+    """Add the hourly values of the statistics ``other_ids`` (merged
+    appliances) to the statistic of ``target``, over their whole history;
+    returns the rows written. The caller clears ``other_ids`` afterwards."""
+    ids = {target.statistic_id, *other_ids}
+    instance = get_instance(hass)
+    await instance.async_block_till_done()
+    values = await instance.async_add_executor_job(_all_values, hass, ids)
+    return await async_import(hass, target, values)
+
+
+def async_rename(hass: HomeAssistant, appliance: Appliance) -> None:
+    """Give the statistic of ``appliance`` its current name (no row written)."""
+    async_add_external_statistics(hass, metadata(appliance), [])
 
 
 def _our_ids(hass: HomeAssistant) -> set[str]:

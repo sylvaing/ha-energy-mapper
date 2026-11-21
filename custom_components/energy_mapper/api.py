@@ -107,3 +107,20 @@ class EnergyMapperClient:
 
     async def put_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
         return await self._request("PUT", "/api/settings", json=settings)
+
+    async def get_appliances(self) -> dict[str, Any]:
+        """``{"appliances": [...]}``: the appliances the add-on holds (0.5.0+)."""
+        return await self._request("GET", "/api/appliances")
+
+    async def put_appliances(self, appliances: list[dict[str, Any]]) -> dict[str, Any]:
+        return await self._request("PUT", "/api/appliances", json={"appliances": appliances})
+
+    async def expect_signature(self, kind: str, band: str, power_w: float, label: str) -> dict[str, Any]:
+        """The signature of an appliance declared before it is seen:
+        ``{"signature", "created"}``; error ``conflict`` (409) when another
+        appliance has that power."""
+        return await self._request(
+            "POST",
+            "/api/signatures",
+            json={"kind": kind, "band": band, "power_w": power_w, "label": label},
+        )

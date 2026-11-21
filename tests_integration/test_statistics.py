@@ -23,8 +23,12 @@ from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClien
 from custom_components.energy_mapper.appliances import (
     KIND_LOAD,
     KIND_SIGNATURE,
-    Appliance,
-    appliances_from,
+    Source,
+    appliance_of_key,
+    discovered,
+    key_statistic_id,
+    new_appliance,
+    relay,
     statistic_id,
 )
 from custom_components.energy_mapper.const import DOMAIN
@@ -106,12 +110,18 @@ def registry(labelled: bool = False, updated: bool = True) -> dict[str, Any]:
 
 
 def mock_addon(
-    mock: AiohttpClientMocker, days: dict[str, dict[str, Any]], reg: dict[str, Any], health=None
+    mock: AiohttpClientMocker,
+    days: dict[str, dict[str, Any]],
+    reg: dict[str, Any],
+    health=None,
+    appliances: list[dict[str, Any]] | None = None,
 ) -> None:
     mock.clear_requests()
     mock.get(f"{URL}/api/health", json=health or HEALTH)
     mock.get(f"{URL}/api/settings", json=addon_settings())
     mock.put(f"{URL}/api/settings", json={"settings": {}})
+    mock.get(f"{URL}/api/appliances", json={"appliances": appliances or []})
+    mock.put(f"{URL}/api/appliances", json={"appliances": []})
     mock.get(
         f"{URL}/api/days",
         json={
@@ -190,15 +200,34 @@ def assert_monotonic(values: list[tuple[int, float, float]]) -> None:
 # ---------------------------------------------------------------------------
 def test_appliances_and_ids() -> None:
     # a configured switch whose power was never learned is not an appliance yet
-    apps = appliances_from(registry(labelled=True), {"switch.pump": "Pump"})
-    assert set(apps) == {"load:switch.water_heater", "signature:short-2000w"}
-    assert apps["signature:short-2000w"].name == "Kettle"
-    assert apps["load:switch.water_heater"].power_w == 1850
-    assert apps["load:switch.water_heater"].statistic_id == "energy_mapper:load_switch_water_heater_energy"
+    found = discovered(registry(labelled=True), {"switch.pump": "Pump"})
+    assert found == [
+        ("Water heater", Source(KIND_LOAD, "switch.water_heater")),
+        ("Kettle", Source(KIND_SIGNATURE, "short-2000w", power_w=2000.0)),
+    ]
+    # the name of a switched load follows the last analysed day; excluded ones are left out
+    assert discovered(registry(), {"switch.water_heater": "Boiler"})[0][0] == "Boiler"
+    assert discovered(registry(), {}, ["switch.water_heater"]) == []
+    # labels the add-on holds for an appliance of ours are not new appliances
+    reg = registry(labelled=True)
+    reg["signatures"][0]["appliance"] = "signature:short-2000w"
+    assert [name for name, _ in discovered(reg, {})] == ["Water heater"]
+
+    heater = new_appliance("Water heater", [relay("switch.water_heater")])
+    assert (heater.key, heater.statistic_id) == ("load:switch.water_heater", HEATER)
+    assert HEATER == "energy_mapper:load_switch_water_heater_energy"
     assert KETTLE == "energy_mapper:signature_short_2000w_energy"
-    # a rename in the settings follows the last analysed day
-    apps = appliances_from(registry(), {"switch.water_heater": "Boiler"})
-    assert apps["load:switch.water_heater"] == Appliance(KIND_LOAD, "switch.water_heater", "Boiler", 1850)
+    assert key_statistic_id("signature:short-2000w") == KETTLE
+    # a key taken by an appliance re-linked away from that relay
+    again = new_appliance("Heater", [relay("switch.water_heater")], {"load:switch.water_heater"})
+    assert (again.key, again.statistic_id) == (
+        "load:switch.water_heater-2",
+        "energy_mapper:load_switch_water_heater_2_energy",
+    )
+    assert appliance_of_key("load:switch.water_heater", "Water heater").sources == (
+        Source(KIND_LOAD, "switch.water_heater"),
+    )
+    assert appliance_of_key("nothing", "x") is None
 
 
 def _addon_statistic_ids():
@@ -248,7 +277,7 @@ def test_merge_rows() -> None:
 
 
 def test_hourly_values_shares_boundary_hours() -> None:
-    heater = Appliance(KIND_LOAD, "switch.water_heater", "Water heater")
+    heater = appliance_of_key("load:switch.water_heater", "Water heater")
     # a day starting at :30 (half-hour time zone): its first hour is shared
     d1 = heater_day("2027-03-08", D1 - H, {0: 0.25, 24: 0.5}, n=25)
     d2 = heater_day("2027-03-09", D2 - H, {0: 0.5, 1: 1.0}, n=25)
@@ -443,14 +472,6 @@ async def test_backfill_then_removal(
     assert hass.states.get("sensor.kettle_uses_yesterday").state == "2"
     assert device(hass, entry, "signature:short-2000w").name == "Kettle"
 
-    # renamed: the device follows (the id does not change)
-    reg = registry(labelled=True)
-    reg["signatures"][0]["label"] = "Electric kettle"
-    mock_addon(aioclient_mock, days, reg)
-    await refresh(hass, entry)
-    assert device(hass, entry, "signature:short-2000w").name == "Electric kettle"
-    assert len(await rows(hass, KETTLE)) == 48
-
     # an empty registry (add-on data lost or not yet built) removes nothing
     mock_addon(
         aioclient_mock, days, {**registry(), "updated_at": None, "signatures": [], "switched_loads": []}
@@ -458,9 +479,10 @@ async def test_backfill_then_removal(
     await refresh(hass, entry)
     assert await our_ids(hass) == {HEATER, KETTLE}
 
-    # the label is removed: device, entities and statistics go
-    mock_addon(aioclient_mock, days, registry())
-    await refresh(hass, entry)
+    # the appliance is deleted: device, entities and statistics go
+    sub = next(s for s in entry.subentries.values() if s.unique_id == "signature:short-2000w")
+    hass.config_entries.async_remove_subentry(entry, sub.subentry_id)
+    await settle(hass)
     assert device(hass, entry, "signature:short-2000w") is None
     assert hass.states.get("sensor.kettle_energy_yesterday") is None
     assert (
@@ -469,6 +491,13 @@ async def test_backfill_then_removal(
     )
     assert await our_ids(hass) == {HEATER}
     assert await rows(hass, KETTLE) == []
+    # the label the add-on still holds for it (cleared by the push) does not bring it back
+    reg = registry(labelled=True)
+    reg["signatures"][0]["appliance"] = "signature:short-2000w"
+    mock_addon(aioclient_mock, days, reg)
+    await refresh(hass, entry)
+    assert device(hass, entry, "signature:short-2000w") is None
+    assert await our_ids(hass) == {HEATER}
 
 
 async def test_addon_down_keeps_entities_unavailable(

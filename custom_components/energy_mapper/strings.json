@@ -54,10 +54,12 @@
           "loads": {
             "name": "Switched appliances",
             "data": {
-              "switched_loads": "Appliances driven by a switch"
+              "switched_loads": "Appliances driven by a switch",
+              "excluded_switched_loads": "Excluded switches"
             },
             "data_description": {
-              "switched_loads": "Appliances whose state tells when they run. Those of the Energy dashboard are always included; an entry here adds one or changes it. On-states: the states in which it runs (default on; off for a pilot-wire radiator relay)."
+              "switched_loads": "Appliances whose state tells when they run. Those of the Energy dashboard are always included; an entry here adds one or changes it. On-states: the states in which it runs (default on; off for a pilot-wire radiator relay).",
+              "excluded_switched_loads": "Switches never measured nor proposed as appliances, for example the relay of a deleted appliance. Remove one to measure it again."
             }
           },
           "thresholds": {
@@ -96,12 +98,117 @@
       "cannot_connect": "Cannot reach the add-on: start it, then open the settings again."
     }
   },
+  "config_subentries": {
+    "appliance": {
+      "initiate_flow": {
+        "user": "Add appliance",
+        "reconfigure": "Edit appliance"
+      },
+      "entry_type": "Appliance",
+      "step": {
+        "user": {
+          "title": "Add an appliance",
+          "description": "Appliances found by the analysis are added automatically. Add one by hand when you already know it.",
+          "menu_options": {
+            "add_relay": "Driven by a switch (relay, pilot wire...)",
+            "add_expected": "Not seen yet: describe its power"
+          }
+        },
+        "add_relay": {
+          "title": "Appliance driven by a switch",
+          "description": "The analysis measures its power at each switching of the entity.",
+          "data": {
+            "name": "Name",
+            "entity_id": "Switch",
+            "on_states": "On-states"
+          },
+          "data_description": {
+            "entity_id": "The entity whose state tells when the appliance may run.",
+            "on_states": "States in which it runs. Empty: detected automatically (off for a pilot-wire radiator relay)."
+          }
+        },
+        "add_expected": {
+          "title": "Appliance not seen yet",
+          "description": "Describe it: its first use will be recognised by its power.",
+          "data": {
+            "name": "Name",
+            "power_w": "Power",
+            "usage": "A typical use"
+          },
+          "data_description": {
+            "power_w": "The power written on the appliance, for example 2000 W for a kettle."
+          }
+        },
+        "reconfigure": {
+          "title": "{name}",
+          "description": "Linked to: {link}. Delete the appliance from its menu in the list.",
+          "menu_options": {
+            "rename": "Rename",
+            "link_relay": "Link to a switch",
+            "link_sensor": "Link to a power sensor (sub-meter)",
+            "merge": "Merge another appliance into this one"
+          }
+        },
+        "rename": {
+          "title": "Rename {name}",
+          "description": "The device, its entities and its energy statistic take the new name; their ids do not change.",
+          "data": {
+            "name": "Name"
+          }
+        },
+        "link_relay": {
+          "title": "Link {name} to a switch",
+          "description": "From now on its energy is measured at each switching of this entity (it is linked to: {link}). The energy recorded so far is kept.",
+          "data": {
+            "entity_id": "Switch",
+            "on_states": "On-states"
+          },
+          "data_description": {
+            "on_states": "States in which it runs. Empty: detected automatically (off for a pilot-wire radiator relay)."
+          }
+        },
+        "link_sensor": {
+          "title": "Link {name} to a power sensor",
+          "description": "The sensor measures it: it is subtracted before the analysis, and its sensors here stop (use the sensor's own energy in the Energy dashboard). The energy statistic recorded so far is kept.",
+          "data": {
+            "entity_id": "Power sensor"
+          }
+        },
+        "merge": {
+          "title": "Merge into {name}",
+          "description": "The chosen appliance is the same as {name}: its links join this one, its past energy is added to this one's, and it is deleted. {name} keeps its name and entities.",
+          "data": {
+            "other": "Appliance"
+          }
+        }
+      },
+      "error": {
+        "already_linked": "Already linked to the appliance {other}: merge it instead.",
+        "cannot_connect": "Cannot reach the add-on.",
+        "addon_too_old": "Update the Energy Mapper add-on to 0.5.0 or later.",
+        "invalid_name": "Enter a name of 1 to 100 characters."
+      },
+      "abort": {
+        "not_loaded": "Energy Mapper is not running: start the add-on first.",
+        "nothing_to_merge": "There is no other appliance.",
+        "merged": "{other} was merged into {name}."
+      }
+    }
+  },
   "selector": {
     "switched_loads": {
       "fields": {
         "entity_id": "Entity",
         "name": "Name",
         "on_states": "On-states"
+      }
+    },
+    "usage": {
+      "options": {
+        "short": "Short (under 10 min, e.g. a kettle)",
+        "medium": "Medium (10 min to 1 h)",
+        "long": "Long (over 1 h)",
+        "cycling": "Cycling on and off (hob, oven)"
       }
     }
   },
