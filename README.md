@@ -526,9 +526,11 @@ on/off states come with real-time detection
 - Entity suggestions compare the **state** of the entities and two attributes only
   (`hvac_action` of thermostats, `action` of humidifiers). A suggestion found by its long
   periods (containment) or by an attribute names an appliance or leads to a merge; it is not
-  used as a switch that measures the appliance. An entity that follows the same daily schedule
-  as an appliance without driving it (a daytime sensor and a pool pump) may be suggested:
-  ignore it.
+  used as a switch that measures the appliance. Since add-on 0.15.0 a containment suggestion
+  needs an entity specific to the load: not on half of the day or more, and not on at the same
+  hours every day (heating comfort schedules, pool filtration…), since most loads follow the
+  clock too. The other side of it: a load that only runs inside a fixed daily schedule is not
+  suggested from it either (an entity that switches with the load still is).
 
 ## Roadmap
 
@@ -1177,9 +1179,12 @@ La puissance et l'état de marche en direct viendront avec la détection en temp
 - Les suggestions d'entité ne comparent que l'**état** des entités et deux attributs
   (`hvac_action` des thermostats, `action` des humidificateurs). Une suggestion trouvée par ses
   longues périodes (inclusion) ou par un attribut nomme un appareil ou mène à une fusion ; elle
-  n'est pas utilisée comme interrupteur qui mesure l'appareil. Une entité qui suit le même
-  horaire quotidien qu'un appareil sans le commander (un capteur de jour et une pompe de
-  piscine) peut être suggérée : ignorez-la.
+  n'est pas utilisée comme interrupteur qui mesure l'appareil. Depuis l'add-on 0.15.0, une
+  suggestion par inclusion demande une entité propre à la charge : pas allumée la moitié de la
+  journée ou plus, ni aux mêmes heures chaque jour (plages de confort du chauffage, filtration
+  de la piscine…), car la plupart des charges suivent aussi l'horloge. Le revers : une charge
+  qui ne tourne que dans un horaire quotidien fixe n'est pas suggérée par celui-ci non plus
+  (une entité qui commute avec la charge l'est toujours).
 
 ### Feuille de route
 

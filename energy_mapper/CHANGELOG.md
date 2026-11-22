@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.15.0
+
+- Containment suggestions require specificity, not just inclusion (#82). In
+  winter, thermostats of water radiators, heating "comfort" sensors, a pool
+  pump's schedule or a cover were suggested for any daytime signature: they
+  contained its uses because both follow the clock. A containment candidate
+  now also needs `lift` (`contained / time_share`) of at least 2 (an entity
+  on half of the day or more is never suggested) and `shifted_chance` of at
+  most 10⁻⁴: the chance of that many sessions inside if each session were
+  moved to the same hours of the other compared days (Poisson-binomial,
+  `baseline` the mean of those probabilities). `used` is kept but its
+  threshold is lowered from 0.3 to 0.1 (a radiator whose relay is a switched
+  load leaves only some of its cycles to its signature). Containment
+  candidates are ranked by `lift`. Known limit: an entity on at the same
+  hours every day cannot be told from a coincidence by containment.
+
 ## 0.14.0
 
 - Connected appliances as ground truth (#79). An appliance can learn from its

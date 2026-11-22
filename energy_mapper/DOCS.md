@@ -688,8 +688,9 @@ again later keeps the decision. `GET /api/review` answers the signatures
                                    "inverted": false, "match": "edge"},
                                   {"entity_id": "climate.room", "attribute": "hvac_action",
                                    "match": "containment", "score": 0.97, "contained": 0.97,
-                                   "time_share": 0.3, "used": 0.8, "matches": 40, "sessions": 41,
-                                   "days": 20, "days_compared": 20, "chance": 1e-20,
+                                   "time_share": 0.3, "lift": 3.23, "baseline": 0.4, "used": 0.8,
+                                   "matches": 40, "sessions": 41, "days": 20, "days_compared": 20,
+                                   "chance": 1e-20, "shifted_chance": 1e-12,
                                    "on_states": ["heating"], "inverted": false,
                                    "appliance": {"key": "load:switch.radiator", "name": "Radiator",
                                                  "via": "device"}}]}],
@@ -747,16 +748,22 @@ For each signature and entity, over the last 30 days, two tests:
   heating for an hour while its radiator cycles): the on states are those
   holding a larger share of the signature's on-time than of the entity's
   time; `score` (`contained`) is the share of the signature's on-time spent
-  in them, `time_share` the share of the entity's time in them, `sessions`
-  the signature's uses grouped when less than 30 minutes apart, `matches`
-  those spent mostly inside, `chance` the probability of that many sessions
-  inside by chance (binomial, with `time_share`), and `used` the share of the
-  entity's on periods with a use. Suggested when `contained` is at least
-  `review_suggest_score`, at least 5 sessions are inside on 3 different days,
-  `used` is at least 30 % and `chance` at most 10⁻⁴ (an entity that is on
-  most of the time is never suggested).
+  in them, `time_share` the share of the entity's time in them, `lift`
+  their ratio, `sessions` the signature's uses grouped when less than 30
+  minutes apart, `matches` those spent mostly inside, `chance` the
+  probability of that many sessions inside by chance (binomial, with
+  `time_share`), `shifted_chance` the same if the sessions followed the clock
+  but ignored the entity (each session moved to the same hours of the other
+  days; `baseline` is the mean share of those days on which it would be
+  inside), and `used` the share of the entity's on periods with a use.
+  Suggested when `contained` is at least `review_suggest_score`, at least 5
+  sessions are inside on 3 different days, `lift` is at least 2, `used` at
+  least 10 %, and both `chance` and `shifted_chance` at most 10⁻⁴ (add-on
+  0.15.0+, #82): an entity on half of the time or more, or whose periods
+  come back at the same hours every day (a heating or filtration schedule),
+  is never suggested on containment.
 
-The edge matches come first, then by score; the best 3 are kept. A
+The edge matches come first, by score, then the containment ones by `lift`; the best 3 are kept. A
 suggested entity that belongs to an appliance (one of its sources, or in the
 same Home Assistant device as one) has `appliance`: the panel proposes to
 merge the signature into it. `suggest.unrecorded_domains` lists the

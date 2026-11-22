@@ -1358,31 +1358,81 @@ or from its first change) and the signature's activations (`signature_uses`):
 4. **Sessions**: the activations of a day grouped when less than 30 minutes apart (uses close
    together are not independent evidence); a session is *inside* when at least half of its
    on-time is in an on state. `matches` = sessions inside, `sessions` = all of them.
-5. `chance` = P(X ≥ matches) for X ~ Binomial(sessions, time_share): the probability that so
+5. `lift` = `contained / time_share` (#82): how much more often the signature runs in those
+   states than the entity is in them.
+6. `chance` = P(X ≥ matches) for X ~ Binomial(sessions, time_share): the probability that so
    many sessions fall inside by chance if they ignored the entity.
-6. `used`: the share of the entity's on periods (consecutive on segments) during which the
+7. `shifted_chance` (#82): the same if the sessions **followed the clock** but ignored the
+   entity. Each session is moved to the same clock times of every other compared day (by the
+   difference of the days' starts, so a DST change keeps the local hours); `p_i` = the share
+   of those days on which it would be inside, smoothed as `(hits + 1) / (days + 2)` (never
+   inside on 27 other days is rare, not impossible). `shifted_chance` = P(X ≥ matches) for X
+   the sum of independent Bernoulli(`p_i`) (Poisson-binomial, exact by dynamic programming);
+   `baseline` = the mean `p_i`.
+8. `used`: the share of the entity's on periods (consecutive on segments) during which the
    signature runs at least once (the entity's on-time actually used).
 
 An entity is suggested on containment when `contained ≥ review_suggest_score` (the same
-setting), at least 5 sessions are inside on at least 3 different days, `used ≥ 0.3` and
-`chance ≤ 10⁻⁴`. The chance test rejects an entity that is "on" most of the time (it contains
-most uses whatever they are); `used` rejects an entity that is often on without the load. The
-threshold allows for the multiple comparisons (up to 550 series per signature): a random
-entity reaches it about once in 10,000 comparisons.
+setting), at least 5 sessions are inside on at least 3 different days, `lift ≥ 2`,
+`used ≥ 0.1`, `chance ≤ 10⁻⁴` and `shifted_chance ≤ 10⁻⁴`. The threshold allows for the
+multiple comparisons (up to 550 series per signature): a random entity reaches it about once
+in 10,000 comparisons.
 
-Synthetic results (`tests/test_containment.py`, 20 days, a ~900 W cycling load inside four
-"heating" periods of 60–110 minutes a day, a fifth period a day without it, the load starting
-and stopping 3–10 minutes away from the thermostat's changes):
+**Why inclusion is not enough** (#82). Up to 0.14.0 the test was `contained`, `used ≥ 0.3`
+and `chance` only. In winter, on the reference installation, it suggested mostly
+coincidences: thermostats of water radiators (`heat`, or `hvac_action` `heating` + `idle`) for
+a cycling ~900 W signature, a heating "comfort" sensor, a pool pump's filtration and a cover
+for 300–900 W signatures. Two causes:
 
-| Entity | Edge score | `contained` | `time_share` | `used` | inside / sessions | `chance` | Result |
-|---|---|---|---|---|---|---|---|
-| Thermostat `hvac_action` | none (no on state stands out) | 1.0 | 0.29 | 0.8 | 80 / 80 | 2.5 × 10⁻⁴³ | suggested (containment) |
-| Same, 40 % of the uses moved outside heating | – | 0.61 | 0.29 | 0.54 | 41 / 68 | 10⁻⁷ | rejected (`contained` < 0.8) |
-| 30 random entities, 4 changes a day | – | at most `time_share` + 0.05 | 0.1–0.9 | – | – | best 0.019 | rejected (`chance`) |
-| An entity on except two short breaks a day | – | 0.96 | 0.95 | 0.83 | 78 / 80 | 0.18 | rejected (`chance`) |
+- `chance` gets small with enough sessions even for an entity on most of the day: 27 / 29
+  sessions inside an entity on 60 % of the time is 7 × 10⁻⁵. `lift ≥ 2` requires the load to
+  be much more often inside than the entity's own share; an entity on half of the day or more
+  can never reach it.
+- Most loads, heating schedules, pool filtration and covers follow the clock: they run in the
+  daytime. A daytime signature falls inside any daytime entity more often than its 24-hour
+  share says, so the binomial, which assumes the uses ignore the clock, is far too optimistic.
+  `shifted_chance` compares with the same hours of the other days instead: an entity whose
+  periods come back at the same hours contains the moved sessions as well (`baseline` near 1),
+  one whose periods follow the regulation (a thermostat's `hvac_action`, a relay) does not.
+
+Offline check on the reference installation's 28 days (300 W threshold), all signatures
+against all 255 candidate series:
+
+| Signature → entity | `contained` | `time_share` | `lift` | inside / sessions | `chance` | `baseline` | `shifted_chance` | 0.14.0 | 0.15.0 |
+|---|---|---|---|---|---|---|---|---|---|
+| cycling ~900 W → a water-radiator thermostat (×7) | 0.955 | 0.60 | 1.6 | 27 / 29 | 7 × 10⁻⁵ | 0.59 | 5 × 10⁻⁵ | suggested | rejected (`lift`) |
+| long ~350 W → the boiler thermostat | 0.973 | 0.24 | 4.0 | 9 / 9 | 3 × 10⁻⁶ | 0.96 | 0.72 | suggested | rejected (`shifted_chance`) |
+| medium ~300 W → the pool pump | 0.949 | 0.21 | 4.6 | 10 / 10 | 10⁻⁷ | 0.96 | 0.70 | suggested | rejected |
+| medium ~350 W → a heating comfort sensor | 1.0 | 0.20 | 5.1 | 6 / 6 | 5 × 10⁻⁵ | 0.27 | 4 × 10⁻⁴ | suggested | rejected |
+| short ~800 W → a cover | 0.809 | 0.47 | 1.7 | 40 / 51 | 4 × 10⁻⁶ | 0.69 | 0.07 | suggested | rejected |
+| cycling ~900 W → the electric radiator's pilot-wire relay (`off`) | 0.834 | 0.06 | 14 | 23 / 29 | 2 × 10⁻²³ | 0.32 | 2 × 10⁻⁹ | rejected (`used` 0.18) | **suggested, first** |
+| cycling ~900 W → that radiator's thermostat `hvac_action` | 0.873 | 0.09 | 9.5 | 23 / 27 | 2 × 10⁻²⁰ | 0.54 | 1.5 × 10⁻⁵ | rejected (`used` 0.18) | **suggested** |
+
+The radiator's `used` is low because its relay is a switched load: the engine explains most of
+its cycles, and the signature holds the rest. Its relay belongs to the radiator's appliance,
+so the panel proposes the right merge.
+
+**Known limit.** An entity whose on periods come back at the same hours every day cannot be
+told from a coincidence by containment, even when it really drives the load (a load that only
+runs inside a fixed filtration schedule): `shifted_chance` stays high. The edge test still
+finds an entity that switches with the load.
+
+Synthetic results (`tests/test_containment.py`, 20 days):
+
+| Case | `contained` | `time_share` | `lift` | `shifted_chance` | Result |
+|---|---|---|---|---|---|
+| A ~900 W load cycling inside four of five "heating" periods a day (at times set by the regulation) | 1.0 | 0.29 | 3.4 | ≪ 10⁻⁶ | suggested (containment) |
+| Same, 40 % of the uses moved outside heating | 0.61 | 0.29 | – | – | rejected (`contained` < 0.8) |
+| 30 random entities, 4 changes a day | at most `time_share` + 0.1 | 0.1–0.9 | – | – | rejected (`chance`) |
+| An entity on except two short breaks a day | 0.95 | 0.95 | 1.0 | 0.008 | rejected (`lift`, `chance`) |
+| Daytime house: the radiator's thermostat and pilot-wire relay | 1.0 | 0.22 / 0.28 | 4.5 / 3.6 | 10⁻²¹ / 10⁻¹⁴ | suggested, thermostat first |
+| Daytime house: three water-radiator thermostats on 06:00–21:00 (state, `hvac_action`) | 0.9–1.0 | 0.58–0.64 | 1.6 | 0.02 | rejected (`lift`) |
+| Daytime house: an afternoon load inside a 10:00–19:00 pool filtration | 1.0 | 0.38 | 2.7 | 0.38 | rejected (`shifted_chance`) |
+| The same heating periods at fixed hours every day | 1.0 | 0.29 | – | > 10⁻⁴ | rejected (known limit) |
 
 An entity accepted on both tests is an edge match. The best 3 are kept: edge matches first,
-then by score, then `explained` (edge) or `used` (containment), then matches. Cost:
+by score, then containment matches by `lift` (the entity whose periods fit the load most
+tightly first), then matches. Cost:
 entities × signatures × days of lookups, binary searches and overlaps; containment is computed
 only when the edge test fails and stops at `contained` when it is too low: a few seconds at
 the bounds (550 series, 50 signatures, 30 days), once a night.
@@ -1392,8 +1442,9 @@ candidates, attribute_candidates, min_score, unrecorded: {entities, domains}, en
 candidates and attribute keys], devices: {entity_id: device_id}, signatures: {id: [candidate]}}`
 where an edge candidate is `{entity_id, attribute?, match: "edge", score, on_share, off_share,
 explained, matches, steps, days, days_compared, on_states, inverted}` and a containment
-candidate `{entity_id, attribute?, match: "containment", score, contained, time_share, used,
-matches, sessions, days, days_compared, chance, on_states, inverted}`. It is replaced each
+candidate `{entity_id, attribute?, match: "containment", score, contained, time_share, lift,
+baseline, used, matches, sessions, days, days_compared, chance, shifted_chance, on_states,
+inverted}`. It is replaced each
 night; separate from the registry so that the nightly re-clustering never has to carry it.
 `GET /api/review` adds `suggestions` to each listed signature that has some and `suggest` to
 the listing. A suggested entity that belongs to an appliance gets `appliance: {key, name,

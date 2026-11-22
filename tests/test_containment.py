@@ -26,6 +26,7 @@ from nilm_core.correlation import (  # noqa: E402
     accepted,
     binomial_tail,
     day_states,
+    poisson_binomial_tail,
     score_containment,
     score_entity,
     segments,
@@ -57,18 +58,21 @@ def days(n=N_DAYS):
     return [D0 + dt.timedelta(days=i) for i in range(n)]
 
 
-def heating_day(d: dt.date, outside: float = 0.0):
+def heating_day(d: dt.date, outside: float = 0.0, fixed: bool = False):
     """One day of a radiator on its thermostat: five "heating" periods of 60
     to 110 minutes (the last one without the load), the ~900 W load cycling
     inside the first four (one cycling session each, starting and stopping
-    minutes away from the thermostat's changes). ``outside``: the share of
-    the sessions moved three hours later, outside any heating period.
-    Returns (activations, hvac_action states)."""
+    minutes away from the thermostat's changes). The periods follow the
+    regulation: each one starts at any time of its slot of 4.8 hours (at
+    the same times every day, give or take 20 minutes, when ``fixed``: a
+    daily schedule). ``outside``: the share of the sessions moved three
+    hours later, outside any heating period. Returns (activations,
+    hvac_action states)."""
     rnd = random.Random(d.toordinal())
     m = midnight(d)
     acts, states = [], [(m, "idle")]
-    for j, h in enumerate((1, 6, 11, 16, 21)):
-        h0 = m + h * 3600 + rnd.uniform(0, 1200)
+    for j in range(5):
+        h0 = m + (j * 4.8 + 0.5 + (0.0 if fixed else rnd.uniform(0, 2.2))) * 3600 + rnd.uniform(0, 1200)
         dur = rnd.uniform(60, 110) * 60
         states += [(h0, "heating"), (h0 + dur, "idle")]
         if j == 4:
@@ -103,11 +107,11 @@ def mostly_on(d: dt.date):
     return pts
 
 
-def scenario(outside: float = 0.0, entities=None):
+def scenario(outside: float = 0.0, entities=None, fixed: bool = False):
     """(summaries, registry, sid, changes, initial) over ``N_DAYS`` days."""
     sums, series = {}, {}
     for d in days():
-        acts, states = heating_day(d, outside)
+        acts, states = heating_day(d, outside, fixed)
         s = summary(d, acts)
         s["quality"] = {"samples": 2880}  # 30 s sampling
         sums[d.isoformat()] = s
@@ -134,7 +138,8 @@ def containment_of(sums, reg, sid, changes, initial, entity):
         d: segments(initial[d].get(entity), changes[d][entity], sums[d]["start"], sums[d]["end"])
         for d in changes
     }
-    return score_containment(uses, segs, CorrelationConfig())
+    starts = {d: sums[d]["start"] for d in sums}
+    return score_containment(uses, segs, CorrelationConfig(), day_starts=starts)
 
 
 class ContainmentTests(unittest.TestCase):
@@ -224,6 +229,146 @@ class ContainmentTests(unittest.TestCase):
         self.assertEqual((binomial_tail(5, 0, 0.3), binomial_tail(5, 6, 0.3)), (1.0, 0.0))
         self.assertEqual(day_states([(0, "unavailable"), (5, "on")], 0, 100, 10), (None, [], 0))
         self.assertEqual(day_states([(0, "off"), (5, "on")], 0, 100, 10), ("off", [(5, "on")], 1))
+
+
+def daytime_house(d: dt.date):
+    """One winter day of a house whose loads and schedules follow the clock
+    (#82). Signatures: a ~900 W radiator cycling inside its thermostat's
+    "heating" periods (four a day, at times set by the regulation, between
+    06:00 and 21:00), and a ~350 W load running a few hours in the
+    afternoon, linked to nothing. Entities:
+
+    - the radiator's thermostat (``hvac_action``) and its pilot-wire relay,
+      ``off`` (allowing heat) from 10 minutes before to 10 minutes after
+      each period with the load: both contain the radiator;
+    - three thermostats of water radiators, ``heat`` on their comfort
+      schedule (about 06:00 to 21:00, 60 % of the day) and their
+      ``hvac_action`` ``heating`` most of it: they contain every daytime
+      use, without any link;
+    - a pool pump filtering from 10:00 to 19:00 every day: it contains the
+      afternoon load by the clock only.
+
+    Returns (activations, {entity: states})."""
+    rnd = random.Random(7 * d.toordinal())
+    m = midnight(d)
+    acts = []
+    heating = [(m, "idle")]
+    relay = [(m, "on")]
+    for j in range(4):
+        h0 = m + (6 + j * 3.75 + rnd.uniform(0, 1.8)) * 3600
+        dur = rnd.uniform(60, 100) * 60
+        heating += [(h0, "heating"), (h0 + dur, "idle")]
+        relay += [(h0 - 600, "off"), (h0 + dur + 600, "on")]
+        a0, a1 = h0 + rnd.uniform(3, 10) * 60, h0 + dur - rnd.uniform(3, 10) * 60
+        acts.append(act(d, (a0 - m) / 3600, 900, a1 - a0, cycling=True, duty=0.4))
+    a0 = rnd.uniform(11, 15)
+    acts.append(act(d, a0, 350, rnd.uniform(1.5, 3) * 3600))
+    states = {RADIATOR: heating, RELAY: relay}
+    for k in range(3):
+        on0, on1 = m + (6 + rnd.uniform(-0.5, 0.2)) * 3600, m + (21 + rnd.uniform(-0.2, 0.5)) * 3600
+        states[f"climate.water_{k}"] = [(m, "off"), (on0, "heat"), (on1, "off")]
+        pts = [(m, "idle")]
+        t = on0
+        while t < on1:  # heating, with short idle breaks
+            t1 = min(t + rnd.uniform(1, 3) * 3600, on1)
+            pts += [(t, "heating"), (t1, "idle")]
+            t = t1 + rnd.uniform(5, 20) * 60
+        states[f"climate.water_{k}::hvac_action"] = pts
+    states[POOL] = [(m, "off"), (m + 10 * 3600, "on"), (m + 19 * 3600, "off")]
+    return sorted(acts, key=lambda a: a["start"]), states
+
+
+RADIATOR = "climate.bathroom::hvac_action"
+RELAY = "switch.bathroom_pilot_wire"
+POOL = "binary_sensor.pool_pump"
+
+
+def daytime_scenario():
+    """(summaries, registry, {power: sid}, changes, initial) over ``N_DAYS``
+    days of ``daytime_house``."""
+    sums, series = {}, {}
+    for d in days():
+        acts, states = daytime_house(d)
+        s = summary(d, acts)
+        s["quality"] = {"samples": 2880}
+        sums[d.isoformat()] = s
+        series[d.isoformat()] = states
+    reg = update(None, sums, midnight(D0 + dt.timedelta(days=N_DAYS)))
+    sids = {round(sig["power_w"], -2): sig["id"] for sig in reg["signatures"]}
+    assert set(sids) == {900, 400}, reg["signatures"]
+    changes, initial = {}, {}
+    for day, per in series.items():
+        m = midnight(dt.date.fromisoformat(day))
+        changes[day], initial[day] = {}, {}
+        for e, pts in per.items():
+            first, ch, _ = day_states(pts, m, m + DAY, 300)
+            changes[day][e], initial[day][e] = ch, first
+    return sums, reg, sids, changes, initial
+
+
+class SpecificityTests(unittest.TestCase):
+    """#82: inclusion is not enough; the entity must be specific to the load."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sums, cls.reg, cls.sids, cls.changes, cls.initial = daytime_scenario()
+        cls.found = suggest(
+            cls.sums, cls.reg, cls.sids.values(), cls.changes, CorrelationConfig(), cls.initial
+        )
+
+    def of(self, power, entity):
+        return containment_of(self.sums, self.reg, self.sids[power], self.changes, self.initial, entity)
+
+    def test_the_radiator_is_found_tightest_first(self):
+        got = self.found[self.sids[900]]
+        # its thermostat's periods fit the load more tightly than the relay's
+        # (allowing heat 10 minutes around them): ranked by lift
+        self.assertEqual(
+            [(c["entity_id"], c["match"]) for c in got], [(RADIATOR, "containment"), (RELAY, "containment")]
+        )
+        self.assertGreater(got[0]["lift"], got[1]["lift"])
+        self.assertEqual((got[1]["on_states"], got[1]["inverted"]), (["off"], True))
+        for c in got:
+            self.assertGreaterEqual(c["contained"], 0.95)
+            self.assertGreater(c["lift"], 2.5)
+            self.assertLess(c["shifted_chance"], 1e-6)
+
+    def test_thermostats_on_all_day_are_not_suggested(self):
+        # every use of the radiator falls inside them, and the old test
+        # (binomial on their time share) passed: their lift is too low
+        for e in ("climate.water_0", "climate.water_1::hvac_action"):
+            c = self.of(900, e)
+            self.assertGreaterEqual(c["contained"], 0.9, e)
+            self.assertGreater(c["time_share"], 0.5, e)
+            self.assertLess(c["lift"], 2.0, e)
+            self.assertLessEqual(c["chance"], 1e-4, e)
+        names = {c["entity_id"] for found in self.found.values() for c in found}
+        self.assertFalse({e for e in names if e.startswith("climate.water")})
+
+    def test_a_daily_schedule_contains_by_the_clock_only(self):
+        # the afternoon load always runs during the pool's filtration: lift
+        # and binomial chance pass, the same hours of the other days do not
+        c = self.of(400, POOL)
+        self.assertGreaterEqual(c["contained"], 0.99)
+        self.assertGreaterEqual(c["lift"], 2.0)
+        self.assertLessEqual(c["chance"], 1e-4)
+        self.assertGreater(c["baseline"], 0.9)
+        self.assertGreater(c["shifted_chance"], 0.1)
+        self.assertNotIn(self.sids[400], self.found)
+
+    def test_a_fixed_heating_schedule_cannot_be_told_from_a_coincidence(self):
+        # the known limit: periods at the same times every day
+        sums, reg, sid, changes, initial = scenario(fixed=True)
+        self.assertEqual(suggest(sums, reg, [sid], changes, CorrelationConfig(), initial), {})
+        c = containment_of(sums, reg, sid, changes, initial, THERMOSTAT)
+        self.assertGreaterEqual(c["contained"], 0.99)
+        self.assertGreater(c["shifted_chance"], 1e-4)
+
+    def test_poisson_binomial_tail(self):
+        self.assertAlmostEqual(poisson_binomial_tail([0.5] * 10, 10), 0.5**10)
+        self.assertAlmostEqual(poisson_binomial_tail([0.3] * 8, 5), binomial_tail(8, 5, 0.3))
+        self.assertAlmostEqual(poisson_binomial_tail([1.0, 0.0, 0.5], 2), 0.5)
+        self.assertEqual((poisson_binomial_tail([0.2], 0), poisson_binomial_tail([0.2], 2)), (1.0, 0.0))
 
 
 class AttributeTests(unittest.TestCase):

@@ -32,16 +32,32 @@ the signature only runs while the entity is in that state. For each entity
 - ``sessions`` / ``matches``: the signature's uses grouped in sessions (a gap
   of ``session_gap_s`` at least between two sessions, so that uses close
   together count once), and those spent mostly inside;
+- ``lift``: ``contained / time_share``, how much more often the signature
+  runs in those states than the entity is in them (#82). An entity "on"
+  half of the time or more cannot reach 2: it contains most uses whatever
+  they are;
 - ``chance``: the probability that so many sessions fall inside by chance,
   if they ignored the entity (binomial tail, the time share being the
-  probability). It rejects an entity that is "on" most of the time;
+  probability);
+- ``shifted_chance`` (#82): the same, if the sessions followed the clock but
+  ignored the entity. Heating schedules, pool filtration, covers and most
+  loads run in the daytime: a signature used in the daytime falls inside
+  any daytime entity more often than its 24-hour share says. Each session
+  is moved to the same clock times on every other compared day; the share
+  of those days on which it would be inside (smoothed: ``(hits + 1) /
+  (days + 2)``) is its probability (``baseline``: their mean), and the tail
+  is a Poisson-binomial one;
 - ``used``: the share of the entity's on periods during which the signature
-  runs at least once (the entity's on-time actually used). It rejects an
-  entity that is often on without the load.
+  runs at least once (the entity's on-time actually used). Information
+  mostly: a load partly explained by a switched load holds only some of its
+  entity's periods.
 
 The on states of containment are the states holding more of the
 signature's on-time than of the entity's time (a lift above 1). A candidate
-is accepted on either test; the edge test wins when both pass.
+is accepted on either test; the edge test wins when both pass. Containment
+cannot tell a load from a coincidence when the entity follows a fixed daily
+schedule (the same periods every day): ``shifted_chance`` stays high. The
+edge test still finds an entity that switches with the load.
 
 Everything here is pure (no I/O, no clock): the caller passes the day
 summaries, the registry ids of the signatures and the entity changes of
@@ -51,6 +67,7 @@ each day (``day_changes``), already read from the recorder.
 from __future__ import annotations
 
 import bisect
+import datetime as dt
 import math
 from collections import Counter
 from collections.abc import Iterable, Mapping
@@ -78,9 +95,11 @@ class CorrelationConfig:
     # follow a short regulation cycle, which containment copes with
     max_attribute_changes_per_day: int = 300
     top: int = 3  # candidates kept per signature
-    # containment (#43): contained >= min_score, at least min_matches sessions
-    # inside, on min_days days, used >= min_used and chance <= max_chance
-    min_used: float = 0.3
+    # containment (#43, #82): contained >= min_score, at least min_matches
+    # sessions inside, on min_days days, lift >= min_lift, used >= min_used,
+    # chance and shifted_chance <= max_chance
+    min_used: float = 0.1
+    min_lift: float = 2.0
     max_chance: float = 1e-4
     session_gap_s: float = 1800.0
 
@@ -306,6 +325,22 @@ def binomial_tail(n: int, k: int, p: float) -> float:
     return min(total, 1.0)
 
 
+def poisson_binomial_tail(probabilities: Iterable[float], k: int) -> float:
+    """P(X >= k) for X the number of successes of independent trials with
+    these probabilities."""
+    if k <= 0:
+        return 1.0
+    dist = [1.0]  # dist[j]: P(j successes so far)
+    for p in probabilities:
+        p = min(max(p, 0.0), 1.0)
+        nxt = [0.0] * (len(dist) + 1)
+        for j, q in enumerate(dist):
+            nxt[j] += q * (1.0 - p)
+            nxt[j + 1] += q * p
+        dist = nxt
+    return min(max(sum(dist[k:]), 0.0), 1.0)
+
+
 def _overlap(
     a0: float, a1: float, segs: list[tuple[float, float, str]], starts: list[float]
 ) -> list[tuple[str, float]]:
@@ -336,39 +371,62 @@ def _on_periods(segs: list[tuple[float, float, str]], on: set[str]) -> list[tupl
     return [(a, b) for a, b in out]
 
 
+def _day_offset(day: str, other: str, day_starts: Mapping[str, float] | None) -> float:
+    """Seconds from the start of ``day`` to the start of ``other``."""
+    if day_starts and day in day_starts and other in day_starts:
+        return float(day_starts[other]) - float(day_starts[day])
+    try:
+        return (dt.date.fromisoformat(other) - dt.date.fromisoformat(day)).days * 86400.0
+    except ValueError:
+        return 0.0
+
+
+def _inside(
+    session: list[tuple[float, float]],
+    segs: list[tuple[float, float, str]],
+    starts: list[float],
+    on: set[str],
+    shift: float = 0.0,
+) -> bool | None:
+    """Whether at least half of a session's on-time (moved by ``shift``)
+    falls in an on state of ``segs``; None when none of it is known."""
+    total = within = 0.0
+    for a0, a1 in session:
+        for state, d in _overlap(a0 + shift, a1 + shift, segs, starts):
+            total += d
+            if state in on:
+                within += d
+    return None if total <= 0 else within >= 0.5 * total
+
+
 def score_containment(
     uses: Mapping[str, list[tuple[float, float]]],
     day_segments: Mapping[str, list[tuple[float, float, str]] | None],
     config: CorrelationConfig,
     full: bool = True,
+    day_starts: Mapping[str, float] | None = None,
 ) -> dict | None:
     """Score how much a signature runs only while one entity is in some
     states (see the module's docstring). ``uses``: the signature's
     activations per day; ``day_segments``: the entity's known periods
-    (``segments``) on every compared day (None or empty: not compared).
-    None when nothing can be compared or no state stands out, and, unless
-    ``full``, when the share contained is below ``config.min_score`` (it
-    cannot be accepted: the rest is not computed)."""
-    per_day = []
+    (``segments``) on every compared day (None or empty: not compared);
+    ``day_starts``: the start of each day (its local midnight), to move a
+    session to the same clock time on another day (without it, whole days
+    of 24 hours). None when nothing can be compared or no state stands out,
+    and, unless ``full``, when the share contained or the lift is below its
+    threshold (it cannot be accepted: the rest is not computed)."""
+    compared: dict[str, tuple[list, list[float]]] = {}
     time_in: dict[str, float] = {}
     use_in: dict[str, float] = {}
     for day, segs in day_segments.items():
         if not segs:
             continue
+        compared[day] = (segs, [x[0] for x in segs])
         for s0, s1, state in segs:
             time_in[state] = time_in.get(state, 0.0) + (s1 - s0)
-        day_uses = uses.get(day) or []
-        if not day_uses:
-            per_day.append((day, segs, []))
-            continue
-        starts = [x[0] for x in segs]
-        overlaps = []
-        for a0, a1 in day_uses:
-            ov = _overlap(a0, a1, segs, starts)
-            for state, d in ov:
+        for a0, a1 in uses.get(day) or []:
+            for state, d in _overlap(a0, a1, segs, compared[day][1]):
                 use_in[state] = use_in.get(state, 0.0) + d
-            overlaps.append((a0, a1, ov))
-        per_day.append((day, segs, overlaps))
     known_time, known_use = sum(time_in.values()), sum(use_in.values())
     if known_time <= 0 or known_use <= 0:
         return None
@@ -378,48 +436,61 @@ def score_containment(
     if not on or time_share >= 1.0:
         return None
     contained = sum(use_in[s] for s in on) / known_use
-    if not full and contained < config.min_score:
+    lift = contained / time_share if time_share > 0 else math.inf
+    if not full and (contained < config.min_score or lift < config.min_lift):
         return None
-    sessions = inside = periods = used = 0
-    days: set[str] = set()
-    for day, segs, overlaps in per_day:
-        # sessions: uses closer than the gap belong together
-        total = within = 0.0
+    # sessions: uses closer than the gap belong together
+    sessions: list[tuple[str, list[tuple[float, float]], bool]] = []
+    periods = used = 0
+    for day, (segs, starts) in compared.items():
+        groups: list[list[tuple[float, float]]] = []
         last_end: float | None = None
-        for a0, a1, ov in overlaps:
-            if last_end is not None and a0 - last_end >= config.session_gap_s and total > 0:
-                sessions += 1
-                if within >= 0.5 * total:
-                    inside += 1
-                    days.add(day)
-                total = within = 0.0
-            for state, d in ov:
-                total += d
-                if state in on:
-                    within += d
+        for a0, a1 in uses.get(day) or []:
+            if last_end is None or a0 - last_end >= config.session_gap_s:
+                groups.append([])
+            groups[-1].append((a0, a1))
             last_end = a1 if last_end is None else max(last_end, a1)
-        if total > 0:
-            sessions += 1
-            if within >= 0.5 * total:
-                inside += 1
-                days.add(day)
+        for group in groups:
+            inside = _inside(group, segs, starts, on)
+            if inside is not None:
+                sessions.append((day, group, inside))
         for p0, p1 in _on_periods(segs, on):
             periods += 1
-            if any(a0 < p1 and a1 > p0 for a0, a1, _ in overlaps):
+            if any(a0 < p1 and a1 > p0 for group in groups for a0, a1 in group):
                 used += 1
     if not sessions:
         return None
+    inside_n = sum(1 for _, _, inside in sessions if inside)
+    days = {day for day, _, inside in sessions if inside}
+    # the same clock times on the other compared days (#82)
+    probabilities = []
+    for day, group, _ in sessions:
+        hits = known = 0
+        for other, (segs, starts) in compared.items():
+            if other == day:
+                continue
+            moved = _inside(group, segs, starts, on, _day_offset(day, other, day_starts))
+            if moved is not None:
+                known += 1
+                hits += moved
+        # smoothed (rule of succession): never inside on the other days is
+        # not impossible, only rare on ``known`` days
+        probabilities.append((hits + 1) / (known + 2))
+    baseline = sum(probabilities) / len(probabilities)
     return {
         "match": "containment",
         "score": round(contained, 3),
         "contained": round(contained, 3),
         "time_share": round(time_share, 3),
+        "lift": round(lift, 2) if math.isfinite(lift) else 999.0,
+        "baseline": round(baseline, 3),
         "used": round(used / periods, 3) if periods else 0.0,
-        "matches": inside,
-        "sessions": sessions,
+        "matches": inside_n,
+        "sessions": len(sessions),
         "days": len(days),
-        "days_compared": len(per_day),
-        "chance": float(f"{binomial_tail(sessions, inside, time_share):.3g}"),
+        "days_compared": len(compared),
+        "chance": float(f"{binomial_tail(len(sessions), inside_n, time_share):.3g}"),
+        "shifted_chance": float(f"{poisson_binomial_tail(probabilities, inside_n):.3g}"),
         "on_states": sorted(on),
         "inverted": sorted(on) == ["off"],
     }
@@ -430,8 +501,10 @@ def accepted_containment(candidate: Mapping, config: CorrelationConfig) -> bool:
         candidate["contained"] >= config.min_score
         and candidate["matches"] >= config.min_matches
         and candidate["days"] >= config.min_days
+        and candidate["lift"] >= config.min_lift
         and candidate["used"] >= config.min_used
         and candidate["chance"] <= config.max_chance
+        and candidate["shifted_chance"] <= config.max_chance
     )
 
 
@@ -454,8 +527,8 @@ def suggest(
 ) -> dict[str, list[dict]]:
     """``{sid: [candidate, ...]}``: for each signature, the entities above
     the thresholds of the edge test (``match: "edge"``) or else of the
-    containment test (``match: "containment"``): the edge matches first,
-    then by score (at most ``config.top``). ``changes``: ``{day: {entity:
+    containment test (``match: "containment"``): the edge matches first, by
+    score, then the containment ones by lift (at most ``config.top``). ``changes``: ``{day: {entity:
     changes or None}}`` (``day_changes``); ``initial``: ``{day: {entity:
     state at the start of the day}}`` (``day_states``; without it, the time
     before an entity's first change of a day is unknown). An entity may be
@@ -472,6 +545,7 @@ def suggest(
             bounds[day] = (float(summary["start"]), float(summary["end"]))
         except (KeyError, TypeError, ValueError):
             continue
+    day_starts = {day: b[0] for day, b in bounds.items()}
     entities = sorted({e for per_day in changes.values() for e in per_day})
     per_entity = {e: {day: (changes.get(day) or {}).get(e) for day in summaries} for e in entities}
     seg_cache: dict[str, dict[str, list | None]] = {}
@@ -494,14 +568,16 @@ def suggest(
             if cand is not None and accepted(cand, config):
                 found.append({"entity_id": entity, "match": "edge", **cand})
                 continue
-            cont = score_containment(uses.get(sid) or {}, segs_of(entity), config, full=False)
+            cont = score_containment(uses.get(sid) or {}, segs_of(entity), config, False, day_starts)
             if cont is not None and accepted_containment(cont, config):
                 found.append({"entity_id": entity, **cont})
+        # edge matches by score; containment ones by lift (#82): the entity
+        # whose on states are the most specific to the load comes first
         found.sort(
             key=lambda c: (
                 c["match"] != "edge",
-                -c["score"],
-                -c.get("explained", c.get("used", 0.0)),
+                -c["score"] if c["match"] == "edge" else -c["lift"],
+                -c.get("explained", c["score"]),
                 -c["matches"],
                 c["entity_id"],
             )
