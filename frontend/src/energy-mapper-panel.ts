@@ -31,6 +31,21 @@ import {
 } from "./appliances.ts";
 import { energyState, pickList, preselected, type TrackingListing } from "./takeover.ts";
 import { sensorChoices, teachingLines, teachState, type TeachingListing } from "./teaching.ts";
+import {
+  canStart,
+  deviceChoices,
+  entitiesOf,
+  flatPowerSensors,
+  formFor,
+  formNotes,
+  stateOptions,
+  teachMessage,
+  toggleState,
+  withState,
+  type ConnectedEntity,
+  type ConnectedForm,
+  type ConnectedListing,
+} from "./connected.ts";
 import { selfTestHint, selfTestRows, showSelfTest, type SelfTestListing } from "./selftest.ts";
 import "./chart.ts";
 import "./live-view.ts";
@@ -232,6 +247,8 @@ export class EnergyMapperPanel extends LitElement {
     _takeover: { state: true },
     _teaching: { state: true },
     _teach: { state: true },
+    _connected: { state: true },
+    _connectedForm: { state: true },
     _selfTest: { state: true },
     _liveUp: { state: true },
   };
@@ -301,6 +318,10 @@ export class EnergyMapperPanel extends LitElement {
   declare _teaching: TeachingListing | null;
   /** the nightly self-test (#15; null: not available) */
   declare _selfTest: SelfTestListing | null;
+  /** the devices that can teach from their state (#79; read when the form opens) */
+  declare _connected: ConnectedListing | null;
+  /** the form "Learn from a connected appliance" (#79): on a card (key) or a new appliance (key null) */
+  declare _connectedForm: ConnectedForm | null;
   /** the live view streams (#17): the pulsing dot of its tab */
   declare _liveUp: boolean;
   /** the confirmation open on an appliance card: start learning (with the
@@ -362,6 +383,8 @@ export class EnergyMapperPanel extends LitElement {
     this._takeover = null;
     this._teaching = null;
     this._teach = null;
+    this._connected = null;
+    this._connectedForm = null;
     this._selfTest = null;
     this._liveUp = false;
     if (new URLSearchParams(location.search).has("review")) this.writeTab(this._tab);
@@ -543,6 +566,40 @@ export class EnergyMapperPanel extends LitElement {
     } catch {
       this._teaching = null;
     }
+  }
+
+  /** Open the form "Learn from a connected appliance" (#79) on an appliance
+   * card (``key``) or for a new appliance (``key`` null), filled with the
+   * entities the integration proposes for the best device. */
+  private async openConnected(key: string | null): Promise<void> {
+    this._teach = null;
+    this._connectedForm = { ...formFor(undefined, key), busy: true };
+    try {
+      this._connected = await this.ws<ConnectedListing>({ type: "energy_mapper/connected_devices" });
+    } catch (err) {
+      this._connected = null;
+      if (this._connectedForm) this._connectedForm = { ...formFor(undefined, key), error: this.errorText(err) };
+      return;
+    }
+    const first = deviceChoices(this._connected, key)[0];
+    const name = key === null ? "" : (this._appliances?.appliances.find((a) => a.key === key)?.name ?? "");
+    this._connectedForm = formFor(first, key, key === null ? "" : name);
+  }
+
+  /** Start learning from the connected appliance of the open form. */
+  private async applyConnected(): Promise<void> {
+    const form = this._connectedForm;
+    if (!form || !canStart(form)) return;
+    this._connectedForm = { ...form, busy: true, error: null };
+    try {
+      await this.ws(teachMessage(form));
+      const name = form.key === null ? form.name.trim() : (this._appliances?.appliances.find((a) => a.key === form.key)?.name ?? "");
+      this._notice = this.t("connected_started", { name, state: this.sensorName(form.entity) });
+      this._connectedForm = null;
+    } catch (err) {
+      if (this._connectedForm) this._connectedForm = { ...this._connectedForm, busy: false, error: this.errorText(err) };
+    }
+    await Promise.all([this.loadAppliances(), this.loadTeaching()]);
   }
 
   /** The nightly self-test (#15, every user; integration 0.9.0+, else
@@ -1179,6 +1236,13 @@ export class EnergyMapperPanel extends LitElement {
       </div>
       ${cards.length ? html`<div class="card-hint">${t("appliances_hint")}</div>` : nothing}
       ${missing ? html`<div class="card-hint">${t("appliances_stats_missing")}</div>` : nothing}
+      ${this.isAdmin && this._teaching?.supported
+        ? this._connectedForm?.key === null
+          ? html`<div class="connected-new">${this.renderConnectedForm(t)}</div>`
+          : html`<div class="connected-action">
+              ${this.textButton(t("connected_action"), () => void this.openConnected(null), false, "plain", t("connected_action_hint"))}
+            </div>`
+        : nothing}
       ${cards.length
         ? html`<ul class="appliance-grid">
             ${cards.map((c) => this.renderApplianceCard(c, model, period, t, info))}
@@ -1331,18 +1395,26 @@ export class EnergyMapperPanel extends LitElement {
   private teachAction(c: ApplianceCard): TemplateResult | typeof nothing {
     const appliances = this._appliances?.appliances ?? [];
     const state = teachState(this._teaching, appliances.find((a) => a.key === c.key));
-    if (state.kind !== "idle" || this._teach?.key === c.key) return nothing;
+    if (state.kind !== "idle" || this._teach?.key === c.key || this._connectedForm?.key === c.key) return nothing;
     const t = this.t;
-    return this.textButton(
+    // an appliance tracked by an operation state (a sensor) can learn from it (#79)
+    const stateSource = appliances
+      .find((a) => a.key === c.key)
+      ?.sources.some((s) => s.type === "switched_load" && s.entity_id?.startsWith("sensor."));
+    return html`${stateSource
+      ? this.textButton(t("connected_action_card"), () => void this.openConnected(c.key), false, "plain", t("connected_action_hint"))
+      : nothing}
+    ${this.textButton(
       t("teach_action"),
       () => {
-        const first = sensorChoices(this.hass?.states, appliances, c.key)[0];
+        const first = sensorChoices(this.hass?.states, appliances, c.key, this.flatSensors)[0];
+        this._connectedForm = null;
         this._teach = { key: c.key, mode: "start", entity: first?.suggested ? first.id : "", busy: false, error: null };
       },
       false,
       "plain",
       t("teach_action_hint"),
-    );
+    )}`;
   }
 
   /** Learning from a measured device (#14): the status while a sensor
@@ -1355,9 +1427,12 @@ export class EnergyMapperPanel extends LitElement {
     if (state.kind === "none" || (state.kind === "idle" && !this.isAdmin)) return nothing;
     const form = this._teach?.key === c.key ? this._teach : null;
     const cancel = () => (this._teach = null);
+    if (state.kind === "idle" && this._connectedForm?.key === c.key) {
+      return html`<div class="appliance-takeover appliance-teach">${this.renderConnectedForm(t)}</div>`;
+    }
     if (state.kind === "idle") {
       if (!form) return nothing; // the action is next to Settings
-      const choices = sensorChoices(this.hass?.states, appliances, c.key);
+      const choices = sensorChoices(this.hass?.states, appliances, c.key, this.flatSensors);
       const selectId = `teach-${c.key}`;
       const picked = choices.find((x) => x.id === form.entity);
       return html`<div class="appliance-takeover appliance-teach">
@@ -1377,8 +1452,12 @@ export class EnergyMapperPanel extends LitElement {
                   <option value="" ?selected=${!form.entity}></option>
                   ${choices.map(
                     (x) =>
-                      html`<option value=${x.id} ?selected=${x.id === form.entity}>
-                        ${x.suggested ? t("teach_suggestion", { name: x.name }) : x.name}
+                      html`<option value=${x.id} ?selected=${x.id === form.entity} ?disabled=${x.flat}>
+                        ${x.flat
+                          ? t("teach_flat", { name: x.name })
+                          : x.suggested
+                            ? t("teach_suggestion", { name: x.name })
+                            : x.name}
                       </option>`,
                   )}
                 </select>
@@ -1398,13 +1477,18 @@ export class EnergyMapperPanel extends LitElement {
       ? t("teach_since", { day: formatDay(dayOf(state.teacher.since * 1000, info.time_zone), info, "brief") })
       : "";
     const nameOf = (key: string) => appliances.find((a) => a.key === key)?.name ?? key;
-    const lines = teachingLines(state, t, info, nameOf);
+    const lines = teachingLines(state, t, info, nameOf, (e) => this.sensorName(e));
+    const connected = state.teacher.mode === "state";
     const open = (mode: "finish" | "stop") => (this._teach = { key: c.key, mode, entity: "", busy: false, error: null });
     let confirm: TemplateResult | typeof nothing = nothing;
     if (form && form.mode !== "start") {
       const finish = form.mode === "finish";
       confirm = html`<div class="takeover-confirm" role="group" aria-label=${finish ? t("teach_finish") : t("teach_stop")}>
-        <p>${finish ? t("teach_finish_confirm", { name: c.name, sensor }) : t("teach_stop_confirm", { sensor })}</p>
+        <p>
+          ${finish
+            ? t(connected ? "teach_finish_confirm_state" : "teach_finish_confirm", { name: c.name, sensor })
+            : t(connected ? "teach_stop_confirm_state" : "teach_stop_confirm", { sensor })}
+        </p>
         ${form.error ? html`<p class="takeover-error" role="alert">${form.error}</p>` : nothing}
         <div class="takeover-buttons">
           ${this.textButton(t("takeover_cancel"), cancel, form.busy)}
@@ -1424,6 +1508,138 @@ export class EnergyMapperPanel extends LitElement {
           </div>`
         : nothing}
       ${confirm}
+    </div>`;
+  }
+
+  /** The power sensors the shown day's analysis found flat (#79). */
+  private get flatSensors(): Set<string> {
+    return flatPowerSensors(this._report?.findings);
+  }
+
+  /** The form "Learn from a connected appliance" (#79): the device, then its
+   * operation state and running states, phase state, energy counter and
+   * programme as proposed, what the recorder does not keep, and the
+   * confirmation. Nothing changes before *Start learning*. */
+  private renderConnectedForm(t: Translate): TemplateResult {
+    const form = this._connectedForm!;
+    const listing = this._connected;
+    const devices = deviceChoices(listing, form.key);
+    const device = devices.find((d) => d.device_id === form.device);
+    const set = (patch: Partial<ConnectedForm>) => {
+      if (this._connectedForm) this._connectedForm = { ...this._connectedForm, ...patch, error: null };
+    };
+    const id = `connected-${form.key ?? "new"}`;
+    const select = (
+      label: string,
+      value: string,
+      items: ConnectedEntity[],
+      onChange: (v: string) => void,
+      optional: boolean,
+      suffix: string,
+    ) =>
+      html`<label class="field" for="${id}-${suffix}">
+        <span>${label}</span>
+        <select
+          id="${id}-${suffix}"
+          class="text-input"
+          .value=${value}
+          ?disabled=${form.busy}
+          @change=${(ev: Event) => onChange((ev.target as HTMLSelectElement).value)}
+        >
+          ${optional ? html`<option value="" ?selected=${!value}>${t("connected_none")}</option>` : nothing}
+          ${items.map((e) => html`<option value=${e.entity_id} ?selected=${e.entity_id === value}>${e.name}</option>`)}
+        </select>
+      </label>`;
+    const cancel = () => (this._connectedForm = null);
+    let body: TemplateResult;
+    if (form.busy && !listing) {
+      body = html`<p>${t("loading")}</p>`;
+    } else if (listing && !listing.supported) {
+      body = html`<p>${t("connected_not_supported")}</p>`;
+    } else if (!devices.length) {
+      body = html`<p>${listing ? t("connected_no_device") : ""}</p>`;
+    } else {
+      const states = entitiesOf(device, "state");
+      const options = stateOptions(device, form.entity);
+      const notes = formNotes(form, device, this.flatSensors, t);
+      body = html`<label class="field" for="${id}-device">
+          <span>${t("connected_device")}</span>
+          <select
+            id="${id}-device"
+            class="text-input"
+            .value=${form.device}
+            ?disabled=${form.busy}
+            @change=${(ev: Event) => {
+              const d = devices.find((x) => x.device_id === (ev.target as HTMLSelectElement).value);
+              const keep = form.key === null ? "" : form.name;
+              this._connectedForm = formFor(d, form.key, keep);
+            }}
+          >
+            ${devices.map((d) => html`<option value=${d.device_id} ?selected=${d.device_id === form.device}>${d.name}</option>`)}
+          </select>
+        </label>
+        ${form.key === null
+          ? html`<label class="field" for="${id}-name">
+              <span>${t("connected_name")}</span>
+              <input
+                id="${id}-name"
+                class="text-input"
+                .value=${form.name}
+                maxlength="100"
+                ?disabled=${form.busy}
+                @input=${(ev: Event) => set({ name: (ev.target as HTMLInputElement).value })}
+              />
+            </label>`
+          : nothing}
+        ${select(t("connected_state"), form.entity, states, (v) => (this._connectedForm = withState(form, device, v)), false, "state")}
+        ${options.length
+          ? html`<fieldset class="connected-states" ?disabled=${form.busy}>
+              <legend>${t("connected_on_states")}</legend>
+              ${options.map(
+                (o) => html`<label class="check">
+                  <input
+                    type="checkbox"
+                    .checked=${form.on_states.includes(o)}
+                    @change=${() => (this._connectedForm = toggleState(form, o))}
+                  />
+                  <span>${o}</span>
+                </label>`,
+              )}
+            </fieldset>`
+          : nothing}
+        ${select(t("connected_phase"), form.phase, states.filter((e) => e.entity_id !== form.entity), (v) => set({ phase: v }), true, "phase")}
+        ${select(t("connected_energy_entity"), form.energy, entitiesOf(device, "energy"), (v) => set({ energy: v }), true, "energy")}
+        ${select(
+          t("connected_program"),
+          form.program,
+          entitiesOf(device, "program", "state").filter((e) => e.entity_id !== form.entity && e.entity_id !== form.phase),
+          (v) => set({ program: v }),
+          true,
+          "program",
+        )}
+        ${form.key === null
+          ? html`<label class="check">
+              <input type="checkbox" .checked=${form.track} ?disabled=${form.busy} @change=${() => set({ track: !form.track })} />
+              <span>${t("connected_track")}</span>
+            </label>`
+          : nothing}
+        ${notes.map((n) => html`<p class="card-hint">${n}</p>`)}
+        <p>
+          ${canStart({ ...form, busy: false })
+            ? t("connected_confirm", {
+                name: form.key === null ? form.name.trim() : (this._appliances?.appliances.find((a) => a.key === form.key)?.name ?? ""),
+                state: this.sensorName(form.entity),
+              })
+            : t("connected_pick")}
+        </p>`;
+    }
+    return html`<div class="takeover-confirm connected-form" role="group" aria-label=${t("connected_title")}>
+      ${body}
+      ${form.error ? html`<p class="takeover-error" role="alert">${form.error}</p>` : nothing}
+      <div class="takeover-buttons">
+        ${this.textButton(t("takeover_cancel"), cancel, form.busy && Boolean(listing))}
+        ${this.textButton(t("teach_start"), () => void this.applyConnected(), !canStart(form) || !listing?.supported, "accent")}
+      </div>
     </div>`;
   }
 

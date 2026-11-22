@@ -7,12 +7,19 @@
 import type { ApplianceInfo } from "./appliances.ts";
 import { formatNumber, formatPercent, type LocaleInfo } from "./format.ts";
 import type { Translate } from "./i18n.ts";
+import { connectedLines, type ConnectedLearned } from "./connected.ts";
 import { phasesSummary, provisionalName, roundedPower, type PhaseInfo } from "./names.ts";
 
 export interface TeacherInfo {
   entity_id: string;
   /** unix time the learning started */
   since?: number | null;
+  /** "state": a connected appliance's operation state (#79); else a power sensor */
+  mode?: "power" | "state";
+  on_states?: string[];
+  phase_entity?: string | null;
+  energy_entity?: string | null;
+  program_entity?: string | null;
 }
 
 export interface TeachingEvaluation {
@@ -37,6 +44,9 @@ export interface TeachingLearned {
   recognisable: boolean;
 }
 
+/** What a connected appliance's learning adds (#79). */
+export type TeachingLearnedFull = TeachingLearned & ConnectedLearned;
+
 /** The learning status of one appliance (energy_mapper/teaching). */
 export interface TeachingStatus {
   key: string;
@@ -45,7 +55,12 @@ export interface TeachingStatus {
   days: number;
   uses: number;
   energy_kwh: number;
-  learned: TeachingLearned | null;
+  learned: TeachingLearnedFull | null;
+  /** "state": learning from a connected appliance (#79) */
+  mode?: "power" | "state";
+  program_entity?: string | null;
+  /** false: its programme state is not recorded (null: no programme, or not known yet) */
+  program_recorded?: boolean | null;
   signature: { id: string; in_registry: boolean; linked: boolean } | null;
   conflict: { id: string; appliance: string } | null;
   evaluation: TeachingEvaluation | null;
@@ -88,27 +103,35 @@ const POWER_UNITS = new Set(["W", "kW"]);
 
 /** The power sensors that may teach an appliance: not a source or the
  * teacher of another appliance; its own sensors (sub-meter sources) first,
- * marked as suggested, then the others by name. */
+ * marked as suggested, then the others by name. A sensor the last analysis
+ * found flat (#79, stuck while its device counts energy) is marked and
+ * last: it cannot teach. */
 export function sensorChoices(
   states: States,
   appliances: ApplianceInfo[],
   key: string,
-): { id: string; name: string; suggested: boolean }[] {
+  flat: Set<string> = new Set(),
+): { id: string; name: string; suggested: boolean; flat: boolean }[] {
   const taken = new Set<string>();
   const own = new Set<string>();
   for (const a of appliances) {
     const ids = [...a.sources.map((s) => s.entity_id), a.teacher?.entity_id].filter((x): x is string => Boolean(x));
     for (const id of ids) (a.key === key ? own : taken).add(id);
   }
-  const out: { id: string; name: string; suggested: boolean }[] = [];
+  const out: { id: string; name: string; suggested: boolean; flat: boolean }[] = [];
   for (const [id, st] of Object.entries(states ?? {})) {
     if (!id.startsWith("sensor.") || taken.has(id)) continue;
     const attrs = st.attributes ?? {};
     if (attrs.device_class !== "power" && !POWER_UNITS.has(String(attrs.unit_of_measurement ?? ""))) continue;
-    out.push({ id, name: String(attrs.friendly_name ?? id), suggested: own.has(id) });
+    const isFlat = flat.has(id);
+    out.push({ id, name: String(attrs.friendly_name ?? id), suggested: own.has(id) && !isFlat, flat: isFlat });
   }
   return out.sort(
-    (a, b) => Number(b.suggested) - Number(a.suggested) || a.name.localeCompare(b.name) || a.id.localeCompare(b.id),
+    (a, b) =>
+      Number(a.flat) - Number(b.flat) ||
+      Number(b.suggested) - Number(a.suggested) ||
+      a.name.localeCompare(b.name) ||
+      a.id.localeCompare(b.id),
   );
 }
 
@@ -127,6 +150,7 @@ export function teachingLines(
   t: Translate,
   info: LocaleInfo,
   applianceName: (key: string) => string,
+  programName?: (entityId: string) => string,
 ): string[] {
   const st = state.status;
   if (!st || !st.days) return [t("teach_waiting")];
@@ -140,6 +164,8 @@ export function teachingLines(
   } else if (state.blocker === "conflict" && st.conflict) {
     lines.push(t("teach_conflict", { name: applianceName(st.conflict.appliance) }));
   }
+  // a connected appliance (#79): its energy, phases and programmes
+  lines.push(...connectedLines(st.learned, st.program_recorded, programName?.(st.program_entity ?? "") ?? null, t, info));
   const ev = st.evaluation;
   if (st.learned && state.blocker !== "too_small" && ev && ev.uses) {
     lines.push(

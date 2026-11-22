@@ -10,6 +10,15 @@ Used by the add-on to learn an appliance from a temporary plug (#14); the
 nightly self-test (#15) reuses :func:`runs_of`, :func:`detections` and
 :func:`evaluate` the same way (hide a measured device, find it again).
 
+A **connected appliance** without a useful power sensor (#79) is a ground
+truth too: its operation state (``run`` / ``stop``) bounds each run exactly,
+and the house curve measures it (:func:`state_runs`: what the residual load
+draws above its baseline around the run, tolerant to a gradual start). An
+optional phase state names the phases with their power, an optional
+programme state tells which programme ran, and an optional energy counter,
+often coarse (0.1 kWh, updated every 15 minutes), checks and scales the
+measured energy over all the runs (:func:`learn`).
+
 1. **Runs** (:func:`runs_of`): the sensor's readings are piecewise constant
    (Home Assistant records a state when it changes; a state holds until the
    next one, ``unavailable`` / ``unknown`` mean no data). The device runs
@@ -44,6 +53,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from . import cycles as mp
+from .known import UNAVAILABLE, RunMeasureConfig, measure_run
 from .signatures import duration_band
 
 STEADY, CYCLING, MULTIPHASE = "steady", "cycling", "multiphase"
@@ -61,6 +71,12 @@ class GroundTruthConfig:
     cycling_max_duty: float = 0.85
     min_overlap: float = 0.5  # of the shorter of a detection and a run
     cycles: mp.CycleConfig = field(default_factory=mp.CycleConfig)
+    # connected appliances (#79): the baseline around a run
+    runs: RunMeasureConfig = field(default_factory=RunMeasureConfig)
+    counter_lag_s: float = 1200.0  # a coarse counter reports the end of a run this late
+    # the counter scales the measured energy from this total over the runs
+    # (a 0.1 kWh resolution is then within 10 %)
+    min_counter_kwh: float = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +96,13 @@ class Run:
     period_s: float | None = None  # cycling: median period
     duty: float | None = None  # share of the run at the high level
     phases: list[mp.Phase] = field(default_factory=list)  # multiphase only
+    # connected appliance (#79): measured from the curve over its state's run
+    source: str | None = None  # "state", or None for a power sensor
+    baseline_w: float | None = None
+    program: str | None = None  # the programme state during the run
+    counter_kwh: float | None = None  # the energy counter's delta over the run
+    # the phase state's phases: [{state, offset_s, duration_s, power_w}]
+    named_phases: list[dict] = field(default_factory=list)
 
     @property
     def duration_s(self) -> float:
@@ -100,6 +123,15 @@ class Run:
             out["period_s"] = None if self.period_s is None else round(self.period_s)
         if self.phases:
             out["phases"] = [p.to_dict() for p in self.phases]
+        if self.source:
+            out["source"] = self.source
+            out["baseline_w"] = None if self.baseline_w is None else round(self.baseline_w)
+            if self.program is not None:
+                out["program"] = self.program
+            if self.counter_kwh is not None:
+                out["counter_kwh"] = round(self.counter_kwh, 3)
+            if self.named_phases:
+                out["named_phases"] = [dict(p) for p in self.named_phases]
         return out
 
     @classmethod
@@ -115,6 +147,11 @@ class Run:
             period_s=_num(d.get("period_s")),
             duty=_num(d.get("duty")),
             phases=[mp.Phase.from_dict(p) for p in d.get("phases") or []],
+            source=d.get("source"),
+            baseline_w=_num(d.get("baseline_w")),
+            program=None if d.get("program") is None else str(d["program"]),
+            counter_kwh=_num(d.get("counter_kwh")),
+            named_phases=[dict(p) for p in d.get("named_phases") or [] if isinstance(p, Mapping)],
         )
 
 
@@ -250,6 +287,133 @@ def runs_of(
 
 
 # ---------------------------------------------------------------------------
+# runs of a connected appliance (#79)
+# ---------------------------------------------------------------------------
+StateSegment = tuple[float, float, str]  # [t0, t1) in one state
+
+
+def state_segments(
+    states: Sequence[tuple[float, str | None]], start: float, end: float
+) -> list[StateSegment]:
+    """The known states clipped to ``[start, end)``: each state holds until
+    the next one; ``unavailable`` / ``unknown`` are no data."""
+    out: list[StateSegment] = []
+    pts = sorted(states, key=lambda p: p[0])
+    for i, (t, v) in enumerate(pts):
+        t1 = pts[i + 1][0] if i + 1 < len(pts) else end
+        a, b = max(t, start), min(t1, end)
+        if v is None or str(v) in UNAVAILABLE or b <= a:
+            continue
+        out.append((a, b, str(v)))
+    return out
+
+
+def _value_at(points: Sequence[tuple[float, float]], ts: float) -> float | None:
+    """The last reading at or before ``ts``."""
+    best = None
+    for t, v in points:
+        if t > ts:
+            break
+        best = v
+    return best
+
+
+def counter_delta(points: Sequence[tuple[float, float]], a: float, b: float) -> float | None:
+    """What a cumulative counter (sorted ``(t, kWh)``) counted between ``a``
+    and ``b``; None without a reading before ``a`` or after a reset."""
+    v0, v1 = _value_at(points, a), _value_at(points, b)
+    if v0 is None or v1 is None or v1 < v0:
+        return None
+    return v1 - v0
+
+
+def _named_phases(segs: Sequence[Segment], phases: Sequence[StateSegment], a: float, b: float) -> list[dict]:
+    """The phase state's phases within the run, with their mean power."""
+    out: list[dict] = []
+    for x, y, state in phases:
+        x, y = max(x, a), min(y, b)
+        if y <= x:
+            continue
+        if out and out[-1]["state"] == state and abs(out[-1]["_end"] - x) < 1e-6:
+            out[-1]["_end"] = y
+        else:
+            out.append({"state": state, "_start": x, "_end": y})
+    for p in out:
+        x, y = p.pop("_start"), p.pop("_end")
+        energy = sum(w * max(0.0, min(t1, y) - max(t0, x)) for t0, t1, w in segs)
+        p.update(offset_s=round(x - a), duration_s=round(y - x), power_w=round(energy / (y - x)))
+    return out
+
+
+def _program(programs: Sequence[StateSegment], a: float, b: float) -> str | None:
+    """The programme state holding most of the run."""
+    held: dict[str, float] = {}
+    for x, y, state in programs:
+        o = min(y, b) - max(x, a)
+        if o > 0:
+            held[state] = held.get(state, 0.0) + o
+    return max(held, key=lambda k: (held[k], k)) if held else None
+
+
+def state_runs(
+    states: Sequence[tuple[float, str | None]],
+    on_states: Sequence[str],
+    curve: Sequence[tuple[float, float]],
+    start: float,
+    end: float,
+    config: GroundTruthConfig | None = None,
+    phases: Sequence[tuple[float, str | None]] | None = None,
+    programs: Sequence[tuple[float, str | None]] | None = None,
+    counter: Sequence[tuple[float, float]] | None = None,
+) -> tuple[list[Run], list[tuple[float, float]]]:
+    """The runs of a connected appliance within ``[start, end)`` and the
+    periods its operation state reported.
+
+    A run is a period in one of ``on_states`` (pauses in another state
+    shorter than ``max_gap_s`` stay inside it), of at least ``min_run_s``.
+    Its power is what the residual load (``curve``: sorted ``(t, W)``, the
+    other known loads taken out) draws above its baseline around the run
+    (:func:`.known.measure_run`): no step is needed, a gradual start or
+    phases of very different powers are measured as they are. Its kind and
+    phases are those of a measured run (:func:`_classify`); ``phases`` (the
+    phase state) names its phases with their power, ``programs`` (the
+    programme state) gives its programme, ``counter`` (sorted ``(t, kWh)``
+    of a cumulative energy counter) its counted energy, read
+    ``counter_lag_s`` after its end (a coarse counter reports late)."""
+    cfg = config or GroundTruthConfig()
+    on = set(on_states)
+    segs = state_segments(states, start, end)
+    spans: list[list[float]] = []
+    for a, b, v in segs:
+        if v not in on:
+            continue
+        if spans and a - spans[-1][1] < cfg.max_gap_s:
+            spans[-1][1] = b
+        else:
+            spans.append([a, b])
+    spans = [s for s in spans if s[1] - s[0] >= cfg.min_run_s]
+    curve = sorted(curve)
+    times = [t for t, _ in curve]
+    phase_segs = state_segments(phases, start, end) if phases else []
+    program_segs = state_segments(programs, start, end) if programs else []
+    counter = sorted(counter) if counter else []
+    runs = []
+    for i, (a, b) in enumerate(spans):
+        base, excess = measure_run(curve, a, b, cfg.runs, times)
+        run = _classify(excess, a, b, cfg)
+        run.source = "state"
+        run.baseline_w = base
+        run.program = _program(program_segs, a, b)
+        if phase_segs:
+            run.named_phases = _named_phases(excess, phase_segs, a, b)
+        if counter:
+            limit = spans[i + 1][0] if i + 1 < len(spans) else end
+            run.counter_kwh = counter_delta(counter, a, min(b + cfg.counter_lag_s, max(limit, b)))
+        runs.append(run)
+    return runs, covered(segs)
+
+
+# ---------------------------------------------------------------------------
 # learned signature
 # ---------------------------------------------------------------------------
 @dataclass
@@ -271,9 +435,32 @@ class Learned:
     # the engine can see it: a step of at least the step threshold, or a
     # multi-phase cycle with heating
     recognisable: bool = True
+    # connected appliance (#79)
+    source: str | None = None  # "state": learned from an operation state
+    measured_kwh: float | None = None  # median energy of one use from the curve
+    counter_ratio: float | None = None  # counted / measured energy over the runs
+    counter_kwh: float | None = None  # what the counter counted over those runs
+    # the phase state: [{state, power_w, duration_s, uses}], in cycle order
+    named_phases: list[dict] = field(default_factory=list)
+    program: str | None = None  # the programme it was learned from
+    # every programme seen: [{program, uses, kind, power_w, duration_s,
+    # energy_kwh, phases?}], most used first
+    programs: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
+        extra: dict = {}
+        if self.source:
+            extra = {
+                "source": self.source,
+                "measured_kwh": None if self.measured_kwh is None else round(self.measured_kwh, 3),
+                "counter_ratio": None if self.counter_ratio is None else round(self.counter_ratio, 3),
+                "counter_kwh": None if self.counter_kwh is None else round(self.counter_kwh, 3),
+                "named_phases": [dict(p) for p in self.named_phases],
+                "program": self.program,
+                "programs": [dict(p) for p in self.programs],
+            }
         return {
+            **extra,
             "kind": self.kind,
             "band": self.band,
             "power_w": round(self.power_w),
@@ -302,12 +489,17 @@ def learn(
     counts = {k: sum(1 for r in runs if r.kind == k) for k in _KIND_ORDER}
     kind = max(_KIND_ORDER, key=lambda k: (counts[k], -_KIND_ORDER.index(k)))
     mine = [r for r in runs if r.kind == kind]
+    programs = _programs(runs, cfg)
+    program = None
+    if kind == MULTIPHASE and programs:
+        # one template per programme: the most used programme of this kind
+        # is the signature, the others are listed (``programs``)
+        program = next((p["program"] for p in programs if p["kind"] == MULTIPHASE), None)
+        if program is not None:
+            mine = [r for r in mine if r.program == program]
     if kind == MULTIPHASE:
-        samples = [mp.Sample("", r.start, r.end, r.energy_kwh, r.phases, 1.0) for r in mine]
-        clusters = mp.cluster(samples, cfg.cycles.match_distance)
-        best = max(clusters, key=lambda m: (len(m), -m[0].start))
-        template = mp.template_of(best)
-        return Learned(
+        best, template = _template(mine, cfg)
+        out = Learned(
             kind=MULTIPHASE,
             band="cycle",
             power_w=max((p.power_w for p in template), default=0.0),
@@ -318,6 +510,10 @@ def learn(
             cycle_kwh=statistics.median(s.energy_kwh for s in best),
             energy_kwh=statistics.median(s.energy_kwh for s in best),
             recognisable=any(p.kind == mp.HEAT for p in template),
+        )
+        best_runs = {(s.start, s.end) for s in best}
+        return _connected(
+            out, runs, [r for r in mine if (r.start, r.end) in best_runs], programs, program, cfg
         )
     if kind == CYCLING:
         band = "session"
@@ -334,7 +530,7 @@ def learn(
         values = [v for v in values if v is not None]
         return statistics.median(values) if values else None
 
-    return Learned(
+    out = Learned(
         kind=kind,
         band=band,
         power_w=power,
@@ -347,6 +543,109 @@ def learn(
         energy_kwh=statistics.median(r.energy_kwh for r in mine),
         recognisable=power >= step_threshold_w,
     )
+    return _connected(out, runs, mine, programs, None, cfg)
+
+
+def _template(runs: Sequence[Run], cfg: GroundTruthConfig) -> tuple[list[mp.Sample], list[mp.Phase]]:
+    """The largest cluster of multi-phase runs and its template."""
+    samples = [mp.Sample("", r.start, r.end, r.energy_kwh, r.phases, 1.0) for r in runs]
+    clusters = mp.cluster(samples, cfg.cycles.match_distance)
+    best = max(clusters, key=lambda m: (len(m), -m[0].start))
+    return best, mp.template_of(best)
+
+
+def _programs(runs: Sequence[Run], cfg: GroundTruthConfig) -> list[dict]:
+    """Per programme of a connected appliance's runs (#79): its uses, its
+    most frequent kind, power, duration and energy, and the template of a
+    multi-phase one. Most used first; empty without a programme state."""
+    groups: dict[str, list[Run]] = {}
+    for r in runs:
+        if r.program is not None:
+            groups.setdefault(r.program, []).append(r)
+    out = []
+    for program, items in groups.items():
+        counts = {k: sum(1 for r in items if r.kind == k) for k in _KIND_ORDER}
+        kind = max(_KIND_ORDER, key=lambda k: (counts[k], -_KIND_ORDER.index(k)))
+        mine = [r for r in items if r.kind == kind]
+        item = {
+            "program": program,
+            "uses": len(items),
+            "kind": kind,
+            "power_w": round(statistics.median(r.power_w for r in mine)),
+            "duration_s": round(statistics.median(r.duration_s for r in mine)),
+            "energy_kwh": round(statistics.median(r.energy_kwh for r in mine), 3),
+        }
+        if kind == MULTIPHASE:
+            _, template = _template(mine, cfg)
+            item["power_w"] = round(max((p.power_w for p in template), default=0.0))
+            item["phases"] = [p.to_dict() for p in template]
+        out.append(item)
+    out.sort(key=lambda p: (-p["uses"], p["program"]))
+    return out
+
+
+def _phase_summary(runs: Sequence[Run]) -> list[dict]:
+    """The phase state's phases over the runs: per state, the median power
+    and duration, in the order they usually come."""
+    per: dict[str, dict] = {}
+    for r in runs:
+        for p in r.named_phases:
+            try:
+                state = str(p["state"])
+                item = per.setdefault(state, {"power": [], "duration": [], "offset": []})
+                item["power"].append(float(p["power_w"]))
+                item["duration"].append(float(p["duration_s"]))
+                item["offset"].append(float(p["offset_s"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+    out = [
+        {
+            "state": state,
+            "power_w": round(statistics.median(v["power"])),
+            "duration_s": round(statistics.median(v["duration"])),
+            "uses": len(v["power"]),
+            "_at": statistics.median(v["offset"]),
+        }
+        for state, v in per.items()
+    ]
+    out.sort(key=lambda p: (p["_at"], p["state"]))
+    for p in out:
+        p.pop("_at")
+    return out
+
+
+def _connected(
+    out: Learned,
+    runs: Sequence[Run],
+    mine: Sequence[Run],
+    programs: list[dict],
+    program: str | None,
+    cfg: GroundTruthConfig,
+) -> Learned:
+    """A signature learned from a connected appliance's runs (#79): its
+    phases by the phase state, its programmes, and its energy checked
+    against the energy counter: once the runs with a counted energy reach
+    ``min_counter_kwh`` counted, the energy of one use is the measured one
+    scaled by counted / measured over those runs (a coarse counter is only
+    right over many runs; the curve has the appliance's neighbours in it)."""
+    if not any(r.source == "state" for r in runs):
+        return out
+    out.source = "state"
+    out.measured_kwh = out.energy_kwh
+    out.named_phases = _phase_summary(mine)
+    out.programs = programs
+    out.program = program
+    counted = [r for r in runs if r.counter_kwh is not None]
+    total = sum(r.counter_kwh or 0.0 for r in counted)
+    measured = sum(r.energy_kwh for r in counted)
+    if counted:
+        out.counter_kwh = total
+    if counted and total >= cfg.min_counter_kwh and measured > 0:
+        out.counter_ratio = total / measured
+        out.energy_kwh = out.energy_kwh * out.counter_ratio
+        if out.cycle_kwh is not None:
+            out.cycle_kwh = out.cycle_kwh * out.counter_ratio
+    return out
 
 
 # ---------------------------------------------------------------------------

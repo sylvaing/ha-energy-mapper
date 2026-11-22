@@ -408,6 +408,39 @@ tell *whether* it drew power (a hot tank's thermostat may be open) and *how much
 
 Switched loads are resolved first, so their steps are never reused as anonymous activations.
 
+**Operation states: measured over the run** (#79, `known.resolve_state_load`). A connected
+appliance's operation state (`run` / `stop`, a `sensor` entity, usually of the `enum` device
+class) bounds its whole cycle, but the appliance may have no step at all: a heat-pump dryer
+rises by ~400 W over three minutes, close to the threshold; a dishwasher starts with its pump
+and heats 20 minutes later. A step at the transitions measures nothing, or the wrong power for
+the whole cycle (2 kW × 3 h). So a switched load whose entity is a `sensor`
+(`SwitchedLoadConfig.measure`, overridable with `mode`) is measured from the residual load
+over each run, after the relays (their power taken out):
+
+1. Runs: the on-periods, joined across pauses shorter than 10 min (`max_gap_s`), of 1 min to
+   8 h (`max_run_s`: longer ones have too much else in them).
+2. Baseline (`baseline_w`): the readings of the 20 minutes before the start and of the 20
+   minutes after the end (after a 2-minute skip, a ramp down), without their highest 20 %
+   (a kettle next to the run), averaged; when the two sides differ by more than 150 W, the
+   lower side (something else ran on the other). A trimmed mean rather than a median: a fridge
+   cycling at 40 % duty is part of the background during the run too, and a median of short
+   windows lands on its on or off level (18 % low on the synthetic dryer).
+3. Each run's profile is `max(residual − baseline, 0)`, piecewise constant; a run under 50 W on
+   average (a delayed start) does not count. The load's `power_w` is the median of the runs'
+   mean powers (the registry's memory and the typical power sensor); `matched` counts the
+   transitions of the counted runs, so the registry learns it like a relay.
+4. The curve uses the profile minute by minute (`KnownLoad.energy_ws`, `power_at`), first, as
+   for every switched load. Such a load is **transparent** to the detection (`claims` false):
+   it marks no step and `find_cycles` does not take its power out, so the appliance's own
+   activations and cycle candidates still exist (its signature can be learned and validated;
+   in the curve they get what the load left, normally nothing). No automatic polarity: an
+   operation state's other states are not "on".
+
+Relays (every other domain) are measured from their steps exactly as before: the analysis of
+a day without operation-state loads is unchanged. A load running during the run (a kettle, an
+oven) is counted in it, as a low load next to a multi-phase cycle is (§ 4.9); a relay that
+switches during the run is not (its power is taken out first).
+
 ### 4.4 Cycling sessions (`activations.py`)
 
 Some loads switch on and off every few tens of seconds at the same power (an induction hob at
@@ -610,6 +643,41 @@ self-test (§ 8.7) uses the same functions on a measured device it hides from th
    and, with a template, the candidate cycles within the match distance (what the analysis
    recognises once the template is validated).
 
+**Connected appliances** (#79, `state_runs`). An operation state (`run` / `stop`) is a ground
+truth of *when* without any power sensor; the curve says *how much*. A run is a period in one
+of `on_states` (pauses in another state shorter than `max_gap_s` stay inside), of at least
+`min_run_s`, clipped to the day. Its power is what the residual load (the report's curve: the
+house without the sub-meters and the other switched loads, the appliance's own run-mode load
+kept) draws above the baseline around it (§ 4.3, `known.measure_run`), and `_classify` then
+gives its kind, level, cycling figures and phases as for a measured run (no step needed). The
+optional entities add, per run:
+
+- a **phase state** (`drying`, `cooling`…): `named_phases`, `{state, offset_s, duration_s,
+  power_w}` (mean excess power), consecutive equal states joined;
+- a **programme state** (a `select` or an `enum`): `program`, the state holding most of the run;
+- an **energy counter**: `counter_kwh`, its delta from the start to 20 min after the end
+  (`counter_lag_s`; capped at the next run), None without a reading before the start or after a
+  reset. A 0.1 kWh counter reporting every 15 minutes is wrong by up to 0.1 kWh on one run, but
+  the deltas of consecutive runs telescope: over many runs only the last remainder is lost.
+
+`learn` adds for such runs (`source: "state"`): `named_phases` (per state, the median power and
+duration, in cycle order), `programs` (per programme: uses, most frequent kind, median power,
+duration and energy, the template of a multi-phase one), and for a multi-phase appliance with
+programmes the template of the most used programme (`program`). The counter: once the runs with
+a counted energy reach `min_counter_kwh` (1 kWh, so a 0.1 kWh resolution is within 10 %),
+`counter_ratio` = counted / measured, and `energy_kwh` / `cycle_kwh` are the measured ones times
+that ratio (`measured_kwh` keeps the curve's): the counter is the appliance's own meter, the
+curve has the appliance's neighbours in it. The power is not scaled: the signature must match
+what the curve shows.
+
+Synthetic results (`tests/test_connected.py`): a heat-pump dryer ramping over 3 minutes to
+~330 W for 1 h 40 next to a fridge: the step mode measures 0 kWh, the run mode 0.49 of 0.53 kWh
+(−8 %); a dishwasher cycle (two 2 kW heatings, a 90 W pump) bounded by its state: energy within
+2–5 % over 10 seeds, kind `multiphase` with its heating; 8 dryer days with a 0.1 kWh counter
+every 15 minutes: 4.50 kWh counted for 4.49 kWh true, ratio 0.98, energy of a use 0.568 kWh for
+0.562 true (0.581 from the curve alone); two programmes give two templates and the second one's
+expected signature; relays with sharp steps unchanged.
+
 Synthetic results (`tests/test_teaching.py`): an oven (2.35–2.45 kW, 35–50 min, three days
 out of four) next to a fridge, kettles and a water heater, 8 days: learned `steady`/`medium`
 within 60 W, recall and precision ≥ 0.9, energy ratio within 15 %; a dishwasher on 6 days:
@@ -714,7 +782,7 @@ read.
 | `excluded` | Sub-meter or estimate whose power sensor is listed in `excluded_submeters` | Not subtracted: its power stays in the residual (§ 9) |
 | `nested` | `included_in_stat` points to another tracked device | Not subtracted (never twice) |
 | `teacher` | Its power sensor teaches an appliance (§ 8.6) | Not subtracted, read for the ground truth |
-| `energy_only` | No power sensor found | Not used; finding `no_power_sensor` |
+| `energy_only` | No power sensor found; or (#79) its power sensor stayed flat all day while its energy counter increased | Not used; finding `no_power_sensor`, or `flat_power_sensor` for that day |
 | `unavailable` | Energy sensor unavailable | Not used; finding `unavailable` |
 | `energy_mapper` | One of Energy Mapper's own statistics (`energy_mapper:…`, § 8.1), e.g. an estimate replaced by the appliance's statistic | Never subtracted, never `unavailable`. A switched load's statistic keeps its relay measured as a switched load, with its learned polarity; a labelled signature's needs nothing. An id the add-on cannot map: finding `unknown_statistic`, not used |
 
@@ -737,10 +805,25 @@ When the same relay is behind both an estimate and a statistic, it is measured o
 learned polarity.
 
 **Findings** (shown as *Things to check*): `grid_ignored`, `no_power_sensor`, `unavailable`,
-`battery_sign`, `no_grid`, `unknown_statistic`, and `tracking_gap`: after the analysis, `tracking_gaps()` compares,
+`battery_sign`, `no_grid`, `unknown_statistic`, `flat_power_sensor` (below), and `tracking_gap`: after the analysis, `tracking_gaps()` compares,
 for each switch-driven device, the energy declared by its sensor over the day with the energy
 measured for its switched load; a ratio of 2 or more (with at least 0.5 kWh on one side) is
 reported, typically an estimate configured at a few watts for a 2 kW water heater.
+
+**Flat power sensors** (#79, `constant_power`, `flat_power_sensors`, `without_flat`). Some
+connected appliances expose a power sensor that stays at 0 W while they run, next to an energy
+counter that does count. `derive()` pairs them like any device, so the device would be a
+sub-meter that subtracts nothing, a truth for the self-test that never runs, and a plug that
+could be picked to teach. The derivation only sees the current states, so the check runs on
+each day's histories (`Analyzer._without_flat`): the measured devices (`submeter`,
+`estimated`, `teacher`) whose power did not move all day (within 1 W, the value at midnight
+included) are the candidates; only their energy counters are then read (one request, rarely).
+A counter that counted at least `max(0.05 kWh, 2 × constant power × day)` (a constant standby
+that explains the counter is not flat) makes the device `energy_only` for that day, in a copy
+of the configuration (`config.submeters` without it, so the self-test skips it), with the
+finding `flat_power_sensor`. The panel marks such a sensor in the plug picker (it cannot
+teach) and in the connected-appliance form, and the finding points to learning the appliance
+from its state.
 
 Each finding has a stable `kind`, the `entity_id` it is about, an English `detail` and, since
 add-on 0.11.0 (#34), the `params` the panel builds its own sentence from (EN/FR,
@@ -755,6 +838,7 @@ add-on 0.11.0 (#34), the `params` the panel builds its own sentence from (EN/FR,
 | `unknown_statistic` | Statistic id | `{name}` |
 | `no_grid` | – | `{}` |
 | `tracking_gap` | Energy sensor | `{name, declared_kwh, measured_kwh}` |
+| `flat_power_sensor` | Energy sensor | `{name, power_entity, power_w, energy_kwh}` (#79) |
 
 The panel names the device with `params.name` (the Energy dashboard's name), else the entity's
 friendly name in Home Assistant, else the entity id, formats energies with the profile's
@@ -803,12 +887,12 @@ summary with `curve: []` and `curve_pruned: true`.
 | `max_house_w`, `peak_threshold_w` | Highest house power of the day and the notable threshold |
 | `curve` | Per-minute rows `{t, house, grid, pv, submetered, estimated, base, known: {name: W}, signatures: {daily id: W}, other}` |
 | `peaks` | `{start, end, max_ts, house_w, grid_w, pv_w, parts: [{kind: submetered\|estimated\|known\|signature, name, power_w, since?, registry_id?}], unexplained_w, notable}` |
-| `known_loads` | Switched loads: `{name, entity_id, power_w, transitions, matched, on_states, inverted, on_s}` |
+| `known_loads` | Switched loads: `{name, entity_id, power_w, transitions, matched, on_states, inverted, on_s}`; an operation-state load (add-on 0.14.0+) adds `mode: "run"` and `runs` |
 | `activations` | `{start, end, power_w, cycling, duty, on_s, period_s, signature, registry_id}`; a recognised multi-phase cycle (add-on 0.10.0+) adds `multiphase: true` and `phases`, its `power_w` is its mean power and its `signature` the registry id of its template |
 | `cycles` | Candidate multi-phase cycles (add-on 0.10.0+): `{start, end, power_w (heating), energy_kwh, phases: [{kind: heat\|motor, offset_s, duration_s, power_w}], members, template, distance}` |
 | `signatures` | Daily signatures: `{id, kind, band, power_w, count, duration_s, energy_kwh, hours, on_s, period_s, duty, examples, registry_id}`, and `phases` for kind `multiphase` |
 | `quality` | `{samples, steps, pv_unknown_s, max_gap_s, compute_s}` |
-| `ground_truth` | Only while an appliance learns from a sensor (add-on 0.11.0+, § 8.6): `[{key, entity_id, runs: [{start, end, energy_kwh, power_w, max_w, kind, duty, on_s?, period_s?, phases?}], covered: [[start, end]], covered_s, energy_kwh}]` |
+| `ground_truth` | Only while an appliance learns from a sensor (add-on 0.11.0+, § 8.6): `[{key, entity_id, runs: [{start, end, energy_kwh, power_w, max_w, kind, duty, on_s?, period_s?, phases?}], covered: [[start, end]], covered_s, energy_kwh}]`; from a connected appliance (0.14.0+) also `mode: "state"`, `program_recorded?`, and per run `source: "state"`, `baseline_w`, `program?`, `counter_kwh?`, `named_phases?` |
 | `config` | Sensors used: `grid_entity`, `extra_grid_entities`, `grid_export_entity`, `pv_entity`, `extra_pv_entities`, `battery_entity`, `tracked` (`{name, energy_entity, power_entity, role, source_entity}`), `findings` |
 | `findings` | `{kind, entity_id, detail, params}` (derive findings and tracking gaps); `params` (add-on 0.11.0+) per kind in § 5 *Findings*, `detail` the English fallback |
 
@@ -834,7 +918,7 @@ JSON in and out; request bodies are limited to 64 KB (413 above).
 | `POST /api/review` | `{"id", "action": "validate" \| "wait" \| "ignore" \| "restore", "appliance"?}`: `200 {"signature"}` with its `review_state`; `404 not_found`; `400 invalid_review` (`validate` needs `appliance`) |
 | `POST /api/signatures` | `{"kind", "band", "power_w", "label"}`: the signature of an appliance not seen yet: `200 {"signature", "created"}` (an existing unnamed signature at that power is returned, `created: false`); `409 {"error": "conflict", "message", "id"}` when that signature belongs to another appliance; `400 invalid_signature` |
 | `GET /api/teaching` | `200 {"teachers": [...]}`: per appliance with a teacher, `{key, name, entity_id, since, days, first_day, last_day, uses, energy_kwh, learned, signature: {id, kind, band, power_w, label, in_registry, linked}, conflict: {id, appliance} \| null, evaluation, per_day}` (§ 8.6) |
-| `POST /api/teaching` | `{"appliance": <key>}`: `200 {"signature", "created", "learned"}`; `404 not_found` (no appliance with a teacher), `422 not_learned` / `not_recognisable`, `409 conflict` (`id`), `400 invalid_teaching` |
+| `POST /api/teaching` | `{"appliance": <key>}`: `200 {"signature", "created", "learned", "programs"}` (`programs`, 0.14.0+: the other programmes' signatures of a connected appliance, `[{signature, created}]`); `404 not_found` (no appliance with a teacher), `422 not_learned` / `not_recognisable`, `409 conflict` (`id`), `400 invalid_teaching` |
 | `GET /api/self_test` | `200 {"enabled", "devices_per_night", "window_days", "min_uses", "last_day", "devices": [...]}`: per tested device `{entity_id, name, appliance, state, tests, nights, first_day, last_day, uses, found, detections, correct, recall, precision, truth_kwh, detected_kwh, energy_ratio, rate, trend, learned, signature, history}` (§ 8.7) |
 | `GET /api/live?since=<seq>&wait=<s>` | The live view's long-poll (§ 8.8): `200 {"seq", "session", "available": true, "reset", "history_s", "threshold_w", "night_threshold_w", "time_zone", "curve", "events", "now"}`, or `200 {"seq", "available": false, "reason", "error"?, "retry_at"?}`; `400 invalid_query` |
 | `GET /api/live/stats` | `200` the live view's state, counters and timings (§ 8.8); does not start it |
@@ -854,7 +938,7 @@ Other paths answer `404 {"error": "not_found"}`, other methods on known paths
 
 Registered once in `async_setup`. Every command needs an authenticated user; `analyze` needs an
 administrator. Except `status`, `day_stats`, `appliances`, `tracking`, `take_over`, `undo_take_over`, `teaching`, `teach`,
-`stop_teaching`, `self_test`, `live/subscribe` and `live/label`, each command relays one add-on request and returns its JSON unchanged.
+`stop_teaching`, `connected_devices`, `self_test`, `live/subscribe` and `live/label`, each command relays one add-on request and returns its JSON unchanged.
 
 | Command | Parameters | Result |
 |---|---|---|
@@ -874,8 +958,9 @@ administrator. Except `status`, `day_stats`, `appliances`, `tracking`, `take_ove
 | `energy_mapper/take_over` | `appliance` (key), `stat_consumption` | Replaces that individual device of the Energy dashboard by the appliance's statistic (§ 8.5): `{"key", "statistic_id", "replaced"}`; admin only |
 | `energy_mapper/undo_take_over` | `appliance` (key) | Puts the replaced device back: `{"key", "restored"}`; admin only |
 | `energy_mapper/teaching` | – | `GET /api/teaching` and `"supported"` (false for an add-on before 0.11.0: `{"supported": false, "teachers": []}`), for every user (§ 8.6). Integration 0.9.0+ |
-| `energy_mapper/teach` | `appliance` (key), `entity_id` (a power sensor) | Starts learning the appliance from that sensor: `{"key", "teacher"}`; admin only |
-| `energy_mapper/stop_teaching` | `appliance` (key), `use` (bool, default false) | Ends the learning; with `use`, links the learned signature: `{"key", "sources", "signature", "created"}`; admin only |
+| `energy_mapper/teach` | `appliance` (key) or `name` (a new appliance, #79), `entity_id`, `mode` (`power` default: a power sensor; `state`: a connected appliance's operation state, #79), and for `state`: `on_states`, `phase_entity`?, `energy_entity`?, `program_entity`?, `track` (a new appliance also tracked by its state) | Starts learning: `{"key", "name", "sources", "teacher"}`; admin only |
+| `energy_mapper/stop_teaching` | `appliance` (key), `use` (bool, default false) | Ends the learning; with `use`, links the learned signature: `{"key", "sources", "signature", "created", "programs"}`; admin only |
+| `energy_mapper/connected_devices` | – | The devices that can teach from their state (#79): `{"supported", "devices": [{"device_id", "name", "appliance", "entities": [{"entity_id", "name", "role", "options", "unit", "recorded", "appliance"}], "proposal": {"entity_id", "on_states", "phase_entity", "energy_entity", "program_entity", "power_entity"}}]}`; answered by the integration alone; admin only. Integration 0.12.0+ |
 | `energy_mapper/self_test` | – | `GET /api/self_test` and `"supported"` (false for an add-on before 0.11.0: `{"supported": false, "enabled": false, "devices": []}`), for every user (§ 8.7). Integration 0.9.0+ |
 | `energy_mapper/live/subscribe` | – | A **subscription** (§ 8.8), for every user, read-only: the result, then `snapshot`, `update` and `status` event messages until `unsubscribe_events`. Integration 0.10.0+ |
 | `energy_mapper/live/label` | `target`, the use (`event_id` + `session`, and/or `t_on`, `t_off`, `power_w`), `source`, and per target `signature_id`, `appliance`, `name`, `track`, `entity_id`, `on_states` | Labels a live event (§ 8.9): `{"effect", "appliance", "signature", "example", "open", "confirmed", "other_appliance"}`; admin only. Integration 0.10.0+ |
@@ -1474,7 +1559,58 @@ curve: 4 of 5 uses (recall 80 %), precision 100 %". Administrators get *Stop lea
 *Finish* (disabled until a recognisable signature without conflict is learned), each with its
 confirmation inside the card. Nothing changes before the confirmation.
 
-**For the nightly self-test (#15).** It can reuse, unchanged: `groundtruth.runs_of` (the
+**Connected appliances** (#79). A connected appliance teaches from its operation state:
+`teacher: {entity_id, since, mode: "state", on_states, phase_entity?, energy_entity?,
+program_entity?}` (`appliances._teacher` checks it: the on-states are required, the counter is a
+`sensor`). Nothing is hidden from the analysis (the appliance is already in the curve), so it
+is not in the `teachers` option; `teacher_entities` adds its entities to the day's history
+read, and `Context.energy_scales` the counter's unit (kWh, Wh, MWh). After the analysis,
+`teaching.day_state_truth` keeps the runs of § 4.10 measured on the day's curve
+(`residual_curve`: the other switched loads taken out, its own kept) in `ground_truth`, with
+`mode: "state"` and, with a programme entity, `program_recorded` (whether the recorder held
+any state of it that day: a `select` is often excluded). The status adds `mode`, the entities
+and `program_recorded` (any learning day). Evaluation and resolution are those of a plug: the
+appliance's state-driven switched load, if any, is transparent (§ 4.3), so its activations and
+cycle candidates are still there to be found. `teaching.program_signatures` gives, on
+*Finish*, the signatures of the other programmes of a multi-phase appliance (used at least
+twice, with heating, template farther than the cycle distance from the learned one; resolved
+in the registry, or expected signatures labelled with the appliance); the integration adds
+them as sources too and validates them. A connected appliance's *Finish* keeps its sources
+(its state stays its switched load; only a plug's sub-meter source is removed).
+
+**Integration** (`connected.py`, pure, unit tested). `energy_mapper/connected_devices` lists
+the devices having a `sensor` of the `enum` device class, from the entity registry (not
+disabled, not diagnostic, not Energy Mapper's) and the states: per device the `enum` sensors
+(*state* role; one whose options are all door words, `open` / `closed` / `locked`, is never
+listed), its `select` entities (*program*), its energy counters and power sensors. The
+proposal: the operation state is the `enum` already used by an appliance (with its on-states),
+else the one whose options include a running word (`run`, `running`, `on`, `active`,
+`working`, `in_progress`, `busy`), generic words of the entity id breaking ties; the phase
+state another `enum` (most options; not one named like a programme); the programme a
+`select` (or an `enum` named like one); the counter a `total_increasing` energy sensor.
+`recorded` comes from the recorder's entity filter (`get_instance(hass).entity_filter`; None
+without a recorder). `energy_mapper/teach` with `mode: "state"` checks the entities exist,
+the on-states and the counter's domain, refuses an add-on older than 0.14.0 (`not_supported`,
+from the last health answer) and an entity used by another appliance (`already_linked`), and
+with `name` instead of `appliance` creates the appliance (with `track`, its operation state as
+a switched-load source with the on-states).
+
+**Panel** (`frontend/src/connected.ts`, unit tested). *Learn from a connected appliance* at the
+top of the *Appliances* card (administrators, add-on with teaching), and *Learn from its state*
+on the card of an appliance tracked by a `sensor` switched load: a form inside the card with
+the device (the appliance's own first), the name (a new appliance), the operation state and
+its running states as check boxes (from the `enum` options), the phase state, energy counter
+and programme (all optional, preselected from the proposal), *Also track it by its state*
+(a new appliance), notes for the chosen entities the recorder does not keep ("one signature
+for all programmes" for the programme) and for a flat power sensor of the device (from the
+day's `flat_power_sensor` findings), a sentence saying what starts, *Start learning* /
+*Cancel*. A learning card adds the energy of a use (by its counter, with the ratio, once it
+counted enough), the phases with their power, the programmes seen, and the unrecorded
+programme note; *Finish* and *Stop learning* have their own confirmation texts.
+
+**For the nightly self-test (#15).** A connected appliance is not hidden by the self-test:
+nothing subtracts it, so its learning status is already that evaluation (same functions,
+every night over its learning days). It can reuse, unchanged: `groundtruth.runs_of` (the
 truth of a hidden measured device), `detections` (what a day's analysis recognised as a
 signature), `evaluate` / `merge_evaluations` (per day and over the window), `learn` (the
 signature to look for), and from the add-on `teaching.day_truth` (the stored form, with the
@@ -1965,6 +2101,14 @@ cannot be read).
 - The options flow cannot express "no sub-meters": an empty field falls back to the automatic
   value (#33). Excluding a switch is possible.
 
+- Connected appliances (§ 4.3, § 4.10): a run is measured against the load around it, so an
+  appliance running at the same time (a kettle, an oven) is counted in it, and a constant
+  load that starts or stops exactly at the run's bounds shifts its baseline; runs longer than
+  8 hours are not measured; a run crossing midnight is two runs, one per day. The proposal of
+  the connected entities is a guess from device classes, option values and generic words: the
+  user confirms it. A programme state the recorder excludes cannot give one signature per
+  programme. Flat power sensors are found day by day: the day a flat sensor reports anything
+  else, it is a sub-meter again.
 - Learning from a measured device (§ 8.6) learns one signature per appliance: the most frequent
   kind, duration band or programme. An appliance whose uses split into several signatures (two
   programmes, short and long uses) keeps the others to review or merge. Days analysed before

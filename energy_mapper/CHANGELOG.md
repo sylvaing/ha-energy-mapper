@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.14.0
+
+- Connected appliances as ground truth (#79). An appliance can learn from its
+  operation state (a `sensor` such as `run` / `stop`) instead of a power
+  sensor: teacher `{"mode": "state", "on_states", "phase_entity"?,
+  "energy_entity"?, "program_entity"?}`. Each run of the state is measured on
+  the house curve (residual load above its baseline around the run, tolerant to
+  a gradual start), classified like a measured run (steady, cycling,
+  multi-phase), its phases named by the phase state, its programme noted, and
+  its energy checked and scaled against a coarse energy counter once the runs
+  counted 1 kWh. A multi-phase appliance learns one template per recorded
+  programme; `POST /api/teaching` returns the other programmes' signatures in
+  `programs`. The report's `ground_truth` and `GET /api/teaching` carry the new
+  fields (`mode`, `program_recorded`, `named_phases`, `counter_kwh`,
+  `counter_ratio`, `programs`...).
+- Switched loads driven by an operation state (a `sensor` entity) are measured
+  over each run (`known_loads[].mode: "run"`, `runs`) instead of from the power
+  step at their transitions: a ramping start or a multi-phase cycle now gets
+  its energy. Such a load marks no step and claims no power from the
+  multi-phase candidates (its own signature can still be learned); it takes the
+  room first in the curve breakdown. Relays (`switch`, `input_boolean`...)
+  are unchanged.
+- Flat power sensors: a device of the Energy dashboard whose power sensor stays
+  constant all day while its energy counter increases is `energy_only` that
+  day (not subtracted, not used by the self-test), with the new finding
+  `flat_power_sensor` (`{name, power_entity, power_w, energy_kwh}`).
+- Integration (0.12.0): websocket `energy_mapper/connected_devices`
+  (administrators: the devices with an operation state and the entities
+  proposed for each, with whether the recorder keeps them) and
+  `energy_mapper/teach` with `mode: "state"` (on an appliance, or a new one
+  named `name`, optionally tracked by its state); *Finish* keeps the state as a
+  source and adds the learned signatures. The panel's *Appliances* tab gets
+  *Learn from a connected appliance*, the learning card its energy, phases and
+  programmes, and the finding *Power sensor stuck*.
+
 ## 0.13.0
 
 - Night threshold (#77): the new option `night_step_threshold_w` (empty by

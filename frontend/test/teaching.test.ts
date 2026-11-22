@@ -115,8 +115,13 @@ test("sensorChoices", () => {
   const heaterPlug: ApplianceInfo = { ...HEATER, teacher: { entity_id: "sensor.dryer_plug" } };
   const free = { ...OVEN, teacher: null };
   assert.deepEqual(sensorChoices(states, [free, heaterPlug], OVEN.key), [
-    { id: "sensor.oven_plug_power", name: "Oven plug", suggested: true },
-    { id: "sensor.kettle_plug", name: "Kettle plug", suggested: false },
+    { id: "sensor.oven_plug_power", name: "Oven plug", suggested: true, flat: false },
+    { id: "sensor.kettle_plug", name: "Kettle plug", suggested: false, flat: false },
+  ]);
+  // a power sensor stuck at 0 W (#79) comes last and cannot teach
+  assert.deepEqual(sensorChoices(states, [free, heaterPlug], OVEN.key, new Set(["sensor.oven_plug_power"])), [
+    { id: "sensor.kettle_plug", name: "Kettle plug", suggested: false, flat: false },
+    { id: "sensor.oven_plug_power", name: "Oven plug", suggested: false, flat: true },
   ]);
   // a sensor of another appliance is not offered
   assert.deepEqual(
@@ -124,4 +129,46 @@ test("sensorChoices", () => {
     ["sensor.dryer_plug", "sensor.kettle_plug"],
   );
   assert.deepEqual(sensorChoices(undefined, [], OVEN.key), []);
+});
+
+test("teachingLines of a connected appliance (#79)", () => {
+  const learned = {
+    ...status().learned!,
+    kind: "steady",
+    power_w: 330,
+    duration_s: 6000,
+    source: "state",
+    measured_kwh: 0.55,
+    energy_kwh: 0.52,
+    counter_ratio: 0.95,
+    counter_kwh: 1.6,
+    named_phases: [
+      { state: "drying", power_w: 340, duration_s: 5400 },
+      { state: "cooling", power_w: 110, duration_s: 480 },
+    ],
+    programs: [
+      { program: "cotton", uses: 2, kind: "steady", power_w: 330, duration_s: 6000, energy_kwh: 0.5 },
+      { program: "synthetic", uses: 1, kind: "steady", power_w: 300, duration_s: 4000, energy_kwh: 0.3 },
+    ],
+  };
+  const dryer: ApplianceInfo = {
+    ...HEATER,
+    key: "load:sensor.dryer_state",
+    teacher: { entity_id: "sensor.dryer_state", mode: "state", on_states: ["run"], program_entity: "select.dryer_program" },
+  };
+  const st = status({
+    key: dryer.key,
+    entity_id: "sensor.dryer_state",
+    mode: "state",
+    learned,
+    program_entity: "select.dryer_program",
+    program_recorded: false,
+  });
+  const lines = teachingLines(teachState(listing([st]), dryer) as never, t, info, (k) => k, () => "Dryer programme");
+  assert.deepEqual(lines.slice(2, 6), [
+    "Energy of a use: 0.52 kWh, by its counter (1.60 kWh counted, 95 % of the curve's measure)",
+    "Phases: drying 340 W · cooling 110 W",
+    "Programmes: cotton (2), synthetic (1)",
+    "The programme (Dryer programme) is not kept by the recorder of Home Assistant: one signature is learned for all programmes. Record it to learn one per programme.",
+  ]);
 });

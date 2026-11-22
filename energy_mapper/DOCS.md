@@ -106,6 +106,23 @@ switched_loads:
 `on_states` lists the states in which the appliance runs (default `on`). A
 switch that cuts the pilot wire of a radiator lets it heat when it is `off`.
 
+A relay (`switch`, `input_boolean`, any entity but a `sensor`) is measured
+from the power step at its transitions. An **operation state** (a `sensor`,
+typically of the `enum` device class with `run` / `stop`, add-on 0.14.0+) is
+measured over each run instead: what the house draws above its usual level
+around the run (the mean of the 20 minutes before and after, without their
+highest 20 %), minute by minute. A connected appliance that starts slowly
+(a heat-pump dryer), or whose power changes during its cycle (a dishwasher),
+gets its energy; a run that draws less than 50 W on average (a delayed start)
+does not count; a pause shorter than 10 minutes stays inside the run. Such a
+load does not hide the appliance's own steps from the analysis, so its
+signature can still be learned. Give its `on_states` (for example `run`).
+
+A device of the Energy dashboard whose power sensor stays constant (often at
+0 W) all day while its own energy counter increases is not a sub-meter: it is
+not subtracted that day (role `energy_only`) and the finding
+`flat_power_sensor` suggests learning it from its state.
+
 ### Night threshold
 
 Lowering `step_threshold_w` reveals small appliances (a TV, lighting, small
@@ -135,6 +152,7 @@ Each report is a JSON document with:
   the threshold of the notable peaks;
 - `curve`: the stacked breakdown of the house load, one point per minute;
 - `known_loads`: switch-driven appliances with their measured power;
+  an operation-state load adds `mode: "run"` and its `runs`;
 - `signatures`, `activations`: the appliances found in the curve that day.
   Their `signature` is a daily cluster id; the API adds `registry_id`, the
   long-lived id of the signature registry;
@@ -155,7 +173,11 @@ Each report is a JSON document with:
   sensor): per taught appliance, `key`, `entity_id`, its `runs` that day
   (`start`, `end`, `energy_kwh`, `power_w`, `max_w`, `kind`, `duty`, and
   `on_s`/`period_s` for a cycling run, `phases` for a multi-phase one),
-  `covered` (the periods the sensor reported), `covered_s` and `energy_kwh`;
+  `covered` (the periods the sensor reported), `covered_s` and `energy_kwh`.
+  A connected appliance (add-on 0.14.0+) adds `mode: "state"`,
+  `program_recorded` when it has a programme state, and per run `source:
+  "state"`, `baseline_w`, `program`, `counter_kwh` and `named_phases`
+  (`state`, `offset_s`, `duration_s`, `power_w`);
 - `config`: the sensors used, derived from the Energy dashboard;
 - `findings`: what is worth checking (sensor without power sensor,
   unavailable device, estimated device far from what was measured...):
@@ -436,6 +458,14 @@ whole-house curve exactly as it will once the plug is gone. Each analysed day
 keeps the sensor's runs in `ground_truth` (see [Reports](#reports)). A sensor
 teaches one appliance only.
 
+A **connected appliance** teaches from its operation state instead (add-on
+0.14.0+, #79): `{"entity_id": "sensor.dryer_operation_state", "since": ...,
+"mode": "state", "on_states": ["run"], "phase_entity"?, "energy_entity"?,
+"program_entity"?}`. Nothing is hidden from the analysis; these entities are
+read with the other histories and each day keeps the runs of the state,
+measured on the house curve (see [Learning from a measured
+device](#learning-from-a-measured-device)).
+
 An appliance may also have `examples` (add-on 0.12.0+, #17), at most 20: the
 uses labelled in the panel's *Live* tab, see [Labelled examples](#labelled-examples).
 They do not change the analysis options (labelling never restarts the live
@@ -543,11 +573,36 @@ from the stored days taught by that sensor:
   periods the sensor reported are left out. `precision` = correct / detections,
   `recall` = found / uses.
 
+**Connected appliance** (add-on 0.14.0+, #79): the teacher is an operation
+state (`mode: "state"`). Each period in one of `on_states` (pauses under 10
+minutes inside it) is a run, measured on the day's curve: the residual load
+(the house without the sub-meters and the other switched loads) above its
+baseline around the run (the mean of the 20 minutes before and after, without
+their highest 20 %). No power step is needed: a slow start or phases of very
+different powers are measured as they are; the kind and phases of a run are
+then found as for a sensor. With a phase state, each run lists its
+`named_phases` with their mean power, and `learned.named_phases` their medians
+in cycle order. With a programme state, each run has its `program`, and
+`learned.programs` lists them (uses, kind, power, duration, energy and the
+template of a multi-phase one); a multi-phase appliance learns the template of
+its most used programme (`learned.program`). `program_recorded: false` says the
+recorder keeps no history of the programme state (an excluded domain): one
+signature is then learned for all programmes. With an energy counter
+(`energy_entity`, kWh or Wh), each run has the `counter_kwh` counted from its
+start to 20 minutes after its end (a coarse counter reports late); once the
+runs have counted at least 1 kWh, `learned.counter_ratio` = counted / measured
+and the energy of one use (`learned.energy_kwh`, `cycle_kwh`) is the measured
+one times that ratio (`learned.measured_kwh` keeps the curve's). The status
+adds `mode`, `on_states`, `phase_entity`, `energy_entity`, `program_entity`
+and `program_recorded`.
+
 `POST /api/teaching` with `{"appliance": <key>}` returns the signature to link
-to the appliance, `{"signature", "created", "learned"}`: the registry's own,
+to the appliance, `{"signature", "created", "learned", "programs"}`: the registry's own,
 or a new expected signature named after the appliance (with the learned
 template for a multi-phase one, so the analysis recognises its cycles at
-once). Errors: `404 not_found` (no appliance with a teacher),
+once). `programs` (add-on 0.14.0+): the signatures of the other programmes of a
+multi-phase connected appliance (used at least twice, with heating, and whose
+template differs from the learned one), `[{"signature", "created"}]`. Errors: `404 not_found` (no appliance with a teacher),
 `422 not_learned` (no use seen yet), `422 not_recognisable` (below the step
 threshold), `409 conflict` (another appliance owns it; `id`).
 

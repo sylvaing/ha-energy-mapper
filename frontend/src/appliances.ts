@@ -25,7 +25,16 @@ export interface ApplianceInfo {
   power_w: number | null;
   sources: ApplianceSource[];
   /** a power sensor teaching it its signature (#14, integration 0.9.0+) */
-  teacher?: { entity_id: string; since?: number | null } | null;
+  /** what teaches it (#14): a power sensor, or a connected appliance's state (#79, `mode: "state"`) */
+  teacher?: {
+    entity_id: string;
+    since?: number | null;
+    mode?: "power" | "state";
+    on_states?: string[];
+    phase_entity?: string | null;
+    energy_entity?: string | null;
+    program_entity?: string | null;
+  } | null;
 }
 
 export interface ApplianceListing {

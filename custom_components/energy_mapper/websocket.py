@@ -18,9 +18,14 @@ from homeassistant.components import websocket_api
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 
 from .api import EnergyMapperApiError, EnergyMapperClient, EnergyMapperConnectionError, EnergyMapperError
-from .const import CONF_URL, DOMAIN, OPT_REVIEW_REPAIR, OPT_SETTINGS
+from .appliances import TEACHER_POWER, TEACHER_STATE
+from .connected import devices as connected_devices
+from .connected import recorder_filter
+from .const import CONF_URL, CONNECTED_MIN_ADDON, DOMAIN, OPT_REVIEW_REPAIR, OPT_SETTINGS
 from .coordinator import EnergyMapperConfigEntry, EnergyMapperCoordinator, ReviewError
 from .labels import TARGETS, TRACKS, async_label
 from .takeover import TakeoverError
@@ -60,6 +65,7 @@ def async_register_commands(hass: HomeAssistant) -> None:
         ws_teaching,
         ws_teach,
         ws_stop_teaching,
+        ws_connected_devices,
         ws_self_test,
         ws_live_subscribe,
         ws_live_label,
@@ -515,8 +521,20 @@ async def ws_teaching(
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "energy_mapper/teach",
-        vol.Required("appliance"): APPLIANCE_KEY,
+        # an existing appliance, or a new one named ``name`` (#79)
+        vol.Exclusive("appliance", "target"): APPLIANCE_KEY,
+        vol.Exclusive("name", "target"): vol.All(str, vol.Length(min=1, max=100)),
         vol.Required("entity_id"): cv.entity_id,
+        # power: a power sensor (#14); state: a connected appliance's operation state (#79)
+        vol.Optional("mode", default=TEACHER_POWER): vol.In([TEACHER_POWER, TEACHER_STATE]),
+        vol.Optional("on_states", default=list): vol.All(
+            [vol.All(str, vol.Length(min=1, max=100))], vol.Length(max=20)
+        ),
+        vol.Optional("phase_entity"): vol.Any(None, cv.entity_id),
+        vol.Optional("energy_entity"): vol.Any(None, cv.entity_id),
+        vol.Optional("program_entity"): vol.Any(None, cv.entity_id),
+        # a new appliance: also tracked by its operation state (a switched load)
+        vol.Optional("track", default=False): bool,
     }
 )
 @websocket_api.require_admin
@@ -524,13 +542,70 @@ async def ws_teaching(
 async def ws_teach(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """Learn an appliance from a power sensor that measures it."""
+    """Learn an appliance from a power sensor that measures it, or from a
+    connected appliance's state (#79)."""
+    if "appliance" not in msg and "name" not in msg:
+        connection.send_error(msg["id"], "invalid_format", "expected an appliance or a name")
+        return
 
     async def teach(coordinator: EnergyMapperCoordinator) -> dict[str, Any]:
-        appliance = await coordinator.async_teach(msg["appliance"], msg["entity_id"])
-        return {"key": appliance.key, "teacher": appliance.teacher.as_dict() if appliance.teacher else None}
+        appliance = await coordinator.async_teach(
+            msg.get("appliance"),
+            msg["entity_id"],
+            mode=msg["mode"],
+            on_states=msg["on_states"],
+            phase_entity=msg.get("phase_entity"),
+            energy_entity=msg.get("energy_entity"),
+            program_entity=msg.get("program_entity"),
+            name=msg.get("name"),
+            track=msg["track"],
+        )
+        return {
+            "key": appliance.key,
+            "name": appliance.name,
+            "sources": [s.as_dict() for s in appliance.sources],
+            "teacher": appliance.teacher.as_dict() if appliance.teacher else None,
+        }
 
     await _review(hass, connection, msg, teach)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "energy_mapper/connected_devices"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_connected_devices(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """The devices that can teach an appliance from their state (#79), with
+    the entities proposed for each and whether the recorder keeps them."""
+    entry = _entry(hass)
+    if entry is None or entry.state is not ConfigEntryState.LOADED:
+        connection.send_error(msg["id"], ERR_NOT_LOADED, "Energy Mapper is not set up")
+        return
+    coordinator = entry.runtime_data.coordinator
+    ent_reg = er.async_get(hass)
+    dev_reg = dr.async_get(hass)
+    registry = [
+        {
+            "entity_id": e.entity_id,
+            "device_id": e.device_id,
+            "entity_category": e.entity_category.value if e.entity_category else None,
+            "disabled_by": e.disabled_by,
+        }
+        for e in ent_reg.entities.values()
+        if e.device_id and e.platform != DOMAIN
+    ]
+    states = {
+        s.entity_id: {"state": s.state, "attributes": dict(s.attributes)}
+        for s in hass.states.async_all(["sensor", "select"])
+    }
+    names = {d.id: d.name_by_user or d.name or d.id for d in dev_reg.devices.values()}
+    result = connected_devices(
+        registry, states, names, recorder_filter(hass), coordinator.appliances_by_subentry().values()
+    )
+    connection.send_result(
+        msg["id"], {"supported": coordinator.addon_at_least(CONNECTED_MIN_ADDON), "devices": result}
+    )
 
 
 @websocket_api.websocket_command(
@@ -555,6 +630,8 @@ async def ws_stop_teaching(
             "sources": [s.as_dict() for s in appliance.sources],
             "signature": (answer or {}).get("signature"),
             "created": bool((answer or {}).get("created")),
+            # the other programmes of a connected appliance (#79)
+            "programs": [p["signature"] for p in (answer or {}).get("programs") or [] if p.get("signature")],
         }
 
     await _review(hass, connection, msg, stop)

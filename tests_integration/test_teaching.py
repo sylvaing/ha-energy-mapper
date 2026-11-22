@@ -89,7 +89,13 @@ async def test_teach_and_finish(
         "band": "medium",
         "power_w": 2400.0,
     }
-    assert answer["result"] == {"key": OVEN, "sources": [source], "signature": LEARNED, "created": False}
+    assert answer["result"] == {
+        "key": OVEN,
+        "sources": [source],
+        "signature": LEARNED,
+        "created": False,
+        "programs": [],
+    }
     await settle(hass)
     data = subentries(entry)[OVEN].data
     assert data["sources"] == [source]

@@ -217,8 +217,8 @@ def find_cycles(
     """Candidate cycles starting in ``[start, end)`` (see the module docstring).
 
     ``points`` is the residual load, ``activations`` the day's activations
-    (sessions and pairs), ``known`` the switched loads (``power_w`` and
-    ``overlap(start, end)``)."""
+    (sessions and pairs), ``known`` the switched loads (``energy_ws(start, end)``
+    and ``claims``)."""
     cfg = config or CycleConfig()
     anchors = sorted((a for a in activations if _is_anchor(a, cfg)), key=lambda a: a.start)
     if not points or not anchors:
@@ -232,7 +232,8 @@ def find_cycles(
 
     def claimed(i: int, acts: Iterable[Activation]) -> float:
         b0 = t0 + i * res
-        w = sum(k.power_w * k.overlap(b0, b0 + res) / res for k in known)
+        # a run-mode switched load (#79) is transparent: its cycle stays visible
+        w = sum(k.energy_ws(b0, b0 + res) / res for k in known if getattr(k, "claims", True))
         return w + sum(a.overlap_energy_wh(b0, b0 + res) * 3600.0 / res for a in acts)
 
     # activity: what is left above the base once the switched loads and the

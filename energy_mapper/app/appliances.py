@@ -27,7 +27,11 @@ An appliance may also have a **teacher** (``{"entity_id", "since"?}``, #14):
 a power sensor that measures it for a while (a temporary smart plug). The
 sensor is not subtracted (the appliance stays in the whole-house curve, as
 it will once the plug is gone), and each analysed day keeps the sensor's
-runs as the ground truth of the appliance (``teaching.py``).
+runs as the ground truth of the appliance (``teaching.py``). A connected
+appliance (#79) teaches from its operation state instead: ``{"entity_id",
+"since"?, "mode": "state", "on_states"?, "phase_entity"?, "energy_entity"?,
+"program_entity"?}``; nothing is hidden from the analysis, the entities are
+read and each day keeps the runs of the state measured on the house curve.
 
 An appliance may also have **labelled examples** (``examples``, #17): at
 most ``MAX_EXAMPLES`` uses the user pointed at in the live view, ``{"t_on",
@@ -213,16 +217,56 @@ def examples_of(appliances: Iterable[Mapping]) -> list[tuple[Mapping, list[Mappi
     return [(a, a["examples"]) for a in appliances or () if a.get("examples")]
 
 
+TEACHER_MODES = ("power", "state")
+_STATE_TEACHER_KEYS = {"mode", "on_states", "phase_entity", "energy_entity", "program_entity"}
+
+
 def _teacher(where: str, item) -> dict:
-    if not isinstance(item, dict) or set(item) - {"entity_id", "since"}:
-        raise AppliancesError(f'{where}: expected {{"entity_id", "since"?}}')
-    out = {"entity_id": _entity(f"{where}.entity_id", item.get("entity_id"), "sensor")}
+    if not isinstance(item, dict) or set(item) - {"entity_id", "since"} - _STATE_TEACHER_KEYS:
+        raise AppliancesError(
+            f'{where}: expected {{"entity_id", "since"?, "mode"?, "on_states"?, "phase_entity"?, '
+            '"energy_entity"?, "program_entity"?}'
+        )
+    mode = item.get("mode") or "power"
+    if mode not in TEACHER_MODES:
+        raise AppliancesError(f"{where}.mode: expected one of {', '.join(TEACHER_MODES)}")
+    if mode == "power":
+        if set(item) & (_STATE_TEACHER_KEYS - {"mode"}):
+            raise AppliancesError(f"{where}: a power sensor teacher has no state entities")
+        out = {"entity_id": _entity(f"{where}.entity_id", item.get("entity_id"), "sensor")}
+    else:
+        # a connected appliance (#79): its operation state, and optionally its
+        # phase state, energy counter and programme state
+        out = {"entity_id": _entity(f"{where}.entity_id", item.get("entity_id")), "mode": "state"}
+        states = item.get("on_states")
+        if states is not None:
+            if not isinstance(states, list) or len(states) > MAX_SOURCES:
+                raise AppliancesError(f"{where}.on_states: expected a list of states")
+            states = list(dict.fromkeys(_text(f"{where}.on_states", s) for s in states))
+        if not states:
+            raise AppliancesError(f"{where}.on_states: the states in which the appliance runs are needed")
+        out["on_states"] = states
+        for key, domain in (("phase_entity", None), ("energy_entity", "sensor"), ("program_entity", None)):
+            if item.get(key) is not None:
+                out[key] = _entity(f"{where}.{key}", item[key], domain)
     since = item.get("since")
     if since is not None:
         if isinstance(since, bool) or not isinstance(since, int | float) or not math.isfinite(since):
             raise AppliancesError(f"{where}.since: expected a unix time")
         out["since"] = float(since)
     return out
+
+
+def teacher_entities(appliances: Iterable[Mapping]) -> list[str]:
+    """The entities the connected appliances' teachers need read (#79):
+    their operation state, phase state, programme state and energy counter."""
+    out: list[str] = []
+    for _, t in teachers(appliances):
+        if t.get("mode") == "state":
+            out += [
+                t[k] for k in ("entity_id", "phase_entity", "program_entity", "energy_entity") if t.get(k)
+            ]
+    return list(dict.fromkeys(out))
 
 
 def teachers(appliances: Iterable[Mapping]) -> list[tuple[Mapping, Mapping]]:
@@ -281,7 +325,7 @@ def analysis_options(options: dict, appliances: list[Mapping]) -> dict:
     extra = [(s["entity_id"], a["name"]) for a, s in sources(appliances, "submeter")]
     if extra:
         out["extra_submeters"] = extra
-    taught = [t["entity_id"] for _, t in teachers(appliances)]
+    taught = [t["entity_id"] for _, t in teachers(appliances) if t.get("mode") != "state"]
     if taught:
         # never subtracted while they teach (#14), whatever else declares them
         out["teachers"] = taught

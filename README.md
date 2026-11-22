@@ -103,7 +103,8 @@ thermostat), which are grouped into one session with their duty cycle.
   **aarch64** (Raspberry Pi 4/5 included: a day is analysed in a few seconds at most).
   Home Assistant Container and Core are not supported yet: a standalone image is planned in
   [#19](https://github.com/sylvaing/ha-energy-mapper/issues/19).
-- **Home Assistant 2025.10 or later** for the integration, add-on **0.11.0 or later** to
+- **Home Assistant 2025.10 or later** for the integration, add-on **0.14.0 or later** to
+  learn from a connected appliance, 0.11.0 to
   learn an appliance from a smart plug and for the nightly self-test, 0.9.0 for the day raster of the review (0.8.0 for the attribute suggestions and merges, 0.7.0 for the entity suggestions, 0.6.0 for the review of the signatures, 0.5.0 for the appliance
   management, 0.4.0 for the appliance statistics; developed and tested on 2026.10 and
   2026.11; the panel uses Home Assistant's own date picker when available, and a plain date
@@ -407,6 +408,32 @@ learned signature to the appliance and removes the plug from its sources: unplug
 appliance is now tracked from the curve. *Stop learning* drops what was learned. An appliance
 below the step threshold (300 W by default) cannot be learned this way.
 
+**Learn from a connected appliance** ([#79](https://github.com/sylvaing/ha-energy-mapper/issues/79)):
+many washing machines, dryers and dishwashers report in Home Assistant an **operation state**
+(`run` / `stop` / `pause`), often their **phase** (drying, cooling, rinsing…), a cumulative
+**energy counter** (often coarse: 0.1 kWh every 15 minutes) and the running **programme**, but
+no useful power sensor (some stay at 0 W while the appliance runs). *Learn from a connected
+appliance* (top of the *Appliances* tab, administrators; *Learn from its state* on the card of an
+appliance already tracked by such a state) lists the devices that have an operation state,
+proposes its entities (operation state and the states in which it runs, phase state, energy
+counter, programme), says which ones the recorder does not keep, and starts learning once you
+confirm (a new appliance can also be tracked by its state at once). Each run is then
+measured on the whole-house curve (what the house draws above its usual level around the run,
+so a slow start or a cycle of very different phases is measured as it is), its phases named
+with their power, and its energy checked against the counter once it has counted at least 1 kWh.
+The card shows the energy of a use, the phases, the programmes seen and how well the curve
+finds the appliance; *Finish* adds the learned signature (one per programme when the programme
+is recorded) and keeps the state as a source. Without a counter or a programme, the state
+alone is enough.
+
+**Appliances tracked by an operation state** (a `sensor` such as `run` / `stop`): since add-on
+0.14.0 each run is measured over the whole run instead of from a power step at the start and
+the end, so an appliance that starts slowly (a heat-pump dryer) or whose power changes during
+the cycle (a dishwasher) gets its energy. Relays (`switch`, `input_boolean`…) are measured from
+their steps as before. A power sensor that stays flat while its device's energy counter
+increases is no longer subtracted: a *Power sensor stuck* finding suggests learning the
+appliance from its state.
+
 **Labelled examples** ([#17](https://github.com/sylvaing/ha-energy-mapper/issues/17), from the
 *Live* tab): when you say which appliance a step was ("this is the toaster"), the use
 (start, stop, power) is kept as a **labelled example** of that appliance, at most 20 per
@@ -681,8 +708,9 @@ regroupés en une seule session avec leur rapport cyclique.
   **aarch64** (Raspberry Pi 4/5 compris : une journée s'analyse en quelques secondes au plus).
   Home Assistant Container et Core ne sont pas encore pris en charge : une image autonome est
   prévue dans [#19](https://github.com/sylvaing/ha-energy-mapper/issues/19).
-- **Home Assistant 2025.10 ou plus récent** pour l'intégration, add-on **0.11.0 ou plus
-  récent** pour apprendre un appareil d'une prise connectée et pour l'auto-test de nuit, 0.9.0 pour la grille jour par
+- **Home Assistant 2025.10 ou plus récent** pour l'intégration, add-on **0.14.0 ou plus
+  récent** pour apprendre d'un appareil connecté, 0.11.0 pour apprendre un appareil d'une
+  prise connectée et pour l'auto-test de nuit, 0.9.0 pour la grille jour par
   jour de l'examen (0.8.0 pour les suggestions d'attribut et
   les fusions, 0.7.0 pour les suggestions
   d'entité, 0.6.0 pour l'examen des signatures, 0.5.0 pour la
@@ -1018,6 +1046,34 @@ cycle de lave-vaisselle) et la façon dont la courbe la retrouve : les utilisati
 signature apprise à l'appareil et retire la prise de ses sources : débranchez-la, l'appareil
 est désormais suivi dans la courbe. *Arrêter l'apprentissage* oublie ce qui a été appris. Un
 appareil sous le seuil de marche (300 W par défaut) ne peut pas être appris ainsi.
+
+**Apprendre d'un appareil connecté** ([#79](https://github.com/sylvaing/ha-energy-mapper/issues/79)) :
+beaucoup de lave-linge, sèche-linge et lave-vaisselle indiquent dans Home Assistant un **état de
+fonctionnement** (`run` / `stop` / `pause`), souvent leur **phase** (séchage, refroidissement,
+rinçage…), un **compteur d'énergie** cumulé (souvent grossier : 0,1 kWh tous les quarts d'heure)
+et le **programme** en cours, mais pas de capteur de puissance utile (certains restent à 0 W
+pendant que l'appareil fonctionne). *Apprendre d'un appareil connecté* (en haut de l'onglet
+*Appareils*, administrateurs ; *Apprendre de son état* sur la carte d'un appareil déjà suivi
+par un tel état) liste les appareils qui ont un état de fonctionnement, propose ses entités
+(état de fonctionnement et états pendant lesquels il fonctionne, état de la phase, compteur
+d'énergie, programme), signale celles que l'enregistreur ne conserve pas, et lance
+l'apprentissage une fois confirmé (un nouvel appareil peut aussi être suivi par son état tout
+de suite). Chaque cycle est alors mesuré sur la courbe de la maison (ce que la maison consomme
+au-dessus de son niveau habituel autour du cycle : un démarrage progressif ou un cycle aux
+phases très différentes est mesuré tel quel), ses phases nommées avec leur puissance, et son
+énergie vérifiée avec le compteur dès qu'il a compté au moins 1 kWh. La carte montre l'énergie
+d'une utilisation, les phases, les programmes vus et la façon dont la courbe retrouve
+l'appareil ; *Terminer* ajoute la signature apprise (une par programme quand le programme est
+enregistré) et garde l'état comme source. Sans compteur ni programme, l'état seul suffit.
+
+**Appareils suivis par un état de fonctionnement** (un `sensor` comme `run` / `stop`) : depuis
+l'add-on 0.14.0, chaque cycle est mesuré sur toute sa durée au lieu d'une marche de puissance
+au début et à la fin, si bien qu'un appareil qui démarre lentement (un sèche-linge à pompe à
+chaleur) ou dont la puissance change pendant le cycle (un lave-vaisselle) a son énergie. Les
+relais (`switch`, `input_boolean`…) sont mesurés par leurs marches comme avant. Un capteur de
+puissance qui reste fixe pendant que le compteur d'énergie de son appareil augmente n'est plus
+soustrait : une remarque *Capteur de puissance bloqué* propose d'apprendre l'appareil de son
+état.
 
 **Exemples étiquetés** ([#17](https://github.com/sylvaing/ha-energy-mapper/issues/17), depuis
 l'onglet *En direct*) : quand vous dites quel appareil a fait une marche (« c'est le

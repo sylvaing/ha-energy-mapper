@@ -35,6 +35,12 @@ const ALL: Finding[] = [
   finding("unknown_statistic", "energy_mapper:load_switch_old_energy", { name: "Old relay" }),
   finding("no_grid", "", {}),
   finding("tracking_gap", "sensor.dryer_energy", { name: "Dryer", declared_kwh: 0.8, measured_kwh: 6.1 }),
+  finding("flat_power_sensor", "sensor.dryer_energy", {
+    name: "Dryer",
+    power_entity: "sensor.dryer_power",
+    power_w: 0,
+    energy_kwh: 0.6,
+  }),
 ];
 
 test("findings: every kind gets a title and a sentence in English and French", () => {

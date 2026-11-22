@@ -9,7 +9,7 @@ from itertools import pairwise
 
 from .activations import find_cycling_sessions, pair_steps, validate_activations
 from .cycles import CycleConfig, Phase, attribute, find_cycles
-from .known import KnownLoad, SwitchedLoadConfig, resolve_switched_load
+from .known import RUN, KnownLoad, SwitchedLoadConfig, resolve_switched_load
 from .signal import build_samples, parse_numeric, scaled, sum_series
 from .signatures import cluster
 from .steps import PvQuiet, Step, detect_steps, night_threshold
@@ -113,6 +113,36 @@ def find_steps(samples, config: AnalysisConfig) -> list[Step]:
     return detect_steps(points, threshold=config.step_threshold_w, low_threshold=low, low_ok=pv)
 
 
+def resolve_known(
+    histories: dict[str, list[tuple[float, str]]],
+    config: AnalysisConfig,
+    steps: list[Step],
+    points: list[tuple[float, float]],
+    end: float,
+) -> list[KnownLoad]:
+    """The switched loads of the day, in the configured order. Relays (step
+    mode) first; the operation-state loads (run mode, #79) are then measured
+    on the residual load without the relays' power."""
+    out: dict[int, KnownLoad] = {}
+    runs = []
+    for i, c in enumerate(config.switched_loads):
+        if c.measure == RUN:
+            runs.append(i)
+        else:
+            out[i] = resolve_switched_load(
+                c, histories.get(c.entity_id, []), steps, end, config.step_threshold_w
+            )
+    if runs:
+        relays = [k for k in out.values() if k.intervals and k.power_w > 0]
+        free = [(t, v - sum(k.power_at(t) for k in relays)) for t, v in points] if relays else points
+        for i in runs:
+            c = config.switched_loads[i]
+            out[i] = resolve_switched_load(
+                c, histories.get(c.entity_id, []), steps, end, config.step_threshold_w, points=free
+            )
+    return [out[i] for i in range(len(config.switched_loads))]
+
+
 def analyze(
     histories: dict[str, list[tuple[float, str]]],
     config: AnalysisConfig,
@@ -146,10 +176,7 @@ def analyze(
     points = [(s.ts, s.residual) for s in samples if s.residual is not None]
 
     steps = find_steps(samples, config)
-    known: list[KnownLoad] = [
-        resolve_switched_load(c, histories.get(c.entity_id, []), steps, end, config.step_threshold_w)
-        for c in config.switched_loads
-    ]
+    known = resolve_known(histories, config, steps, points, end)
     sessions = find_cycling_sessions(steps)
     pairs = pair_steps(steps)
     in_period = [p for p in points if start <= p[0] < end]
@@ -203,6 +230,7 @@ def analyze(
                 "on_states": list(k.on_states),
                 "inverted": k.inverted,
                 "on_s": round(sum(max(0, min(b, end) - max(a, start)) for a, b in k.intervals)),
+                **({"mode": RUN, "runs": len(k.intervals)} if k.mode == RUN else {}),
             }
             for k in known
         ],
@@ -270,7 +298,7 @@ def _curve(samples, config, known, acts, start, end):
             "signatures": {},
         }
         for kl in known:
-            p = kl.power_w * kl.overlap(b0, b1) / res
+            p = kl.energy_ws(b0, b1) / res
             if p > 0:
                 row["known"][kl.name] = p
         for a in acts:
@@ -375,8 +403,9 @@ def _peaks(samples, config, known, acts, start, end, threshold):
         if m.estimated > 0.5:
             parts.append({"kind": "estimated", "name": "estimated", "power_w": round(m.estimated)})
         for kl in known:
-            if kl.active_at(m.ts):
-                parts.append({"kind": "known", "name": kl.name, "power_w": round(kl.power_w)})
+            p = kl.power_at(m.ts)
+            if p > 0:
+                parts.append({"kind": "known", "name": kl.name, "power_w": round(p)})
         for a in acts:
             p = a.power_at(m.ts)
             if p > 0:

@@ -17,9 +17,10 @@ device. Manual options always win over what is derived here.
 
 from __future__ import annotations
 
+import copy
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from nilm_core import AnalysisConfig, SubmeterConfig, SwitchedLoadConfig
@@ -56,7 +57,9 @@ class Finding:
     * ``unknown_statistic``: ``{"name"}`` (entity: the statistic id);
     * ``no_grid``: ``{}`` (no entity);
     * ``tracking_gap``: ``{"name", "declared_kwh", "measured_kwh"}``
-      (entity: the energy sensor).
+      (entity: the energy sensor);
+    * ``flat_power_sensor``: ``{"name", "power_entity", "power_w",
+      "energy_kwh"}`` (entity: the energy sensor; #79).
     """
 
     kind: str
@@ -80,7 +83,8 @@ class TrackedDevice:
     name: str
     energy_entity: str
     power_entity: str | None
-    # submeter | switched | estimated | energy_only | unavailable | nested | energy_mapper | teacher
+    # submeter | switched | estimated | energy_only | unavailable | nested |
+    # energy_mapper | teacher | excluded
     role: str
     source_entity: str | None = None
 
@@ -493,3 +497,106 @@ def tracking_gaps(
                 )
             )
     return out
+
+
+# ---------------------------------------------------------------------------
+# flat power sensors (#79)
+# ---------------------------------------------------------------------------
+# roles whose power sensor is read as a measurement of the device
+_MEASURED_ROLES = ("submeter", "estimated", "teacher")
+
+
+def _rows(histories: Mapping[str, list], entity: str) -> list[tuple[float, float]]:
+    out = []
+    for ts, v in histories.get(entity) or []:
+        n = _number(v)
+        if n is not None:
+            out.append((float(ts), n))
+    return sorted(out)
+
+
+def _day_values(rows: list[tuple[float, float]], start: float, end: float) -> list[float]:
+    """The value in effect at ``start`` and every reading of the day."""
+    before = [v for t, v in rows if t <= start]
+    return ([before[-1]] if before else []) + [v for t, v in rows if start < t < end]
+
+
+def constant_power(
+    tracked: list[TrackedDevice],
+    histories: Mapping[str, list],
+    start: float,
+    end: float,
+    tolerance_w: float = 1.0,
+) -> list[TrackedDevice]:
+    """The measured devices whose power sensor did not move all day (within
+    ``tolerance_w``): the candidates of :func:`flat_power_sensors`, whose
+    energy counter is then read."""
+    out = []
+    for t in tracked:
+        if t.role not in _MEASURED_ROLES or not t.power_entity:
+            continue
+        values = _day_values(_rows(histories, t.power_entity), start, end)
+        if values and max(values) - min(values) <= tolerance_w:
+            out.append(t)
+    return out
+
+
+def flat_power_sensors(
+    tracked: list[TrackedDevice],
+    histories: Mapping[str, list],
+    start: float,
+    end: float,
+    scales: Mapping[str, float] | None = None,
+    tolerance_w: float = 1.0,
+    min_kwh: float = 0.05,
+) -> list[Finding]:
+    """Devices whose power sensor stays constant (often at 0 W) while their
+    own energy counter increases: the sensor does not measure the device
+    (a connected appliance that only reports its energy), so it is no
+    sub-meter; finding ``flat_power_sensor``. The counter must count more
+    than the constant power would (``2 x power x day``, at least
+    ``min_kwh``). ``histories`` holds the power and the energy sensors;
+    ``scales`` the power sensor unit factors to W."""
+    scales = scales or {}
+    out: list[Finding] = []
+    for t in constant_power(tracked, histories, start, end, tolerance_w):
+        values = _day_values(_rows(histories, t.power_entity or ""), start, end)
+        power = max(values) * scales.get(t.power_entity or "", 1.0)
+        counter = _day_values(_rows(histories, t.energy_entity), start, end)
+        if len(counter) < 2:
+            continue
+        counted = max(counter) - counter[0]  # a total_increasing counter, in kWh
+        expected = max(power, 0.0) * (end - start) / 3.6e6
+        if counted >= max(min_kwh, 2 * expected):
+            out.append(
+                Finding(
+                    "flat_power_sensor",
+                    t.energy_entity,
+                    f"{t.name}: its power sensor stays at {power:.0f} W while its energy counter "
+                    f"counted {counted:.2f} kWh: not a sub-meter (use its state or counter to learn it)",
+                    {
+                        "name": t.name,
+                        "power_entity": t.power_entity,
+                        "power_w": round(power, 1),
+                        "energy_kwh": round(counted, 3),
+                    },
+                )
+            )
+    return out
+
+
+def without_flat(derived: DerivedConfig, findings: list[Finding]) -> DerivedConfig:
+    """A copy of the derived configuration where the devices of the
+    ``flat_power_sensor`` findings are ``energy_only`` (not subtracted, not a
+    truth for the self-test) and the findings added. The original (shared
+    by the days of a pass) is left untouched."""
+    flat = {f.params.get("power_entity") for f in findings if f.kind == "flat_power_sensor"}
+    if not flat or derived.config is None:
+        return derived
+    config = copy.copy(derived.config)
+    config.submeters = [m for m in config.submeters if m.entity_id not in flat]
+    tracked = [
+        replace(t, role="energy_only") if t.power_entity in flat and t.role in _MEASURED_ROLES else t
+        for t in derived.tracked
+    ]
+    return replace(derived, config=config, tracked=tracked, findings=[*derived.findings, *findings])

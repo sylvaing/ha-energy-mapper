@@ -167,6 +167,40 @@ const en = {
   teach_started: "{name} learns from {sensor}.",
   teach_finished: "{name} is now tracked from the whole-house curve.",
   teach_stopped: "{name} no longer learns from {sensor}.",
+  teach_flat: "{name} (stays at 0 W: cannot teach)",
+  teach_finish_confirm_state:
+    "Stop learning and add the learned signature to {name}? Its state stays its source; the signature finds it in the whole-house curve when the state is missing. Its stored days are imported again.",
+  teach_stop_confirm_state: "Stop learning from {sensor} without using what was learned? Nothing else changes.",
+  // learning from a connected appliance (#79)
+  connected_action: "Learn from a connected appliance",
+  connected_action_card: "Learn from its state",
+  connected_action_hint:
+    "A connected appliance that reports when it runs (its operation state) teaches its signature; each run is measured on the whole-house curve",
+  connected_title: "Learn from a connected appliance",
+  connected_device: "Device",
+  connected_no_device: "No device reports an operation state (a sensor with a list of states).",
+  connected_name: "Name of the appliance",
+  connected_state: "Operation state",
+  connected_on_states: "It runs while the state is",
+  connected_phase: "Phase state (optional)",
+  connected_energy_entity: "Energy counter (optional)",
+  connected_program: "Programme (optional)",
+  connected_none: "None",
+  connected_track: "Also track it by its state (each run measured on the curve)",
+  connected_confirm:
+    "{name} learns from {state}: each run is measured on the whole-house curve, its phases and programmes are noted, and its counter checks the energy. Nothing is subtracted. Learning starts with the next analysis.",
+  connected_pick: "Pick the operation state and the states in which the appliance runs.",
+  connected_unrecorded: "{name} is not kept by the recorder of Home Assistant: it cannot be used.",
+  connected_program_unrecorded:
+    "The programme ({name}) is not kept by the recorder of Home Assistant: one signature is learned for all programmes. Record it to learn one per programme.",
+  connected_flat_power: "Its power sensor {name} stays at 0 W while it runs: it is not used as a sub-meter.",
+  connected_not_supported: "The Energy Mapper add-on is too old to learn from a connected appliance: update it.",
+  connected_started: "{name} learns from {state}.",
+  connected_energy: "Energy of a use: {energy} (measured on the curve)",
+  connected_energy_counter: "Energy of a use: {energy}, by its counter ({counted} counted, {ratio} of the curve's measure)",
+  connected_energy_counter_low: "Energy of a use: {energy} on the curve; its counter counted {counted} so far, too little to check it",
+  connected_phases: "Phases: {list}",
+  connected_programs: "Programmes: {list}",
   // nightly self-test (#15)
   selftest_title: "Self-test",
   selftest_hint:
@@ -336,6 +370,7 @@ const en = {
   finding_tracking_gap: "Tracking gap",
   finding_no_grid: "No grid power sensor",
   finding_unknown_statistic: "Unknown statistic",
+  finding_flat_power_sensor: "Power sensor stuck",
   finding_other: "Note",
   // finding sentences, built from the finding's parameters (#34)
   finding_text_grid_ignored: "{name}: grid meter that has never counted, ignored.",
@@ -348,6 +383,8 @@ const en = {
     "{name}: Energy Mapper statistic of an appliance it no longer knows (not used by the analysis; remove it from the Energy dashboard if it is obsolete).",
   finding_text_no_grid: "No grid power sensor: choose one in the settings.",
   finding_text_tracking_gap: "{name}: declared {declared}, measured {measured}.",
+  finding_text_flat_power_sensor:
+    "{name}: its power sensor stays at {power} while its energy counter counted {energy}: it is not subtracted. Learn the appliance from its state (Appliances, Learn from a connected appliance).",
   // quality
   quality: "{samples} readings, longest gap {gap}, analysed in {time}",
   // live view (#17)
@@ -688,6 +725,39 @@ const fr: Table = {
   teach_started: "{name} apprend avec {sensor}.",
   teach_finished: "{name} est maintenant suivi dans la courbe de la maison.",
   teach_stopped: "{name} n'apprend plus avec {sensor}.",
+  teach_flat: "{name} (reste à 0 W : ne peut pas servir)",
+  teach_finish_confirm_state:
+    "Arrêter l'apprentissage et ajouter la signature apprise à {name} ? Son état reste sa source ; la signature le retrouve dans la courbe de la maison quand l'état manque. Ses jours enregistrés sont importés à nouveau.",
+  teach_stop_confirm_state: "Arrêter l'apprentissage avec {sensor} sans utiliser ce qui a été appris ? Rien d'autre ne change.",
+  connected_action: "Apprendre d'un appareil connecté",
+  connected_action_card: "Apprendre de son état",
+  connected_action_hint:
+    "Un appareil connecté qui indique quand il fonctionne (son état de fonctionnement) apprend sa signature ; chaque cycle est mesuré sur la courbe de la maison",
+  connected_title: "Apprendre d'un appareil connecté",
+  connected_device: "Appareil",
+  connected_no_device: "Aucun appareil n'indique d'état de fonctionnement (un capteur à liste d'états).",
+  connected_name: "Nom de l'appareil",
+  connected_state: "État de fonctionnement",
+  connected_on_states: "Il fonctionne quand l'état est",
+  connected_phase: "État de la phase (facultatif)",
+  connected_energy_entity: "Compteur d'énergie (facultatif)",
+  connected_program: "Programme (facultatif)",
+  connected_none: "Aucun",
+  connected_track: "Le suivre aussi par son état (chaque cycle mesuré sur la courbe)",
+  connected_confirm:
+    "{name} apprend avec {state} : chaque cycle est mesuré sur la courbe de la maison, ses phases et programmes sont notés, et son compteur vérifie l'énergie. Rien n'est soustrait. L'apprentissage commence à la prochaine analyse.",
+  connected_pick: "Choisissez l'état de fonctionnement et les états pendant lesquels l'appareil fonctionne.",
+  connected_unrecorded: "{name} n'est pas conservé par l'enregistreur de Home Assistant : il ne peut pas servir.",
+  connected_program_unrecorded:
+    "Le programme ({name}) n'est pas conservé par l'enregistreur de Home Assistant : une seule signature est apprise pour tous les programmes. Enregistrez-le pour en apprendre une par programme.",
+  connected_flat_power: "Son capteur de puissance {name} reste à 0 W pendant qu'il fonctionne : il n'est pas utilisé comme sous-compteur.",
+  connected_not_supported: "L'add-on Energy Mapper est trop ancien pour apprendre d'un appareil connecté : mettez-le à jour.",
+  connected_started: "{name} apprend avec {state}.",
+  connected_energy: "Énergie d'une utilisation : {energy} (mesurée sur la courbe)",
+  connected_energy_counter: "Énergie d'une utilisation : {energy}, d'après son compteur ({counted} comptés, {ratio} de la mesure de la courbe)",
+  connected_energy_counter_low: "Énergie d'une utilisation : {energy} sur la courbe ; son compteur a compté {counted} pour l'instant, trop peu pour la vérifier",
+  connected_phases: "Phases : {list}",
+  connected_programs: "Programmes : {list}",
   // auto-test de nuit (#15)
   selftest_title: "Auto-test",
   selftest_hint:
@@ -851,6 +921,7 @@ const fr: Table = {
   finding_tracking_gap: "Écart de suivi",
   finding_no_grid: "Pas de capteur de puissance réseau",
   finding_unknown_statistic: "Statistique inconnue",
+  finding_flat_power_sensor: "Capteur de puissance bloqué",
   finding_other: "Remarque",
   finding_text_grid_ignored: "{name} : compteur réseau qui n'a jamais compté, ignoré.",
   finding_text_no_power_sensor_grid: "{name} : compteur réseau sans capteur de puissance, ignoré.",
@@ -862,6 +933,8 @@ const fr: Table = {
     "{name} : statistique Energy Mapper d'un appareil qu'il ne connaît plus (non utilisée par l'analyse ; retirez-la du tableau de bord Énergie si elle est obsolète).",
   finding_text_no_grid: "Pas de capteur de puissance réseau : choisissez-en un dans les réglages.",
   finding_text_tracking_gap: "{name} : {declared} déclarés, {measured} mesurés.",
+  finding_text_flat_power_sensor:
+    "{name} : son capteur de puissance reste à {power} alors que son compteur d'énergie a compté {energy} : il n'est pas soustrait. Apprenez l'appareil de son état (Appareils, Apprendre d'un appareil connecté).",
   quality: "{samples} mesures, plus grand trou {gap}, analysé en {time}",
   // en direct (#17)
   tab_live: "En direct",

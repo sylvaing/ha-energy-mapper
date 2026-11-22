@@ -1810,6 +1810,37 @@ export const panelStyles = css`
   .takeover-error {
     color: var(--error-color);
   }
+  .connected-action {
+    display: flex;
+    justify-content: flex-end;
+    padding: 0 16px 8px;
+  }
+  .connected-new {
+    margin: 0 16px 12px;
+    padding: 12px;
+    border: 1px solid var(--divider-color);
+    border-radius: var(--ha-card-border-radius, 12px);
+  }
+  .connected-states {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    margin: 0;
+    padding: 4px 0;
+    border: none;
+    font-size: var(--ha-font-size-s, 12px);
+    color: var(--secondary-text-color);
+  }
+  .connected-states legend {
+    padding: 0 0 4px;
+  }
+  .check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--primary-text-color);
+    overflow-wrap: anywhere;
+  }
   .teach-status {
     display: flex;
     flex-direction: column;

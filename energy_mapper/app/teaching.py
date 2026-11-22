@@ -17,6 +17,15 @@ the true uses (:func:`nilm_core.groundtruth.evaluate`). :func:`apply` gives
 the signature to link to the appliance, created as an expected signature
 when the registry has none yet.
 
+A **connected appliance** (#79) teaches the same way without a power
+sensor: its teacher is its operation state (``mode: "state"``, the states in
+which it runs, and optionally its phase state, programme state and energy
+counter). Nothing is hidden from the analysis (the appliance is in the curve
+already); each day keeps its runs measured from the house curve
+(:func:`day_state_truth`), and the learning, resolution and evaluation are
+those of a measured device. A multi-phase appliance whose programme state is
+recorded learns one template per programme (:func:`program_signatures`).
+
 Pure (no I/O, no clock): the caller passes the summaries, the registry and
 ``now``.
 """
@@ -38,6 +47,7 @@ from nilm_core.groundtruth import (
     learn,
     merge_evaluations,
     runs_of,
+    state_runs,
     truth_intervals,
 )
 from nilm_core.registry import (
@@ -48,6 +58,7 @@ from nilm_core.registry import (
 )
 
 GROUND_TRUTH_KEY = "ground_truth"
+STATE = "state"  # a connected appliance's teacher: its operation state
 
 
 class TeachingError(ValueError):
@@ -81,6 +92,79 @@ def day_truth(
         "covered_s": round(sum(b - a for a, b in covered)),
         "energy_kwh": round(sum(r.energy_kwh for r in runs), 3),
     }
+
+
+def residual_curve(report: Mapping, own: str | None = None) -> list[tuple[float, float]]:
+    """The residual load per curve row of a report: the house without the
+    sub-meters and the switched loads, except the one of ``own`` (the entity
+    of the appliance measured: its own switched load must stay in)."""
+    names = {k.get("name") for k in report.get("known_loads") or [] if k.get("entity_id") != own}
+    out = []
+    for row in report.get("curve") or []:
+        try:
+            others = sum(float(w) for n, w in (row.get("known") or {}).items() if n in names)
+            out.append((float(row["t"]), float(row["house"]) - float(row.get("submetered") or 0.0) - others))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def _numbers(rows: Sequence[tuple[float, str | None]], scale: float = 1.0) -> list[tuple[float, float]]:
+    out = []
+    for t, v in rows:
+        try:
+            out.append((float(t), float(v) * scale))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def day_state_truth(
+    key: str,
+    teacher: Mapping,
+    histories: Mapping[str, Sequence[tuple[float, str | None]]],
+    report: Mapping,
+    start: float,
+    end: float,
+    energy_scale: float = 1.0,
+    config: GroundTruthConfig | None = None,
+) -> dict:
+    """The ground truth of a connected appliance on one day (#79): the runs
+    of its operation state, measured on the day's curve (``report``), with
+    their phases, programme and counted energy. ``energy_scale`` turns the
+    counter's unit into kWh."""
+    entity = teacher["entity_id"]
+    on_states = teacher.get("on_states") or ["run"]
+    phase = teacher.get("phase_entity")
+    program = teacher.get("program_entity")
+    counter = teacher.get("energy_entity")
+    program_rows = histories.get(program) if program else None
+    runs, covered = state_runs(
+        histories.get(entity) or [],
+        on_states,
+        residual_curve(report, entity),
+        start,
+        end,
+        config,
+        phases=histories.get(phase) if phase else None,
+        programs=program_rows,
+        counter=_numbers(histories.get(counter) or [], energy_scale) if counter else None,
+    )
+    out = {
+        "key": key,
+        "entity_id": entity,
+        "mode": STATE,
+        "runs": [r.to_dict() for r in runs],
+        "covered": [[round(a), round(b)] for a, b in covered],
+        "covered_s": round(sum(b - a for a, b in covered)),
+        "energy_kwh": round(sum(r.energy_kwh for r in runs), 3),
+    }
+    if program:
+        # a programme state the recorder does not keep (an excluded domain)
+        out["program_recorded"] = any(
+            v is not None and str(v) not in ("unavailable", "unknown", "") for _, v in program_rows or []
+        )
+    return out
 
 
 def truth_days(summaries: Mapping[str, Mapping], key: str, entity_id: str) -> dict[str, Mapping]:
@@ -192,6 +276,7 @@ def status(
         "key": key,
         "name": appliance.get("name"),
         "entity_id": entity,
+        "mode": teacher.get("mode") or "power",
         "since": teacher.get("since"),
         "days": len(days),
         "first_day": next(iter(days), None),
@@ -204,6 +289,15 @@ def status(
         "evaluation": None,
         "per_day": [],
     }
+    if teacher.get("mode") == STATE:
+        out.update(
+            on_states=list(teacher.get("on_states") or []),
+            phase_entity=teacher.get("phase_entity"),
+            energy_entity=teacher.get("energy_entity"),
+            program_entity=teacher.get("program_entity"),
+            # None: no programme state, or no day says yet
+            program_recorded=_program_recorded(days) if teacher.get("program_entity") else None,
+        )
     if learned is None:
         return out
     sig = resolve(registry, learned, config)
@@ -231,6 +325,12 @@ def status(
     }
     out["evaluation"], out["per_day"] = evaluate_days(days, summaries, reg, sig, learned, gt_config)
     return out
+
+
+def _program_recorded(days: Mapping[str, Mapping]) -> bool | None:
+    """Whether the programme state was recorded on some learning day."""
+    seen = [gt.get("program_recorded") for gt in days.values() if "program_recorded" in gt]
+    return any(seen) if seen else None
 
 
 def evaluate_days(
@@ -289,3 +389,64 @@ def apply(
     sig = new_signature(registry, learned, appliance, teacher["entity_id"], now)
     registry.setdefault("signatures", []).append(sig)
     return sig, True, learned.to_dict()
+
+
+def program_signatures(
+    appliance: Mapping,
+    learned: Mapping,
+    registry: dict,
+    now: float,
+    config: RegistryConfig | None = None,
+) -> list[tuple[dict, bool]]:
+    """The signatures of the other programmes of a multi-phase connected
+    appliance (#79): ``learned["programs"]`` beyond the learned one, used at
+    least twice, with a heating phase, and whose template is not within the
+    match distance of the learned one (else it is the same signature). Each
+    is the registry signature it resolves to (none of another appliance) or
+    a new expected one added to ``registry`` (modified). ``[(signature,
+    created)]``."""
+    config = config or RegistryConfig()
+    if learned.get("kind") != MULTIPHASE:
+        return []
+    try:
+        main = [mp.Phase.from_dict(p) for p in learned.get("phases") or []]
+    except (KeyError, TypeError, ValueError):
+        return []
+    out: list[tuple[dict, bool]] = []
+    taken = set()
+    entity = appliance["teacher"]["entity_id"]
+    for item in learned.get("programs") or []:
+        if item.get("program") == learned.get("program") or item.get("kind") != MULTIPHASE:
+            continue
+        if int(item.get("uses") or 0) < 2:
+            continue
+        try:
+            phases = [mp.Phase.from_dict(p) for p in item.get("phases") or []]
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not any(p.kind == mp.HEAT for p in phases):
+            continue
+        if main and mp.distance(phases, main) <= config.cycle_distance:
+            continue
+        other = Learned(
+            kind=MULTIPHASE,
+            band="cycle",
+            power_w=float(item.get("power_w") or 0.0),
+            duration_s=float(item.get("duration_s") or 0.0),
+            uses=int(item["uses"]),
+            runs=int(item["uses"]),
+            phases=phases,
+            cycle_kwh=float(item.get("energy_kwh") or 0.0),
+            energy_kwh=float(item.get("energy_kwh") or 0.0),
+        )
+        sig = resolve(registry, other, config)
+        if sig is not None:
+            if owner_of(sig, appliance["key"]) or sig["id"] in taken:
+                continue
+            out.append((sig, False))
+        else:
+            sig = new_signature(registry, other, appliance, entity, now)
+            registry.setdefault("signatures", []).append(sig)
+            out.append((sig, True))
+        taken.add(sig["id"])
+    return out

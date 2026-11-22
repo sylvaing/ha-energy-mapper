@@ -207,11 +207,32 @@
           case "energy_mapper/teaching":
             return { supported: true, teachers: APPLIANCE_LIST.filter((a) => a.teacher).map(teachingOf) };
           case "energy_mapper/teach": {
-            const a = APPLIANCE_LIST.find((x) => x.key === msg.appliance);
+            // a connected appliance (#79): mode "state", possibly a new appliance
+            const teacher =
+              msg.mode === "state"
+                ? {
+                    entity_id: msg.entity_id,
+                    since: NOW,
+                    mode: "state",
+                    on_states: msg.on_states,
+                    phase_entity: msg.phase_entity,
+                    energy_entity: msg.energy_entity,
+                    program_entity: msg.program_entity,
+                  }
+                : { entity_id: msg.entity_id, since: NOW };
+            let a = APPLIANCE_LIST.find((x) => x.key === msg.appliance);
+            if (!a && msg.name) {
+              const sources = msg.track ? [{ type: "switched_load", entity_id: msg.entity_id, on_states: msg.on_states }] : [];
+              a = { key: `load:${msg.entity_id}`, name: msg.name, subentry_id: `s-${msg.entity_id}`, statistic_id: null, power_w: null, sources };
+              APPLIANCE_LIST.push(a);
+            }
             if (!a) throw { code: "not_found", message: `no appliance ${msg.appliance}` };
-            a.teacher = { entity_id: msg.entity_id, since: NOW };
-            return { key: a.key, teacher: a.teacher };
+            a.teacher = teacher;
+            return { key: a.key, name: a.name, sources: a.sources, teacher: a.teacher };
           }
+          // the devices that can teach from their state (#79): invented
+          case "energy_mapper/connected_devices":
+            return CONNECTED;
           case "energy_mapper/stop_teaching": {
             const a = APPLIANCE_LIST.find((x) => x.key === msg.appliance);
             if (!a?.teacher) throw { code: "not_found", message: `${msg.appliance} is not learning` };
@@ -478,6 +499,23 @@
         entity_id: "sensor.dryer_power",
         since: NOW - 9 * 86400,
       };
+      // a connected appliance learning from its operation state (#79), invented
+      APPLIANCE_LIST.push({
+        key: "load:sensor.hp_dryer_state",
+        name: "Heat-pump dryer",
+        subentry_id: "s-hp-dryer-state",
+        statistic_id: stat("load:sensor.hp_dryer_state"),
+        power_w: 330,
+        sources: [{ type: "switched_load", entity_id: "sensor.hp_dryer_state", on_states: ["run"] }],
+        teacher: {
+          entity_id: "sensor.hp_dryer_state",
+          since: NOW - 6 * 86400,
+          mode: "state",
+          on_states: ["run"],
+          program_entity: "select.hp_dryer_program",
+        },
+      });
+      APPLIANCE_LIST.sort((a, b) => a.name.localeCompare(b.name));
       // the nightly self-test (#15): synthetic sub-meters
       const SELF_TEST = {
         supported: true,
@@ -523,6 +561,38 @@
           evaluation: fresh
             ? null
             : { uses: 5, found: 4, detections: 4, correct: 4, precision: 1, recall: 0.8, f1: 0.889, energy_ratio: 0.93 },
+          ...(a.teacher.mode === "state" ? connectedOf(a, fresh) : {}),
+        };
+      }
+      // what a connected appliance's learning adds (#79), invented
+      function connectedOf(a, fresh) {
+        return {
+          mode: "state",
+          on_states: a.teacher.on_states,
+          program_entity: a.teacher.program_entity ?? null,
+          program_recorded: a.teacher.program_entity ? false : null,
+          learned: fresh
+            ? null
+            : {
+                kind: "steady",
+                band: "long",
+                power_w: 330,
+                duration_s: 6000,
+                uses: 5,
+                runs: 5,
+                recognisable: true,
+                phases: [],
+                source: "state",
+                measured_kwh: 0.55,
+                energy_kwh: 0.52,
+                counter_ratio: 0.95,
+                counter_kwh: 2.6,
+                named_phases: [
+                  { state: "heating", power_w: 340, duration_s: 5400, uses: 5 },
+                  { state: "cooling", power_w: 110, duration_s: 480, uses: 5 },
+                ],
+                programs: [],
+              },
         };
       }
       // the individual devices of a synthetic Energy dashboard (#13)
@@ -609,6 +679,33 @@
         [suggestion("sensor.washer_state", 0.88, ["running"])],
       ];
       // synthetic entities for the entity picker's fallback
+      // connected appliances (#79): invented devices and entities
+      const CONNECTED = {
+        supported: true,
+        devices: [
+          {
+            device_id: "dev-washer",
+            name: "Washer dryer",
+            appliance: null,
+            entities: [
+              { entity_id: "sensor.washer_state", name: "Washing machine state", role: "state", options: ["run", "stop", "pause", "finished"], recorded: true, appliance: null },
+              { entity_id: "sensor.washer_job", name: "Washing machine job", role: "state", options: ["none", "washing", "rinsing", "spinning", "drying", "cooling"], recorded: true, appliance: null },
+              { entity_id: "select.washer_program", name: "Washing machine programme", role: "program", options: ["cotton", "synthetic", "quick"], recorded: false, appliance: null },
+              { entity_id: "sensor.washer_energy", name: "Washing machine energy", role: "energy", options: [], unit: "kWh", recorded: true, appliance: null },
+              { entity_id: "sensor.washer_power", name: "Washing machine power", role: "power", options: [], unit: "W", recorded: true, appliance: null },
+            ],
+            proposal: {
+              entity_id: "sensor.washer_state",
+              on_states: ["run"],
+              phase_entity: "sensor.washer_job",
+              energy_entity: "sensor.washer_energy",
+              program_entity: "select.washer_program",
+              power_entity: "sensor.washer_power",
+            },
+          },
+        ],
+      };
+
       const STATES = Object.fromEntries(
         [
           ["switch.water_heater", "Water heater", null],

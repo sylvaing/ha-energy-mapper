@@ -4,7 +4,7 @@
 // know (a newer add-on) or a finding without the parameters it needs (an
 // older add-on). Pure functions, unit tested.
 
-import { formatEnergy, type LocaleInfo } from "./format.ts";
+import { formatEnergy, formatPower, type LocaleInfo } from "./format.ts";
 import type { StringKey, Translate } from "./i18n.ts";
 import type { Finding } from "./types.ts";
 
@@ -63,6 +63,17 @@ export function findingSentence(
         name,
         declared: formatEnergy(declared, info),
         measured: formatEnergy(measured, info),
+      });
+    }
+    case "flat_power_sensor": {
+      // a power sensor stuck while its device counts energy (#79)
+      const power = num(p.power_w);
+      const energy = num(p.energy_kwh);
+      if (!name || power === undefined || energy === undefined) return null;
+      return t("finding_text_flat_power_sensor", {
+        name,
+        power: formatPower(power, info),
+        energy: formatEnergy(energy, info),
       });
     }
     default:

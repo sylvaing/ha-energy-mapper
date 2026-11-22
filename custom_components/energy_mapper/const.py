@@ -36,6 +36,8 @@ LIVE_WAIT: Final = 25
 TIMEOUT_LIVE: Final = LIVE_WAIT + 15
 # the first add-on with the live view
 LIVE_MIN_ADDON: Final = "0.12.0"
+# the first add-on that learns from a connected appliance's state (#79)
+CONNECTED_MIN_ADDON: Final = "0.14.0"
 
 # settings of the add-on (PUT /api/settings); see energy_mapper/app/settings.py
 SENSOR_KEYS: Final = ("grid_entity", "grid_export_entity", "pv_entity", "battery_entity")

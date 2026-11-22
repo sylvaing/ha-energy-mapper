@@ -7,12 +7,19 @@ import logging
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import selftest
-from appliances import analysis_options, apply_to_registry, examples_of, teachers
+from appliances import analysis_options, apply_to_registry, examples_of, teacher_entities, teachers
 from const import VERSION
-from energy_config import DerivedConfig, derive, tracking_gaps
+from energy_config import (
+    DerivedConfig,
+    constant_power,
+    derive,
+    flat_power_sensors,
+    tracking_gaps,
+    without_flat,
+)
 from examples import status as examples_status
 from ha_client import HAError
 from nilm_core import analyze, parse_numeric
@@ -57,7 +64,7 @@ from suggest import (
     public_candidates,
     unrecorded,
 )
-from teaching import GROUND_TRUTH_KEY, day_truth
+from teaching import GROUND_TRUTH_KEY, STATE, day_state_truth, day_truth, program_signatures
 from teaching import apply as apply_teaching
 from teaching import status as teaching_status
 
@@ -76,6 +83,8 @@ MAX_EMPTY_DAYS = 3
 # entity suggestions (#41): signatures compared per night, at most
 MAX_SUGGESTED_SIGNATURES = 50
 SUGGESTED_STATES = ("proposed", "waiting")
+# unit factors of an energy sensor to kWh (#79)
+ENERGY_UNITS = {"kWh": 1.0, "Wh": 0.001, "MWh": 1000.0}
 
 
 class AnalysisError(Exception):
@@ -190,6 +199,8 @@ class Context:
     attribute_entities: list[str] = field(default_factory=list)
     # the Home Assistant device of the candidates and of the appliances' sources
     devices: dict[str, str] = field(default_factory=dict)
+    # energy sensors read by the analysis: their unit factor to kWh (#79)
+    energy_scales: dict[str, float] = field(default_factory=dict)
 
 
 class Analyzer:
@@ -434,6 +445,8 @@ class Analyzer:
         entities = list(derived.config.entities())
         entities += [t.energy_entity for t in derived.tracked if t.role == "switched"]
         entities += derived.teachers  # the ground truth of the taught appliances (#14)
+        # the operation state, phases, programme and counter of the connected appliances (#79)
+        connected = teacher_entities(self.appliances)
         # entities that may be a signature: not the meters the analysis uses;
         # switched loads and the entities linked to an appliance are (#43): a
         # signature matching one is part of its appliance (a merge)
@@ -445,7 +458,25 @@ class Analyzer:
             s["entity_id"] for a in self.appliances for s in a.get("sources") or [] if s.get("entity_id")
         }
         device_of = devices(snap["registry"], set(found) | set(with_attributes) | loads | sourced)
-        return Context(derived, self.tz, list(dict.fromkeys(entities)), found, with_attributes, device_of)
+        units = {
+            s["entity_id"]: (s.get("attributes") or {}).get("unit_of_measurement") for s in snap["states"]
+        }
+        energy_scales = {e: ENERGY_UNITS.get(units.get(e) or "", 1.0) for e in connected}
+        energy_scales.update(
+            {
+                t.energy_entity: ENERGY_UNITS.get(units.get(t.energy_entity) or "", 1.0)
+                for t in derived.tracked
+            }
+        )
+        return Context(
+            derived,
+            self.tz,
+            list(dict.fromkeys(entities + connected)),
+            found,
+            with_attributes,
+            device_of,
+            energy_scales,
+        )
 
     def _day_max(self, day: str) -> float | None:
         if day not in self._maxima:
@@ -465,6 +496,10 @@ class Analyzer:
         cfg = ctx.derived.config
         start, end = day_bounds(day, ctx.tz)
         histories = self.client.history(ctx.entities, start - cfg.context_s, end)
+        # power sensors that stay flat while their device counts energy (#79):
+        # not sub-meters for this day
+        ctx = self._without_flat(ctx, histories, start, end)
+        cfg = ctx.derived.config
         grid = [ts for ts, _ in parse_numeric(histories.get(cfg.grid_entity, [])) if ts < end]
         in_day = [ts for ts in grid if ts >= start]
         if not in_day:
@@ -478,7 +513,7 @@ class Analyzer:
             histories, cfg, start, end, local_hour=lambda ts: dt.datetime.fromtimestamp(ts, tz).hour
         )
         findings = ctx.derived.findings + tracking_gaps(report, ctx.derived.tracked, histories)
-        truth = self._ground_truth(cfg, histories, start, end, set(ctx.derived.teachers))
+        truth = self._ground_truth(cfg, histories, start, end, set(ctx.derived.teachers), report, ctx)
         if truth:
             report[GROUND_TRUTH_KEY] = truth
         report.update(
@@ -506,11 +541,42 @@ class Analyzer:
             self._self_test_safely(day, ctx, histories, start, end)
         return report
 
-    def _ground_truth(self, cfg, histories, start: float, end: float, read: set[str]) -> list[dict]:
-        """The runs of each teaching sensor on the day (#14)."""
+    def _without_flat(self, ctx: Context, histories: dict, start: float, end: float) -> Context:
+        """The day's context without the power sensors that stay flat while
+        their energy counter increases (#79): their device is ``energy_only``
+        that day, with a ``flat_power_sensor`` finding. Only the energy
+        counters of the devices whose power did not move are read (one
+        request, rarely)."""
+        try:
+            flat = constant_power(ctx.derived.tracked, histories, start, end)
+            if not flat:
+                return ctx
+            wanted = [t.energy_entity for t in flat if t.energy_entity not in histories]
+            energy = {**histories, **(self.client.history(wanted, start, end) if wanted else {})}
+            found = flat_power_sensors(flat, energy, start, end, ctx.derived.config.scales)
+        except HAError as err:
+            _LOGGER.warning("energy counters of the flat power sensors not read: %s", err)
+            return ctx
+        if not found:
+            return ctx
+        for f in found:
+            _LOGGER.info("%s", f.detail)
+        return replace(ctx, derived=without_flat(ctx.derived, found))
+
+    def _ground_truth(
+        self, cfg, histories, start: float, end: float, read: set[str], report: dict, ctx: Context
+    ) -> list[dict]:
+        """The runs of each teaching sensor (#14) or connected appliance (#79)
+        on the day."""
         out = []
         for appliance, teacher in teachers(self.appliances):
             entity = teacher["entity_id"]
+            if teacher.get("mode") == STATE:
+                if entity not in ctx.entities:
+                    continue  # declared after this analysis was prepared
+                scale = ctx.energy_scales.get(teacher.get("energy_entity") or "", 1.0)
+                out.append(day_state_truth(appliance["key"], teacher, histories, report, start, end, scale))
+                continue
             if entity not in read:
                 continue  # declared after this analysis was prepared
             scale = cfg.scales.get(entity, 1.0)
@@ -658,10 +724,17 @@ class Analyzer:
             sig, created, learned = apply_teaching(
                 appliance, summaries, registry, self.clock(), self.smallest_step_w, self.registry_config
             )
-            if created:
+            # the other programmes of a connected appliance (#79)
+            others = program_signatures(appliance, learned, registry, self.clock(), self.registry_config)
+            if created or any(new for _, new in others):
                 self.store.save_registry(registry)
         _LOGGER.info("signature %s learned for %s (%s)", sig["id"], key, "new" if created else "existing")
-        return {"signature": sig, "created": created, "learned": learned}
+        return {
+            "signature": sig,
+            "created": created,
+            "learned": learned,
+            "programs": [{"signature": s, "created": new} for s, new in others],
+        }
 
     # -- labelled examples (#17) ------------------------------------------------
     def examples(self) -> dict:

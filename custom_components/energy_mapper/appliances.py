@@ -16,7 +16,10 @@ Several sources are the result of a merge: their energy is added.
 An appliance may have a **teacher** for a while (#14): a power sensor that
 measures it (a temporary smart plug). The add-on does not subtract it and
 learns the appliance's signature from it; when the learning is finished the
-signature becomes a source and the teacher goes away.
+signature becomes a source and the teacher goes away. A connected appliance
+(#79) teaches from its operation state instead (``mode: "state"``, with the
+states in which it runs and optionally its phase state, energy counter and
+programme state): the add-on measures each of its runs on the house curve.
 
 An appliance may also keep **labelled examples** (#17): at most
 ``MAX_EXAMPLES`` uses the user pointed at in the panel's live view
@@ -128,17 +131,47 @@ def signature(sig: Mapping[str, Any]) -> Source:
     )
 
 
+TEACHER_POWER = "power"
+TEACHER_STATE = "state"
+_STATE_ENTITIES = ("phase_entity", "energy_entity", "program_entity")
+
+
 @dataclass(frozen=True)
 class Teacher:
-    """A power sensor teaching the appliance its signature (#14)."""
+    """What teaches the appliance its signature: a power sensor (#14), or the
+    operation state of a connected appliance (#79, ``mode`` ``state``, with
+    the states in which it runs and its optional phase state, energy counter
+    and programme state)."""
 
     entity_id: str
     since: float | None = None  # unix time the learning started
+    mode: str = TEACHER_POWER
+    on_states: tuple[str, ...] = ()
+    phase_entity: str | None = None
+    energy_entity: str | None = None
+    program_entity: str | None = None
+
+    @property
+    def is_state(self) -> bool:
+        return self.mode == TEACHER_STATE
+
+    @property
+    def entities(self) -> tuple[str, ...]:
+        """Every entity it reads."""
+        return tuple(
+            e for e in (self.entity_id, self.phase_entity, self.energy_entity, self.program_entity) if e
+        )
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"entity_id": self.entity_id}
         if self.since is not None:
             out["since"] = self.since
+        if self.is_state:
+            out["mode"] = TEACHER_STATE
+            out["on_states"] = list(self.on_states)
+            for key in _STATE_ENTITIES:
+                if getattr(self, key):
+                    out[key] = getattr(self, key)
         return out
 
     @classmethod
@@ -146,7 +179,16 @@ class Teacher:
         if not data or not data.get("entity_id"):
             return None
         since = data.get("since")
-        return cls(str(data["entity_id"]), float(since) if since is not None else None)
+        since = float(since) if since is not None else None
+        if data.get("mode") != TEACHER_STATE:
+            return cls(str(data["entity_id"]), since)
+        return cls(
+            str(data["entity_id"]),
+            since,
+            TEACHER_STATE,
+            tuple(str(s) for s in data.get("on_states") or ()),
+            *(str(data[k]) if data.get(k) else None for k in _STATE_ENTITIES),
+        )
 
 
 @dataclass(frozen=True)

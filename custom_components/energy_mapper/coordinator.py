@@ -26,6 +26,8 @@ from .appliances import (
     KIND_SIGNATURE,
     KIND_SUBMETER,
     SUBENTRY_TYPE,
+    TEACHER_POWER,
+    TEACHER_STATE,
     Appliance,
     Source,
     Teacher,
@@ -39,6 +41,7 @@ from .appliances import (
     signature_group,
 )
 from .const import (
+    CONNECTED_MIN_ADDON,
     DOMAIN,
     HOURLY_CONCURRENCY,
     ISSUE_REVIEW,
@@ -713,28 +716,88 @@ class EnergyMapperCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise ReviewError("not_found", f"no appliance {key}")
         return found
 
-    async def async_teach(self, key: str, entity_id: str) -> Appliance:
-        """Learn the appliance ``key`` from a power sensor that measures it
-        (a temporary smart plug): the add-on stops subtracting the sensor and
-        keeps its runs as the appliance's ground truth."""
-        self.check_power_sensor(entity_id)
-        if not (await self.async_teaching())["supported"]:
-            raise ReviewError("not_supported", "the Energy Mapper add-on is too old to learn from a sensor")
+    def addon_at_least(self, version: str) -> bool:
+        """Whether the add-on's last health answer says ``version`` or newer
+        (unknown: assumed so, the add-on refuses what it does not know)."""
+        current = (self.data or {}).get("version") if isinstance(self.data, Mapping) else None
+        if not current:
+            return True
+        try:
+            return tuple(int(x) for x in str(current).split(".")[:3]) >= tuple(
+                int(x) for x in version.split(".")
+            )
+        except ValueError:
+            return True
+
+    def check_state_teacher(self, teacher: Teacher) -> None:
+        """A connected appliance's teacher (#79): existing entities, the
+        states in which it runs, a counter that is an energy sensor."""
+        for entity_id in teacher.entities:
+            if self.hass.states.get(entity_id) is None:
+                raise ReviewError("invalid_format", f"{entity_id}: no such entity")
+        if not teacher.on_states or any(not s or len(s) > 100 for s in teacher.on_states):
+            raise ReviewError("invalid_format", "expected the states in which the appliance runs")
+        if teacher.energy_entity and teacher.energy_entity.split(".", 1)[0] != "sensor":
+            raise ReviewError("invalid_format", f"{teacher.energy_entity}: expected an energy sensor")
+
+    async def async_teach(
+        self,
+        key: str | None,
+        entity_id: str,
+        *,
+        mode: str = TEACHER_POWER,
+        on_states: Iterable[str] = (),
+        phase_entity: str | None = None,
+        energy_entity: str | None = None,
+        program_entity: str | None = None,
+        name: str | None = None,
+        track: bool = False,
+    ) -> Appliance:
+        """Learn the appliance ``key`` from what measures it: a power sensor
+        (a temporary smart plug, #14), whose power the add-on stops
+        subtracting and keeps as the appliance's ground truth; or the
+        operation state of a connected appliance (#79, ``mode`` ``state``),
+        whose runs the add-on measures on the house curve. Without ``key``, a
+        new appliance ``name`` is created with this teacher (and, with
+        ``track``, its operation state as a switched-load source)."""
+        now = dt_util.utcnow().timestamp()
+        if mode == TEACHER_STATE:
+            states = tuple(dict.fromkeys(s.strip() for s in on_states if s and s.strip()))
+            teacher = Teacher(
+                entity_id, now, TEACHER_STATE, states, phase_entity, energy_entity, program_entity
+            )
+            self.check_state_teacher(teacher)
+        else:
+            teacher = Teacher(entity_id, now)
+            self.check_power_sensor(entity_id)
+        if not (await self.async_teaching())["supported"] or (
+            teacher.is_state and not self.addon_at_least(CONNECTED_MIN_ADDON)
+        ):
+            raise ReviewError("not_supported", "the Energy Mapper add-on is too old to learn from this")
         entry = self.config_entry
         async with self._sync_lock:
-            target_id, target = self._target(key)
-            for other in self.appliances_by_subentry().values():
-                if other.key == key:
-                    continue
-                if (other.teacher and other.teacher.entity_id == entity_id) or any(
-                    s.id == entity_id for s in other.sources
-                ):
-                    raise ReviewError("already_linked", f"{entity_id} is already linked to {other.name}")
-            taught = replace(target, teacher=Teacher(entity_id, dt_util.utcnow().timestamp()))
-            self.hass.config_entries.async_update_subentry(
-                entry, appliance_subentries(entry)[target_id], data=taught.subentry_data()
-            )
-        _LOGGER.info("%s learns from %s", target.name, entity_id)
+            if key is None:
+                name = (name or "").strip()
+                if not name or len(name) > 100:
+                    raise ReviewError("invalid_format", "expected a name of 1 to 100 characters")
+                self.check_teacher_free(entity_id)
+                sources = [relay(entity_id, teacher.on_states)] if track and teacher.is_state else []
+                self.check_free(*sources)
+                taught = self.async_add_appliance(name, sources, (), teacher)
+            else:
+                target_id, target = self._target(key)
+                for other in self.appliances_by_subentry().values():
+                    if other.key == key:
+                        continue
+                    if (other.teacher and other.teacher.entity_id == entity_id) or any(
+                        s.id == entity_id for s in other.sources
+                    ):
+                        raise ReviewError("already_linked", f"{entity_id} is already linked to {other.name}")
+                taught = replace(target, teacher=teacher)
+                self.hass.config_entries.async_update_subentry(
+                    entry, appliance_subentries(entry)[target_id], data=taught.subentry_data()
+                )
+        _LOGGER.info("%s learns from %s (%s)", taught.name, entity_id, teacher.mode)
         await self._async_push(self.appliances_by_subentry().values())
         return taught
 
@@ -753,15 +816,23 @@ class EnergyMapperCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             target_id, target = self._target(key)
             sources = target.sources
             if answer is not None and target.teacher is not None:
-                source = signature(answer["signature"])
+                # the learned signature, and those of the other programmes of
+                # a connected appliance (#79)
+                learned = [signature(answer["signature"])] + [
+                    signature(p["signature"]) for p in answer.get("programs") or [] if p.get("signature")
+                ]
                 others = [a for a in self.appliances_by_subentry().values() if a.key != key]
-                owner = next((a for a in others if a.has(source)), None)
-                if owner is not None:
-                    raise ReviewError("already_linked", f"{source.id} is already linked to {owner.name}")
+                for source in learned:
+                    owner = next((a for a in others if a.has(source)), None)
+                    if owner is not None:
+                        raise ReviewError("already_linked", f"{source.id} is already linked to {owner.name}")
                 teacher = target.teacher.entity_id
-                sources = tuple(s for s in sources if not (s.type == KIND_SUBMETER and s.id == teacher))
-                if not any((s.type, s.id) == (source.type, source.id) for s in sources):
-                    sources = (*sources, source)
+                if not target.teacher.is_state:
+                    # the plug goes away; a connected appliance keeps its state source
+                    sources = tuple(s for s in sources if not (s.type == KIND_SUBMETER and s.id == teacher))
+                for source in learned:
+                    if not any((s.type, s.id) == (source.type, source.id) for s in sources):
+                        sources = (*sources, source)
                 self._reimport.add(key)
             done = replace(target, sources=sources, teacher=None)
             self.hass.config_entries.async_update_subentry(
@@ -772,6 +843,9 @@ class EnergyMapperCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self._async_push(self.appliances_by_subentry().values())
         if answer is not None:
             await self.client.review_decision(answer["signature"]["id"], "validate", key)
+            for item in answer.get("programs") or []:
+                if (item.get("signature") or {}).get("id"):
+                    await self.client.review_decision(item["signature"]["id"], "validate", key)
             await self.async_update_review()
         return done, answer
 
