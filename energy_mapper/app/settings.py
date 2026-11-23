@@ -26,7 +26,8 @@ MAX_NAME = 100
 
 # power sensors: an entity id of the sensor domain, or absent (automatic)
 SENSOR_KEYS = ("grid_entity", "grid_export_entity", "pv_entity", "battery_entity")
-BOOL_KEYS = ("grid_invert", "battery_invert")
+# adaptive_threshold (#88): the noise-adaptive step threshold, off by default
+BOOL_KEYS = ("grid_invert", "battery_invert", "adaptive_threshold")
 # key: (minimum, maximum, integer)
 NUMBER_KEYS = {
     "step_threshold_w": (50, 10000, False),
@@ -73,6 +74,7 @@ DEFAULTS: dict = {
     "battery_invert": False,
     "step_threshold_w": 300.0,
     "night_step_threshold_w": None,
+    "adaptive_threshold": False,
     "peak_threshold_w": None,
     "review_min_uses": 5,
     "review_min_days": 3,

@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.17.0
+
+- Step threshold adapted to the noise of the curve (#88), behind the new
+  option `adaptive_threshold`, **off by default** (experimental). The fixed
+  thresholds were chosen for the noisiest hour of the curve and apply at
+  3 a.m. too, where a freezer's 80 W steps are twenty times the noise and
+  were never found. With the option, the noise is measured along the curve
+  (the robust spread, over the last 30 minutes, of the changes the step
+  detector looks at) and a change smaller than the fixed thresholds is also
+  kept when it reaches `max(40 W, 4 × noise)`: about 40 W in a quiet night,
+  100 to 200 W under a changing sky, nothing where the curve is noisier.
+- Such **small uses** are kept apart: listed in the daily report
+  (`small_uses`: `start`, `end`, `power_w`, `on_w`, `off_w`), never in the
+  activations, the signatures, the registry, the review, the breakdown of the
+  curve nor the statistics. Everything else is found exactly as without the
+  option (same steps, activations, signatures and energies), and the night
+  threshold still decides which uses are normal ones. Grouping the small uses
+  that come back regularly (a fridge, a freezer) and proposing those is the
+  next step (#89).
+- The live view applies the same rule and gives the same steps as the night;
+  its feed does not show the small uses.
+- "Too low for the whole-house curve" is now decided from the measured noise,
+  not from the thresholds. Every report carries the meters' quality
+  (`quality.meters`: reporting intervals of the grid and solar meters, noise
+  of the curve apart from and during the solar hours, and `visible_w`, the
+  smallest step the curve can show), whatever the option. Learning from a
+  measured device and the self-test add `visible` to the learned signature:
+  an appliance under the thresholds but above the noise is "seen on the
+  whole-house curve, too small to be tracked yet" (integration 0.14.0 for
+  the text); it is still not taught nor tested, since small uses are not
+  tracked.
+- Integration 0.14.0: *Threshold adapted to the noise of the curve* in the
+  options (*Thresholds*), English and French.
+- `tools/benchmark.py`: the meters' quality comes from the engine
+  (`nilm_core/quality.py`); `--adaptive`; and a second score that needs no
+  signature registry (a use of a hidden device is found when uses of similar
+  power cover half of it), overall and apart from / during the solar hours,
+  in the table, the JSON result and `--compare`.
+- On the reference installation (8 days), with the option: 52 % of a hidden
+  freezer's 110 cycles are found (56 % without solar production, 45 % with)
+  and 82 % of the detections are right (92 % and 50 %); 42 small uses a day
+  are listed; signatures, steps, energy shares and the other devices' scores
+  are unchanged.
+
 ## 0.16.0
 
 - The regular bursts of a thermostat are one cycling use (#87). A heater

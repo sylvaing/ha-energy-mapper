@@ -608,6 +608,11 @@ class LiveDetector:
     confirmed, or cancelled with ``explained_by`` the sub-meter. Without
     such a sub-meter nothing waits. The sub-meters are read against the
     points the stream read (the solar doubt set aside), as in the night.
+
+    With the noise-adaptive threshold (``config.adaptive_threshold``, #88),
+    the stream also gives the night's ``low`` steps. They are listed in the
+    updates (``LiveStep.low``) and go no further: no event, no candidate.
+    The feed is what it is with the option off.
     """
 
     PV_KEEP_S = 600.0
@@ -633,6 +638,7 @@ class LiveDetector:
             interval_s=interval_s,
             low_threshold=low,
             low_ok=self._pv_quiet if low is not None else None,
+            noise=config.noise_config(),
         )
         # the solar doubt (#86): the samples wait here until theirs is known
         self.hold = SolarHold(solar_doubt_limit(config.step_threshold_w)) if config.pv_entity else None
@@ -740,6 +746,11 @@ class LiveDetector:
             self._handle(st, now, update, changed)
 
     def _handle(self, st: LiveStep, now: float, update: LiveUpdate, changed: dict) -> None:
+        if st.low:
+            # a low step of the adaptive threshold (#88): kept apart as in
+            # the night (no event, no explanation), only listed
+            update.steps.append(st)
+            return
         if st.state == CONFIRMED and self.echoes is not None:
             # the night's explanation, on the same steps in the same order;
             # held (still provisional for the feed) until it is final

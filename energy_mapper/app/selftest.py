@@ -126,6 +126,7 @@ def hide_and_find(
     step_threshold_w: float = 300.0,
     config: RegistryConfig | None = None,
     gt_config: GroundTruthConfig | None = None,
+    visible_w: float | None = None,
 ) -> dict:
     """One test: the device's runs on the day (``points``, its readings in
     W), the signature learned from them and from ``previous`` runs, and the
@@ -134,7 +135,7 @@ def hide_and_find(
     curve can show. ``registry`` is not modified."""
     gt_config = gt_config or GroundTruthConfig()
     runs, covered = runs_of(points, start, end, gt_config)
-    learned = learn([*previous, *runs], step_threshold_w, gt_config)
+    learned = learn([*previous, *runs], step_threshold_w, gt_config, visible_w)
     test: dict = {
         "day": day,
         "entity_id": entity_id,

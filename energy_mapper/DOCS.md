@@ -83,6 +83,7 @@ below (see `PUT /api/settings`).
 | `switched_loads` | Energy dashboard | Appliances driven by a switch. |
 | `step_threshold_w` | `300` | Smallest power change considered as an appliance switching. |
 | `night_step_threshold_w` | empty (off) | Smaller steps, down to this value, are also kept while the solar panels produce nothing: see [Night threshold](#night-threshold). Only with a PV sensor. |
+| `adaptive_threshold` | `false` | Experimental: smaller power changes are also kept where they stand out of the measured noise of the curve, and listed apart: see [Threshold adapted to the noise](#threshold-adapted-to-the-noise). |
 | `peak_threshold_w` | 80 % of the recent maximum | Fixed threshold of the notable peaks (for example the subscribed power). |
 | `live_view` | `true` | The [live view](#live-view) of the panel's *Live* tab. It runs only while the tab is open; `false` turns it off entirely (kill switch). Add-on option only. |
 | `log_level` | `info` | `debug`, `info`, `warning` or `error`. |
@@ -154,6 +155,39 @@ and applies to the nightly analysis and to the live view alike. **It only
 applies with a PV sensor** (Energy dashboard or `pv_entity`): without one it
 has no effect, so lower `step_threshold_w` instead.
 
+### Threshold adapted to the noise
+
+The thresholds above are fixed: they were chosen for the noisiest hour of the
+curve and apply in the middle of the night too, when the curve moves by a few
+watts and a 70 W compressor stands out clearly. `adaptive_threshold` (add-on
+0.17.0+, `false` by default, experimental) adds a threshold that follows the
+measured noise:
+
+- the noise is measured all along the curve, over the last 30 minutes (the
+  robust spread of the changes the step detector looks at);
+- a power change smaller than the thresholds above is also kept when it is at
+  least 40 W and 4 times that noise: about 40 W in a quiet night, 100 to
+  200 W under a changing sky, nothing more where the curve is noisier than
+  that;
+- these **small uses** are listed apart in the daily report (`small_uses`).
+  They are not signatures: they are not proposed for review, not tracked as
+  appliances and not counted in the breakdown of the curve. A real curve has
+  tens of them a day; a later version will group those that come back
+  regularly (a fridge, a freezer) and propose only those.
+
+Everything else is analysed exactly as without the option: the same steps,
+activations, signatures and energies, in the nightly analysis and in the live
+view (whose feed does not show the small uses). The night threshold keeps its
+meaning: what it keeps is a normal use, proposed for review as before.
+
+The report also gives, whatever the option, how well the meters let the curve
+be read (`quality.meters`): the noise of the curve apart from and during the
+solar hours, and the smallest step it can show (`visible_w`). An appliance
+measured by a plug is said *too low for the whole-house curve* from that
+figure, no longer from the thresholds: under the thresholds but above the
+noise, the panel says that the curve shows it and that appliances this small
+are not tracked yet.
+
 ### Solar readings that come late
 
 The house load is the grid power plus the solar production, read from two
@@ -199,6 +233,10 @@ Each report is a JSON document with:
   activation with `multiphase: true` and its `phases` (its `power_w` is its
   mean power); the activations inside it (its heating phases) are not
   listed again;
+- `small_uses` (add-on 0.17.0+, only with `adaptive_threshold`): the uses
+  under the thresholds that stand out of the noise of the curve, each with
+  `start`, `end`, `power_w`, and the size of its two steps `on_w` and
+  `off_w`. They are in no other field of the report;
 - `peaks`: the day's top episodes (up to 5, above 80 % of the day's own
   maximum, so a normal day always has some) and what was running
   (`registry_id` on the signature parts). `notable` is `true` when the
@@ -212,7 +250,13 @@ Each report is a JSON document with:
   0.16.0+), `solar_held` (the readings set aside because their solar value
   was about to move) and `solar_interval_s` (how long the solar sensor takes
   to report a change of the production, `null` on a day without enough
-  changes);
+  changes); `meters` (add-on 0.17.0+): the reporting intervals of the grid
+  meter and of the solar meter while it produces (`grid`, `solar`:
+  `median_s`, `p90_s`), the step detector's window (`window_s`), the noise of
+  the curve apart from the solar hours and during them (`noise_w.no_solar`,
+  `noise_w.solar`, in W; `null` with too few readings) and the smallest step
+  the curve can show at its quietest (`visible_w`); with `adaptive_threshold`,
+  `low_steps` (the steps kept under the thresholds);
 - `ground_truth` (add-on 0.11.0+, only while an appliance learns from a
   sensor): per taught appliance, `key`, `entity_id`, its `runs` that day
   (`start`, `end`, `energy_kwh`, `power_w`, `max_w`, `kind`, `duty`, and
@@ -425,6 +469,7 @@ Accepted keys (all optional; `null`, `""` and `[]` mean "absent"):
 | `excluded_switched_loads` | List of entity ids: switches of the Energy dashboard not measured as switched loads (their estimate is subtracted like any other); a switched load of `switched_loads` or of an appliance is still measured |
 | `step_threshold_w` | 50 to 10000 |
 | `night_step_threshold_w` | 50 to the step threshold (that of the settings, else of the add-on options, else 300) |
+| `adaptive_threshold` | `true` / `false` (add-on 0.17.0+) |
 | `peak_threshold_w` | 100 to 100000 |
 | `analysis_time` | `HH:MM` (or `HH:MM:SS`, stored as `HH:MM`); applies after the next analysis |
 | `backfill_days` | 0 to 365 |
@@ -604,7 +649,11 @@ from the stored days taught by that sensor:
 - **Learned signature**: the most frequent kind; its median power while on and
   duration band (steady), on-time, period and duty (cycling), or the template
   of its most frequent programme (multi-phase). `recognisable` is false below
-  the step threshold: the curve cannot show it.
+  the step threshold: the analysis does not track it. `visible` (add-on
+  0.17.0+) tells whether the curve can show it at all, from the noise
+  measured on the last 14 analysed days (`quality.meters.visible_w`): false
+  is "too low for the whole-house curve"; before any report has the figure it
+  equals `recognisable`.
 - **Signature**: the registry signature it is: the one its uses are matched to
   (same group, power within 12 %), or for a multi-phase one the nearest
   template within the cycle distance. `in_registry: false` when there is none
@@ -669,7 +718,9 @@ previous tests, then resolved in the registry, or, since a subtracted device
 never reaches the registry, evaluated as the expected signature it would be.
 Its detections in the hidden day are compared with the runs (precision,
 recall, energy). A signature below the step threshold is not looked for (no
-hidden analysis): the device is reported as too low for the curve.
+hidden analysis): the device is reported as too low for the curve, or, when
+the measured noise of the curve lets it show (`learned.visible`, add-on
+0.17.0+), as seen on the curve but too small to be tracked yet.
 
 `GET /api/self_test` answers, over the last 60 days:
 
@@ -953,6 +1004,8 @@ the integration is set up with the address of the service.
 - Appliances below `step_threshold_w` (or, while the solar panels produce
   nothing, below `night_step_threshold_w`) and loads whose power varies
   continuously (EV chargers, inverter heat pumps) are not recognised well yet.
+  With `adaptive_threshold` the smaller uses are found where the curve is
+  quiet and listed apart (`small_uses`); they are not named nor tracked yet.
   Multi-phase appliances have a first version: two of them running at once,
   or a low load running next to a cycle, blur their cycles. See the
   [README](https://github.com/sylvaing/ha-energy-mapper#limits) for the full

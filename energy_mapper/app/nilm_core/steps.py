@@ -18,6 +18,8 @@ class Step:
     after: float
     explained_by: str | None = None  # name of a known load or of a sub-meter (#85), if any
     used: bool = False  # consumed by an activation
+    # under the fixed threshold: kept only by the noise-adaptive threshold (#88)
+    low: bool = False
 
 
 WINDOW_S = 20.0  # the detector's windows on a fast meter (see adapted_windows)
@@ -205,6 +207,162 @@ def hold_doubtful(
     return out + hold.flush()
 
 
+# the noise-adaptive threshold (#88): the fixed thresholds were chosen for the
+# worst hour of the curve (a cloudy midday) and apply at 3 a.m. too. With the
+# option on, a change smaller than them is kept as a **low** step when it
+# stands out of the noise measured around it: at least
+# ``max(floor_w, k x noise)``, the noise being the robust spread of the
+# detector's own statistic (the difference of the medians after and before a
+# reading) over the readings of the last ``window_s``.
+@dataclass(frozen=True)
+class NoiseConfig:
+    """The noise-adaptive threshold (#88)."""
+
+    window_s: float = 1800.0  # the noise is measured over the readings of this long before
+    k: float = 4.0  # a low step is at least this many times the noise
+    floor_w: float = 40.0  # ... and at least this, however quiet the curve
+    # under this many readings in the window the noise is not known: no low step
+    min_readings: int = 30
+
+    def threshold(self, noise_w: float | None) -> float | None:
+        """The smallest low step for a measured noise (None: not known)."""
+        return None if noise_w is None else max(self.floor_w, self.k * noise_w)
+
+
+NOISE = NoiseConfig()
+ROBUST_SIGMA = 1.4826  # x the median absolute value: the standard deviation of a normal noise
+
+
+class NoiseTracker:
+    """The noise of the curve around the last reading: ``ROBUST_SIGMA`` x the
+    median of ``|d|`` over the readings of the last ``window_s``, ``d`` being
+    the detector's statistic at each reading (:meth:`push`, in time order).
+    An appliance that switches moves ``d`` at a few readings only: the
+    median does not see it. One that cycles for half an hour, or a changing
+    sky, raises it, and the threshold with it. Causal: the nightly analysis
+    and the live view give it the same readings in the same order. It
+    follows a change of the noise with a delay (half the window for a
+    sudden one)."""
+
+    def __init__(self, config: NoiseConfig = NOISE):
+        self.config = config
+        self._recent: deque[tuple[float, float]] = deque()
+        self._sorted: list[float] = []
+
+    def push(self, ts: float, d: float) -> None:
+        a = abs(d)
+        self._recent.append((ts, a))
+        bisect.insort(self._sorted, a)
+        while self._recent[0][0] <= ts - self.config.window_s:
+            _, old = self._recent.popleft()
+            del self._sorted[bisect.bisect_left(self._sorted, old)]
+
+    @property
+    def noise_w(self) -> float | None:
+        """None under ``min_readings`` readings in the window."""
+        n = len(self._sorted)
+        if n < self.config.min_readings:
+            return None
+        return ROBUST_SIGMA * self._sorted[(n - 1) // 2]
+
+    @property
+    def threshold_w(self) -> float | None:
+        """The smallest low step now (None: the noise is not known)."""
+        return self.config.threshold(self.noise_w)
+
+
+class StepMerger:
+    """Merges the candidates of the adaptive detector, given in time order
+    (:meth:`add`), and gives the steps in time order.
+
+    The candidates of the fixed thresholds are merged exactly as
+    :func:`detect_steps` merges them without the option, among themselves
+    only: the steps that are not low are those found with the option off.
+    The low candidates are merged among themselves, per direction (the
+    largest of those closer than ``merge_s`` is kept), and one within
+    ``merge_s`` of a candidate of the fixed thresholds of the same direction
+    is dropped: it is a part of that step.
+    """
+
+    def __init__(self) -> None:
+        self._last: Step | None = None  # of the fixed thresholds, may still be merged
+        self._near: dict[bool, float] = {}  # per direction: the last candidate of the fixed thresholds
+        self._low: dict[bool, Step] = {}  # per direction: the low step that may still be merged
+        self._ready: list[Step] = []  # final, not given yet (a step before them may still come)
+
+    def add(self, c: Step, merge_s: float) -> None:
+        up = c.delta > 0
+        if c.low:
+            near = self._near.get(up)
+            if near is not None and c.ts - near < merge_s:
+                return
+            last = self._low.get(up)
+            if last is not None and c.ts - last.ts < merge_s:
+                if abs(c.delta) > abs(last.delta):
+                    self._low[up] = c
+                return
+            if last is not None:
+                self._ready.append(last)
+            self._low[up] = c
+            return
+        self._near[up] = c.ts
+        low = self._low.get(up)
+        if low is not None and c.ts - low.ts < merge_s:
+            del self._low[up]
+        last = self._last
+        if last is not None and c.ts - last.ts < merge_s and (last.delta > 0) == up:
+            if abs(c.delta) > abs(last.delta):
+                self._last = c
+            return
+        if last is not None:
+            self._ready.append(last)
+        self._last = c
+
+    def pop(self, horizon: float | None, merge_s: float) -> list[Step]:
+        """The steps that are final and in order once every candidate before
+        ``horizon`` has been added (None: all of them, the end)."""
+        if self._last is not None and (horizon is None or horizon >= self._last.ts + merge_s):
+            self._ready.append(self._last)
+            self._last = None
+        for up in list(self._low):
+            if horizon is None or horizon >= self._low[up].ts + merge_s:
+                self._ready.append(self._low.pop(up))
+        # a pending step is only ever replaced by a later one: nothing final
+        # can come before the earliest of them, nor before the horizon
+        bound = self.pending
+        if horizon is not None and (bound is None or horizon < bound):
+            bound = horizon
+        self._ready.sort(key=lambda s: s.ts)
+        k = len(self._ready) if bound is None else bisect.bisect_left([s.ts for s in self._ready], bound)
+        out, self._ready = self._ready[:k], self._ready[k:]
+        return out
+
+    @property
+    def pending(self) -> float | None:
+        """The time of the earliest step that may still change."""
+        times = [s.ts for s in self._low.values()]
+        if self._last is not None:
+            times.append(self._last.ts)
+        return min(times) if times else None
+
+    @property
+    def waiting(self) -> float | None:
+        """The time of the earliest step not given yet."""
+        times = [s.ts for s in self._ready]
+        if self.pending is not None:
+            times.append(self.pending)
+        return min(times) if times else None
+
+
+def low_candidate(d: float, jump: float, fixed_w: float, threshold_w: float | None) -> bool:
+    """A change ``d`` the fixed thresholds did not keep is a low candidate:
+    under the fixed threshold that applies (``fixed_w``), at least the
+    adaptive one, the reading jumping by 60 % of it as for any candidate."""
+    if threshold_w is None:
+        return False
+    return threshold_w <= abs(d) < fixed_w and jump >= 0.6 * threshold_w
+
+
 class Signal:
     """Fast windowed medians over an irregular series."""
 
@@ -227,6 +385,7 @@ def detect_steps(
     merge_s: float = MERGE_S,
     low_threshold: float | None = None,
     low_ok: Callable[[float], bool] | None = None,
+    noise: NoiseConfig | None = None,
 ) -> list[Step]:
     """Find level changes larger than ``threshold``.
 
@@ -241,11 +400,18 @@ def detect_steps(
     ``low_ok(ts)`` says so (:class:`PvQuiet`: PV produces nothing). Small
     candidates are judged before merging, so where ``low_ok`` is false the
     steps are exactly those found without them.
+
+    ``noise`` (the noise-adaptive threshold, #88): the steps above are found
+    exactly as without it, and the smaller changes that stand out of the
+    measured noise are added as ``low`` steps (:class:`NoiseTracker`,
+    :func:`low_candidate`, :class:`StepMerger`).
     """
     sig = Signal(points)
     window_s, merge_s = adapted_windows(meter_interval(sig.ts), window_s, merge_s)
     low = low_threshold if low_ok is not None and low_threshold and low_threshold < threshold else None
     jump = (low if low is not None else threshold) * 0.6
+    if noise is not None:
+        return _detect_adaptive(sig, threshold, window_s, merge_s, low, low_ok, jump, noise)
     cand: list[Step] = []
     for i in range(1, len(sig.ts)):
         if abs(sig.v[i] - sig.v[i - 1]) < jump:
@@ -266,6 +432,38 @@ def detect_steps(
         else:
             out.append(c)
     return out
+
+
+def _detect_adaptive(
+    sig: Signal,
+    threshold: float,
+    window_s: float,
+    merge_s: float,
+    low: float | None,
+    low_ok: Callable[[float], bool] | None,
+    jump: float,
+    noise: NoiseConfig,
+) -> list[Step]:
+    """:func:`detect_steps` with the noise-adaptive threshold: every reading
+    is measured (the noise is that of all of them), in time order."""
+    tracker = NoiseTracker(noise)
+    merger = StepMerger()
+    for i in range(len(sig.ts)):
+        t = sig.ts[i]
+        before = sig.median(t - window_s, t - 1e-3)
+        after = sig.median(t, t + window_s)
+        if before is None or after is None:
+            continue
+        d = after - before
+        tracker.push(t, d)
+        moved = abs(sig.v[i] - sig.v[i - 1]) if i else 0.0
+        # the night threshold (#77) applies to this change
+        night = low is not None and low <= abs(d) < threshold and low_ok(t)
+        if moved >= jump and (abs(d) >= threshold or night):
+            merger.add(Step(t, d, before, after), merge_s)
+        elif low_candidate(d, moved, low if night else threshold, tracker.threshold_w):
+            merger.add(Step(t, d, before, after, low=True), merge_s)
+    return merger.pop(None, merge_s)
 
 
 # ---------------------------------------------------------------------------
@@ -295,9 +493,12 @@ class LiveStep:
     # set by the live detector (#85): the sub-meter whose misaligned reading
     # made this step; such a step ends cancelled
     explained_by: str | None = None
+    # confirmed only: under the fixed threshold, kept by the noise-adaptive
+    # threshold (#88). Not a line of the feed: such steps are kept apart
+    low: bool = False
 
     def to_step(self) -> Step:
-        return Step(self.ts, self.delta, self.before, self.after, self.explained_by)
+        return Step(self.ts, self.delta, self.before, self.after, self.explained_by, low=self.low)
 
     def to_dict(self) -> dict:
         return {
@@ -310,6 +511,7 @@ class LiveStep:
             "small": self.small,
             "pv_moved": self.pv_moved,
             "explained_by": self.explained_by,
+            "low": self.low,
         }
 
 
@@ -339,6 +541,13 @@ class StepStream:
     after the step (the PV after it), so with them every jump is judged
     once ``max(window_s, low_wait_s)`` has passed, keeping the order (and
     the merges) of the night: confirmation comes later.
+
+    ``noise``: the noise-adaptive threshold of :func:`detect_steps` (#88).
+    Every reading is then measured once its window is complete, in time
+    order, with the night's own :class:`NoiseTracker` and
+    :class:`StepMerger`: the same steps, the ``low`` ones among them, at the
+    same delay as without it. A low step never takes a provisional step:
+    the feed shows what it shows with the option off.
     """
 
     def __init__(
@@ -353,8 +562,12 @@ class StepStream:
         low_threshold: float | None = None,
         low_ok: Callable[[float], bool] | None = None,
         low_wait_s: float = PV_QUIET_S,
+        noise: NoiseConfig | None = None,
     ):
         self.threshold = threshold
+        self.tracker = NoiseTracker(noise) if noise is not None else None
+        self._merger = StepMerger()
+        self._n = 0  # with the adaptive threshold: the next reading to measure
         self.low_threshold = (
             low_threshold if low_ok is not None and low_threshold and low_threshold < threshold else None
         )
@@ -395,7 +608,8 @@ class StepStream:
                 self.interval_s = statistics.median(self._gaps)
                 self.window_s, self.merge_s = adapted_windows(self.interval_s, *self._base)
             if abs(value - self._v[-1]) >= self.smallest * 0.6:
-                self._jumps.append(ts)
+                if self.tracker is None:  # else every reading is measured, in order
+                    self._jumps.append(ts)
                 self._early.append(ts)
         self._ts.append(ts)
         self._v.append(value)
@@ -431,6 +645,11 @@ class StepStream:
             times.append(self._jumps[0])
         if self._last is not None:
             times.append(self._last.ts)
+        if self.tracker is not None:
+            if self._n < len(self._ts):
+                times.append(self._ts[self._n])
+            if self._merger.waiting is not None:
+                times.append(self._merger.waiting)
         return min(times) if times else None
 
     # -- internals ---------------------------------------------------------
@@ -486,6 +705,9 @@ class StepStream:
             out.append(p)
 
     def _judge(self, out: list[LiveStep], final: bool) -> None:
+        if self.tracker is not None:
+            self._judge_adaptive(out, final)
+            return
         latest = self._ts[-1] if self._ts else None
         delay = self._delay()
         while self._jumps and (final or self._jumps[0] + delay < latest):
@@ -517,29 +739,57 @@ class StepStream:
             self._confirm(out, last)
             self._last = None
 
+    def _judge_adaptive(self, out: list[LiveStep], final: bool) -> None:
+        """:func:`_detect_adaptive`, for the readings whose window is complete."""
+        ts, v = self._ts, self._v
+        if not ts:
+            return
+        latest = ts[-1]
+        delay = self._delay()
+        jump = self.smallest * 0.6
+        low = self.low_threshold
+        while self._n < len(ts) and (final or ts[self._n] + delay < latest):
+            i = self._n
+            self._n += 1
+            t = ts[i]
+            before = self._median(t - self.window_s, t - 1e-3)
+            after = self._median(t, t + self.window_s)
+            if before is None or after is None:
+                continue
+            d = after - before
+            self.tracker.push(t, d)
+            moved = abs(v[i] - v[i - 1]) if i else 0.0
+            night = low is not None and low <= abs(d) < self.threshold and self.low_ok(t)
+            if moved >= jump and (abs(d) >= self.threshold or night):
+                self._merger.add(Step(t, d, before, after), self.merge_s)
+            elif low_candidate(d, moved, low if night else self.threshold, self.tracker.threshold_w):
+                self._merger.add(Step(t, d, before, after, low=True), self.merge_s)
+        # every candidate before the next reading to measure is in (a later
+        # reading is not before the last one)
+        horizon = None if final else (ts[self._n] if self._n < len(ts) else latest)
+        for step in self._merger.pop(horizon, self.merge_s):
+            self._confirm(out, step)
+
     def _confirm(self, out: list[LiveStep], step: Step) -> None:
         self.confirmed += 1
         up = step.delta > 0
         near = [p for p in self._open if (p.delta > 0) == up and abs(p.ts - step.ts) < 2 * self.merge_s]
+        if step.low:
+            near = []  # its provisional step, if any, ends cancelled as with the option off
         if near:
             p = min(near, key=lambda p: abs(p.ts - step.ts))
             self._open.remove(p)
         else:
             p = LiveStep(self._new_id(), step.ts, step.delta, step.before, step.after)
         p.ts, p.delta, p.before, p.after = step.ts, step.delta, step.before, step.after
-        p.state, p.small = CONFIRMED, False
+        p.state, p.small, p.low = CONFIRMED, False, step.low
         self._emit(out, p)
 
     def _expire(self, out: list[LiveStep], final: bool) -> None:
         """Cancel the provisional steps no confirmed step can claim any more."""
         if not self._open:
             return
-        latest = self._ts[-1]
-        horizon = latest
-        if self._jumps:
-            horizon = min(horizon, self._jumps[0])
-        if self._last:
-            horizon = min(horizon, self._last.ts)
+        horizon = self.settled
         keep = []
         for p in self._open:
             if final or p.ts + 2 * self.merge_s <= horizon:
@@ -566,7 +816,12 @@ class StepStream:
         for q in (self._jumps, self._early):
             if q:
                 oldest = min(oldest, q[0])
+        if self.tracker is not None and self._n < len(self._ts):
+            oldest = min(oldest, self._ts[self._n])
         k = bisect.bisect_left(self._ts, oldest - self.window_s - 1.0)
+        if self.tracker is not None:
+            k = min(k, self._n - 1)  # the reading before the next one: its jump
         if k > 512:
             del self._ts[:k]
             del self._v[:k]
+            self._n -= k

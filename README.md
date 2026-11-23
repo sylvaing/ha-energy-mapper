@@ -191,6 +191,7 @@ appliances that come from the Energy dashboard, and your changes (excluded, adde
 | | Excluded switches | empty | Switches never measured nor proposed as appliances. Removing a switched appliance of the Energy dashboard from the list above, or deleting an appliance driven by a switch, adds its switch here; remove it to measure it again. An estimate of the Energy dashboard driven by an excluded switch is subtracted like any other estimate. |
 | Thresholds | Smallest appliance (step threshold) | 300 W | Smaller detects more appliances, and more noise. |
 | | Smallest appliance at night | empty | Only with a solar production sensor. Smaller steps, down to this value (50 W to the step threshold, 150 W is a good start), are also kept while the solar panels produce nothing: below 20 W in the minute before and after the step. It catches small evening appliances (TV, lighting) without the false midday steps that come from the solar and grid meters drifting apart. Without a solar sensor it has no effect: lower the step threshold instead. |
+| | Threshold adapted to the noise of the curve | off | Experimental. Power changes smaller than the thresholds above are also kept where they stand out of the measured noise of the curve (at least 40 W and 4 times the noise of the last 30 minutes): a fridge at night, for example. These small uses are listed apart in the daily report; they are not proposed for review nor tracked yet, and everything else is analysed as without the option. |
 | | Fixed peak threshold | empty | Empty: a peak is *notable* above 80 % of the highest power of the recent days. Set a value (for example your subscribed power) to use it instead. |
 | Analysis and storage | Time of the nightly analysis | 04:30 | Applies after the next analysis. |
 | | Past days analysed on start | 30 | Limited by what the recorder still holds. |
@@ -458,7 +459,9 @@ and the statistics never change. The *Appliances* tab shows a *Self-test* card t
 for each device, "found again 83 % of the time" over the last 60 days, the number of tests,
 the uses found, the precision (share of right detections), the energy found, and the trend
 (improving, stable, getting worse). A device with fewer than 5 uses tested shows "not enough
-data yet", and one below the step threshold "too low for the whole-house curve".
+data yet", and one below the step threshold "too low for the whole-house curve" or, when the
+measured noise of the curve lets it show, "seen on the whole-house curve, too small to be
+tracked yet".
 
 | Sensor | Value |
 |---|---|
@@ -514,7 +517,10 @@ on/off states come with real-time detection
 - An **estimation**, not a measurement: errors of a few percent to tens of percent on a
   signature are normal, more during heavy simultaneous use (cooking).
 - The **step threshold** sets the smallest visible appliance (300 W by default). With solar
-  panels, the *smallest appliance at night* lowers it only while they produce nothing.
+  panels, the *smallest appliance at night* lowers it only while they produce nothing. The
+  experimental *threshold adapted to the noise of the curve* (add-on 0.17.0, off by default)
+  also keeps the smaller uses that stand out of the measured noise, down to 40 W in a quiet
+  night, and lists them apart in the daily report: they are not named nor tracked yet.
 - The **meter rate** sets the shortest visible use: an appliance must last at least two meter
   readings.
 - With **solar panels**, the grid and the solar sensors do not report together: since add-on
@@ -566,7 +572,9 @@ Issues and pull requests are welcome. Please open an issue first for anything la
 repository contains **no real consumption data**: tests and the panel's development harness
 use synthetic households only; real recorder extracts stay outside the repository (see
 `tools/replay_csv.py`). `tools/benchmark.py` measures the engine on such an extract, with the
-sub-meters as ground truth: run it before and after a change of the engine.
+sub-meters as ground truth: run it before and after a change of the engine. It scores each
+measured device through the signature registry and, without it, by the uses of similar power
+that cover its runs.
 
 Layout: `energy_mapper/` is the add-on (with the engine library `app/nilm_core/`, standard
 library only), `custom_components/energy_mapper/` the integration, `frontend/` the panel
@@ -816,6 +824,7 @@ viennent du tableau Énergie, et vos changements (exclus, ajoutés ou modifiés)
 | | Interrupteurs exclus | vide | Interrupteurs jamais mesurés ni proposés comme appareils. Retirer de la liste ci-dessus un appareil piloté du tableau Énergie, ou supprimer un appareil piloté, ajoute son interrupteur ici ; retirez-le pour le mesurer à nouveau. Une estimation du tableau Énergie pilotée par un interrupteur exclu est retirée comme toute autre estimation. |
 | Seuils | Plus petit appareil (seuil de marche) | 300 W | Plus bas détecte plus d'appareils, et plus de bruit. |
 | | Plus petit appareil la nuit | vide | Seulement avec un capteur de production solaire. Des marches plus petites, jusqu'à cette valeur (de 50 W au seuil de marche, 150 W pour commencer), sont aussi retenues quand les panneaux solaires ne produisent rien : moins de 20 W la minute avant et après la marche. On voit ainsi les petits appareils du soir (télé, éclairage) sans les fausses marches de midi, dues aux compteurs solaire et réseau qui dérivent un peu l'un de l'autre. Sans capteur solaire, aucun effet : baissez plutôt le seuil de marche. |
+| | Seuil adapté au bruit de la courbe | désactivé | Expérimental. Les variations de puissance plus petites que les seuils ci-dessus sont aussi retenues quand elles se détachent du bruit mesuré de la courbe (au moins 40 W et 4 fois le bruit des 30 dernières minutes) : un réfrigérateur la nuit, par exemple. Ces petits usages sont listés à part dans le rapport quotidien ; ils ne sont ni proposés à la revue ni suivis pour l'instant, et tout le reste est analysé comme sans l'option. |
 | | Seuil fixe des pics | vide | Vide : un pic est *notable* au-dessus de 80 % de la puissance la plus haute des derniers jours. Une valeur (par exemple la puissance souscrite) la remplace. |
 | Analyse et stockage | Heure de l'analyse de nuit | 04:30 | S'applique après la prochaine analyse. |
 | | Jours passés analysés au démarrage | 30 | Limité par ce que le *recorder* contient encore. |
@@ -1115,7 +1124,8 @@ appareil, « retrouvé 83 % du temps » sur les 60 derniers jours, le nombre de 
 utilisations retrouvées, la précision (part des détections justes), l'énergie retrouvée et la
 tendance (en progrès, stable, en baisse). Un appareil avec moins de 5 utilisations testées
 affiche « pas encore assez de données », et un appareil sous le seuil de marche « trop faible
-pour la courbe de la maison ».
+pour la courbe de la maison » ou, quand le bruit mesuré de la courbe le laisse voir, « visible
+sur la courbe de la maison, trop petit pour être suivi pour l'instant ».
 
 | Capteur | Valeur |
 |---|---|
@@ -1177,7 +1187,10 @@ La puissance et l'état de marche en direct viendront avec la détection en temp
   même temps (cuisine).
 - Le **seuil de marche** fixe le plus petit appareil visible (300 W par défaut). Avec des
   panneaux solaires, le *plus petit appareil la nuit* l'abaisse seulement quand ils ne
-  produisent rien.
+  produisent rien. Le *seuil adapté au bruit de la courbe*, expérimental (add-on 0.17.0,
+  désactivé par défaut), retient aussi les usages plus petits qui se détachent du bruit
+  mesuré, jusqu'à 40 W par nuit calme, et les liste à part dans le rapport quotidien : ils ne
+  sont ni nommés ni suivis pour l'instant.
 - Le **rythme du compteur** fixe l'utilisation la plus courte visible : un appareil doit
   durer au moins deux mesures.
 - Avec des **panneaux solaires**, le capteur du réseau et celui du solaire ne donnent pas
@@ -1235,7 +1248,9 @@ Tickets et *pull requests* bienvenus ; ouvrez d'abord un ticket pour tout change
 important. Le dépôt ne contient **aucune donnée de consommation réelle** : les tests et le
 banc de développement du panneau n'utilisent que des foyers synthétiques.
 `tools/benchmark.py` mesure le moteur sur un extrait réel gardé hors du dépôt, avec les
-sous-compteurs comme vérité : à lancer avant et après un changement du moteur. Les commandes de
+sous-compteurs comme vérité : à lancer avant et après un changement du moteur. Il note chaque
+appareil mesuré à travers le registre des signatures et, sans lui, par les usages de puissance
+voisine qui recouvrent ses utilisations. Les commandes de
 test (unittest pour le moteur, pytest pour l'intégration, npm pour le panneau, ruff) et le
 fonctionnement des *pull requests* sont décrits dans la section
 [Contributing](#contributing). Code, commentaires et commits en anglais.

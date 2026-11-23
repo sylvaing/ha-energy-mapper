@@ -5,17 +5,27 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from dataclasses import replace as _copy
 from itertools import pairwise
 
-from .activations import find_cycling_sessions, group_bursts, pair_steps, validate_activations
+from .activations import (
+    Activation,
+    find_cycling_sessions,
+    group_bursts,
+    pair_steps,
+    validate_activations,
+)
 from .cycles import CycleConfig, Phase, attribute, find_cycles
 from .known import RUN, KnownLoad, SwitchedLoadConfig, resolve_switched_load
+from .quality import meter_quality
 from .signal import build_samples, parse_numeric, scaled, sum_series
 from .signatures import cluster
 from .steps import (
     MERGE_S,
+    NOISE,
     PV_QUIET_W,
     WINDOW_S,
+    NoiseConfig,
     PvQuiet,
     Step,
     adapted_windows,
@@ -59,6 +69,12 @@ class AnalysisConfig:
     # the PV production is known and stays near zero around them (no effect
     # without a PV meter; None: off)
     night_step_threshold_w: float | None = None
+    # the noise-adaptive threshold (#88, off by default): changes under the
+    # thresholds above that stand out of the measured noise of the curve are
+    # kept as low steps and paired into small uses, reported apart
+    # (``small_uses``); everything else is found exactly as without it
+    adaptive_threshold: bool = False
+    noise: NoiseConfig = NOISE
     # peaks: the top episodes above peak_relative x the period's maximum;
     # a peak is "notable" above peak_threshold_w, or when None above
     # peak_relative x the highest of the period's maximum and
@@ -83,6 +99,10 @@ class AnalysisConfig:
         """The smallest step the analysis can keep (at least at night)."""
         low = self.low_step_threshold()
         return low if low is not None else self.step_threshold_w
+
+    def noise_config(self) -> NoiseConfig | None:
+        """The adaptive threshold's settings when it is on, else None."""
+        return self.noise if self.adaptive_threshold else None
 
     def entities(self) -> list[str]:
         ids = [self.grid_entity, *self.extra_grid_entities, *self.extra_pv_entities]
@@ -121,7 +141,9 @@ def find_steps(samples, config: AnalysisConfig, held: list[float] | None = None)
     doubt (a late solar reading, #86) are set aside first
     (:func:`~.steps.hold_doubtful`; their times are added to ``held``). The
     steps a sub-meter's misaligned reports left are marked ``explained_by``
-    it (#85, :mod:`.submeters`)."""
+    it (#85, :mod:`.submeters`). With the adaptive threshold (#88), the
+    ``low`` steps are among them (never explained here: see
+    :func:`small_uses`)."""
     return explained_steps(samples, config, held)[0]
 
 
@@ -133,6 +155,13 @@ def explained_steps(
     measures) and the detector's window on these samples. The sub-meters
     are read against the points the detector read (the solar doubt set
     aside), each with what the sub-meters took out of its sample."""
+    steps, echoes, window_s, _, _ = _detect(samples, config, held)
+    return steps, echoes, window_s
+
+
+def _detect(samples, config: AnalysisConfig, held: list[float] | None = None):
+    """:func:`explained_steps`, with the points the detector read and the
+    samples they come from (one per point)."""
     known = [s for s in samples if s.residual is not None]
     points = [(s.ts, s.residual) for s in known]
     low = None
@@ -141,19 +170,65 @@ def explained_steps(
         pv = [s.pv for s in known]
         points = hold_doubtful(points, pv, solar_doubt_limit(config.step_threshold_w), held)
         low = config.low_step_threshold()
+    noise = config.noise_config()
     if low is None:
-        steps = detect_steps(points, threshold=config.step_threshold_w)
+        steps = detect_steps(points, threshold=config.step_threshold_w, noise=noise)
     else:
         quiet = PvQuiet([(s.ts, s.pv) for s in samples if s.pv is not None])
-        steps = detect_steps(points, threshold=config.step_threshold_w, low_threshold=low, low_ok=quiet)
+        steps = detect_steps(
+            points, threshold=config.step_threshold_w, low_threshold=low, low_ok=quiet, noise=noise
+        )
     window_s, merge_s = adapted_windows(meter_interval([t for t, _ in points]), WINDOW_S, MERGE_S)
     echoes = SubmeterEchoes.for_config(config)
     if echoes is not None:
         for (ts, value), sample in zip(points, known, strict=True):
             echoes.add(ts, value, sample.subs)
         for step in steps:
-            echoes.feed(step, window_s, merge_s)
-    return steps, echoes, window_s
+            if not step.low:  # explained as without the low steps
+                echoes.feed(step, window_s, merge_s)
+    return steps, echoes, window_s, points, known
+
+
+SMALL_TOL_W = 20.0  # a small use's two steps agree within this, or the 25 % of pair_steps
+
+
+def small_uses(
+    steps: list[Step],
+    points: list[tuple[float, float]],
+    samples: list,
+    config: AnalysisConfig,
+    base_w: float,
+    window_s: float,
+) -> list[Activation]:
+    """The small uses (#88): the pairs the low steps make, among themselves
+    or with a step of the fixed thresholds that nothing else used.
+
+    ``steps``: every step, once the uses of the fixed thresholds are made
+    (their steps are ``used``); ``points`` and ``samples``: what the
+    detector read (:func:`_detect`). The low steps a sub-meter's misaligned
+    reports left are first marked ``explained_by`` it, as the others were
+    (#85), in a pass of their own: what explains the other steps does not
+    change. The pairs are those of :func:`~.activations.pair_steps`, with a
+    tolerance fit for small powers, and are validated on the load as any
+    use. They exist only because of the adaptive threshold: they are
+    reported apart and never reach the signatures.
+    """
+    low = [s for s in steps if s.low]
+    if not low:
+        return []
+    echoes = SubmeterEchoes.for_config(config)
+    if echoes is not None:
+        _, merge_s = adapted_windows(meter_interval([t for t, _ in points]), WINDOW_S, MERGE_S)
+        for (ts, value), sample in zip(points, samples, strict=True):
+            echoes.add(ts, value, sample.subs)
+        for step in steps:
+            # the other steps are fed as copies: their own explanation stays
+            echoes.feed(step if step.low else _copy(step), window_s, merge_s)
+    free = [s for s in steps if s.low or not (s.used or s.explained_by)]
+    pairs = pair_steps(free, tol_w=SMALL_TOL_W)
+    # two steps of the fixed thresholds were already refused as a use
+    pairs = [a for a in pairs if any(s.low for s in a.steps)]
+    return validate_activations(pairs, points, base_w)
 
 
 def solar_interval(
@@ -269,7 +344,10 @@ def analyze(
     points = [(s.ts, s.residual) for s in samples if s.residual is not None]
 
     held: list[float] = []  # samples set aside: their solar production was in doubt (#86)
-    steps, echoes, window_s = explained_steps(samples, config, held)
+    every_step, echoes, window_s, read, read_from = _detect(samples, config, held)
+    # the low steps of the adaptive threshold (#88) are kept apart: what
+    # follows sees the steps of the fixed thresholds, as without the option
+    steps = [s for s in every_step if not s.low]
     known = resolve_known(histories, config, steps, points, end)
     sessions = find_cycling_sessions(steps)
     pairs = pair_steps(steps)
@@ -287,6 +365,10 @@ def analyze(
     every = attribute(candidates, sessions + pairs, {k: v for k, v in templates.items() if v}, config.cycles)
     acts = [a for a in every if a.end > start and a.start < end]
     signatures = cluster(acts, local_hour=local_hour)
+    adaptive = {}
+    if config.adaptive_threshold:  # only with the option: the report is unchanged without it
+        small = small_uses(every_step, read, read_from, config, base_est, window_s)
+        adaptive = {"small_uses": [_small_use(a) for a in small if a.end > start and a.start < end]}
 
     curve, totals = _curve(samples, config, known, acts, start, end)
     houses = [s.house for s in samples if start <= s.ts < end and s.house is not None]
@@ -337,6 +419,7 @@ def analyze(
             for k in known
         ],
         "activations": [_activation(a) for a in acts],
+        **adaptive,
         "cycles": [c.to_dict() for c in candidates],
         "quality": {
             "samples": len(in_period),
@@ -347,8 +430,27 @@ def analyze(
             "pv_unknown_s": round(pv_unknown_s),
             "max_gap_s": round(max(gaps)) if gaps else None,
             **solar,
+            **(
+                {"low_steps": sum(1 for s in every_step if s.low and start <= s.ts < end)}
+                if config.adaptive_threshold
+                else {}
+            ),
+            "meters": meter_quality(samples, pv if config.pv_entity else None, start, end, config.noise),
             "compute_s": round(time.perf_counter() - t0, 2),
         },
+    }
+
+
+def _small_use(a: Activation) -> dict:
+    """A small use (#88): one use under the fixed thresholds, with the size
+    of its two steps (a compressor starts higher than it stops)."""
+    on, off = a.steps[0], a.steps[-1]
+    return {
+        "start": a.start,
+        "end": a.end,
+        "power_w": round(a.power_w),
+        "on_w": round(on.delta),
+        "off_w": round(-off.delta),
     }
 
 

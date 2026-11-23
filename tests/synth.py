@@ -244,3 +244,46 @@ def plug_history(
         t += every_s
     out.sort(key=lambda r: r[0])
     return out
+
+
+def small_loads_day(
+    day0: float = DAY0,
+    dt: float = 10.0,
+    fridge_w: float = 80.0,
+    quiet_w: float = 4.0,
+    solar_noise: float = 0.0,
+    pv_peak_w: float = 0.0,
+    kettle_w: float = 2000.0,
+    seed: int = 3,
+    grid: str = "sensor.grid_power",
+    pv: str = "sensor.pv_power",
+) -> dict[str, list[tuple[float, str]]]:
+    """A day for the noise-adaptive threshold (#88), from 21:00 the day
+    before.
+
+    * base load 250 W, noise ``quiet_w``;
+    * a fridge (``fridge_w``) on for 20 minutes every hour, all day;
+    * a kettle (``kettle_w``) for 4 minutes at 07:30 and 12:30;
+    * with ``pv_peak_w``, PV from 08:00 to 18:00, both meters reporting
+      together, and a grid reading that is off by ``solar_noise`` x the
+      production (standard deviation): a changing sky, the noisier the more
+      the panels produce.
+    """
+    rnd = random.Random(seed)
+    house = House(base_w=250.0, pv_peak_w=pv_peak_w, noise_w=0.0)
+    loads = [
+        Cycling(day0 - 3 * HOUR, day0 + 24 * HOUR, fridge_w, 1200.0, 2400.0),
+        Steady(day0 + 7.5 * HOUR, day0 + 7.5 * HOUR + 240, kettle_w),
+        Steady(day0 + 12.5 * HOUR, day0 + 12.5 * HOUR + 240, kettle_w),
+    ]
+    g, p = [], []
+    t = day0 - 3 * HOUR
+    while t < day0 + 24 * HOUR:
+        prod = house.pv_at(t)
+        use = house.base_w + sum(x.power_at(t) for x in loads)
+        noise = rnd.gauss(0, quiet_w) + rnd.gauss(0, solar_noise * prod)
+        g.append((t, f"{use - prod + noise:.1f}"))
+        if pv_peak_w:
+            p.append((t, f"{prod:.0f}"))
+        t += dt
+    return {grid: g, pv: p} if pv_peak_w else {grid: g}

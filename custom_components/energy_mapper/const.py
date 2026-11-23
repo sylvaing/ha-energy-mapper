@@ -42,7 +42,10 @@ CONNECTED_MIN_ADDON: Final = "0.14.0"
 # settings of the add-on (PUT /api/settings); see energy_mapper/app/settings.py
 SENSOR_KEYS: Final = ("grid_entity", "grid_export_entity", "pv_entity", "battery_entity")
 LIST_KEYS: Final = ("submeters", "switched_loads")
-BOOL_KEYS: Final = ("grid_invert", "battery_invert")
+INVERT_KEYS: Final = ("grid_invert", "battery_invert")
+# the noise-adaptive step threshold (#88), shown with the thresholds
+ADAPTIVE_THRESHOLD: Final = "adaptive_threshold"
+BOOL_KEYS: Final = (*INVERT_KEYS, ADAPTIVE_THRESHOLD)
 THRESHOLD_KEYS: Final = ("step_threshold_w", "night_step_threshold_w", "peak_threshold_w")
 # entities whose state tells whether an appliance runs
 SWITCH_DOMAINS: Final = [

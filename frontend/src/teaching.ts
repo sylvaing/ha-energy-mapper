@@ -42,6 +42,8 @@ export interface TeachingLearned {
   runs: number;
   phases: PhaseInfo[];
   recognisable: boolean;
+  /** the curve can show it, tracked or not: from its measured noise (#88) */
+  visible?: boolean;
 }
 
 /** What a connected appliance's learning adds (#79). */
@@ -160,7 +162,9 @@ export function teachingLines(
   lines.push(`${days} · ${uses}`);
   if (st.learned) lines.push(t("teach_learned", { name: learnedText(st.learned, t, info) }));
   if (state.blocker === "too_small" && st.learned) {
-    lines.push(t("teach_too_small", { power: roundedPower(st.learned.power_w, info) }));
+    // too low for the curve's noise, or seen by it but under what is tracked
+    const key = st.learned.visible ? "teach_small_untracked" : "teach_too_small";
+    lines.push(t(key, { power: roundedPower(st.learned.power_w, info) }));
   } else if (state.blocker === "conflict" && st.conflict) {
     lines.push(t("teach_conflict", { name: applianceName(st.conflict.appliance) }));
   }

@@ -393,6 +393,88 @@ the analysis is then byte-identical. The offline comparison that chose this rule
 lower threshold everywhere, and against dropping only the steps where PV jumped) is in issue
 #77.
 
+**Noise-adaptive threshold** (#88, `adaptive_threshold`, off by default). The fixed
+thresholds were chosen for the worst hour of the curve, a cloudy midday, and apply at 3 a.m.
+too. On the reference installation the noise of the residual load (the robust spread of the
+detector's own statistic, § 4.7 `quality.meters`) is about 3 W from midnight to 5 a.m., 12 to
+16 W in a calm morning or afternoon, 25 to 55 W under the midday sun, and above 100 W in the
+hours where a thermostat cycles; a freezer's steps (+81 W on, −74 W off, medians at night) are
+twenty times the night noise and were never found. With the option on:
+
+- every reading is measured (`d`, the difference of the medians after and before it), not
+  only those that jump, and a `NoiseTracker` keeps the **noise** around it:
+  1.4826 × the median of `|d|` over the readings of the last 30 minutes (`NoiseConfig.window_s`).
+  A median does not see an appliance that switches (a few readings in thirty minutes); it
+  rises when the sky changes or when something cycles for half an hour. It is causal: it
+  needs nothing after the reading's own window;
+- the adaptive threshold is `max(40 W, 4 × noise)` (`floor_w`, `k`); it is not known before
+  30 readings (`min_readings`);
+- the steps of the fixed thresholds (the step threshold, and the night threshold where PV is
+  quiet) are found **exactly as with the option off**: same candidates, merged among
+  themselves only (`StepMerger`);
+- a change the fixed thresholds do not keep is a **low** candidate when it is at least the
+  adaptive threshold, under the fixed one that applies, and its reading jumps by 60 % of the
+  adaptive threshold (`low_candidate`). Low candidates are merged per direction (the largest
+  of those closer than the merge delay), and one within the merge delay of a candidate of the
+  fixed thresholds of the same direction is a part of that step and is dropped. The result is
+  a `Step` with `low = True`.
+
+So the fixed thresholds are an upper bound: where the curve is noisy (four times the noise
+above them) nothing is added, and the option never removes nor changes a step. The night
+threshold no longer has to be lowered to see small appliances; it keeps one role, deciding
+which steps are *not* low and so reach the review as before.
+
+**Small uses** (`report.small_uses`). What the low steps make is kept apart from everything
+else: `analyze` gives the steps of the fixed thresholds to the switched loads, the cycling
+sessions, the pairing, the bursts, the cycles and the signatures, as without the option (the
+report is then identical, field for field, apart from what follows). Afterwards:
+
+1. the low steps a sub-meter's misaligned reports left are marked `explained_by` it, as the
+   others were (§ 4.12), in a pass of their own on a second `SubmeterEchoes` fed with copies
+   of the other steps, so that what explains those does not change (a 70 W appliance on a
+   plug that reports late leaves ±70 W steps in the residual load);
+2. the low steps left, and the steps of the fixed thresholds nothing used, are paired
+   (`pair_steps`, sizes within 25 % or 20 W), a pair needing at least one low step;
+3. the pairs are validated on the load like any use (§ 4.5).
+
+They are reported as `small_uses` (`{start, end, power_w, on_w, off_w}`: a compressor starts
+higher than it stops) and never reach `activations`, the daily signatures, the registry, the
+review, the curve's breakdown nor the statistics: on a real curve there are tens of them a day
+(42 on the reference installation), most of them unnamed small loads, and naming them one by
+one is not the point. They are the input of the recurring-appliance detector (#89), which
+will propose only the regular groups.
+
+How the parameters were chosen (reference installation, 8 November days, the freezer hidden
+and scored without the registry, § 8.11; 110 cycles of ~64 W):
+
+| | Cycles found | Detections right | Small uses a day |
+|---|---|---|---|
+| `k` = 3 | 64 % | 70 % | 54 |
+| **`k` = 4** | **52 %** | **82 %** | **42** |
+| `k` = 5 | 43 % | 82 % | 36 |
+| `k` = 6 | 34 % | 96 % | 31 |
+| window 15 min (`k` = 5) | 46 % | 76 % | 34 |
+| window 60 min (`k` = 5) | 36 % | 89 % | 36 |
+| floor 30 W / 50 W (`k` = 5) | 43 % / 43 % | 83 % / 86 % | 37 / 34 |
+
+`k` = 4 is the lowest value that does not cost precision. The floor does not matter on this
+curve between 30 and 50 W (the night noise is 3 W, so the floor is what applies at night):
+40 W is half the smallest step looked for and ten times the night noise. A second, shorter
+window that would let the threshold rise within minutes was tried (5 to 15 minutes, the
+higher of the two noises): it lost a quarter of the cycles found for the same precision, so
+the single window is kept. Relaxing the 60 % jump rule for low candidates gave no steady gain
+either. With `k` = 4, by night (no solar production) 56 % of the cycles are found and 92 %
+of the detections are right; in the solar hours 45 % and 50 % (8 detections). The cycles
+missed are those whose step meets a larger one, falls in an hour where the noise is high
+(an evening of cooking, a thermostat cycling), or whose reading does not jump by 60 % of the
+threshold; a detection often covers two cycles (an off-step missed, the on-step paired with
+the next one). Finishing that job is #89's. On synthetic noise alone, a day whose solar hours
+have 40 to 90 W of noise keeps one false low step every other day (against more than 100 at
+a fixed 40 W) and none finds a partner to make a use (`tests/test_adaptive_threshold.py`).
+
+The live view runs the same rule (§ 4.11). Limit: the noise is that of the last 30 minutes,
+so the threshold follows a sudden change of the noise with a delay (about half the window).
+
 **Solar doubt** (#86, `steps.SolarHold`, always on with a PV meter). The house load is
 grid + solar, two meters that do not report together. When a cloud passes, the grid reading
 moves at once and the solar reading comes later: a step appears, then cancels itself. On the
@@ -439,9 +521,22 @@ steps a day of 160 on the same days), and the reverse case of a grid meter slowe
 
 Other users of the threshold: switched loads (§ 4.3) keep `step_threshold_w` in their
 tolerance (`max(20 %, threshold / 2)`), so their matching does not loosen; teaching
-(§ 8.6), the self-test (§ 8.7) and the labelled examples (§ 8.9) call an appliance "too low for the
-whole-house curve" (`recognisable`, `too_small`) below the smallest threshold that applies
+(§ 8.6), the self-test (§ 8.7) and the labelled examples (§ 8.9) do not track an appliance
+(`recognisable` false, `too_small`) below the smallest fixed threshold that applies
 (`smallest_step_w()`: the night one with a PV meter).
+
+**Too low for the whole-house curve** (#88). Whether the curve can show an appliance at all
+is no longer said from the configured threshold but from the measured noise: each report
+carries `quality.meters.visible_w`, the smallest step its curve can show at its quietest
+(`max(40 W, 4 × noise)` with the lowest of the noises measured apart from and during the solar
+hours, `quality.meter_quality`), and the service takes the median of the last 14 reports
+(`quality.visible_w`). `groundtruth.learn` sets `visible` on the learned signature: true at or
+above the fixed threshold, and under it when the power reaches `visible_w`; before any report
+has the figure, `visible` is `recognisable` (the former verdict). So a 70 W freezer on a quiet
+curve is `recognisable: false, visible: true`: the panel says that the curve shows it but that
+appliances this small are not tracked yet, and keeps "too low for the whole-house curve" for
+those under the noise. `recognisable` still decides what is taught and self-tested, since the
+small uses do not reach the registry.
 
 ### 4.3 Switched loads (`known.py`)
 
@@ -830,7 +925,13 @@ flowchart LR
    and gives `pv_quiet`); the order, and so the merges, stay those of the night. With
    sub-meters that measure, a confirmed step is held until no sub-meter can explain it any
    more, 45 s and the merge delay after it, and a step a sub-meter explains is cancelled
-   (§ 4.12). Before
+   (§ 4.12). With the noise-adaptive threshold (§ 4.2, #88), every reading is measured
+   once its window is complete, in time order, by the night's own `NoiseTracker`,
+   `low_candidate` and `StepMerger`, so the stream gives the night's steps, the `low` ones
+   among them, at the same delay as without the option (the noise needs nothing later than
+   the reading's window). A low step never takes a provisional step and goes no further
+   than the update that lists it (`LiveStep.low`): no event, no candidate, and the feed is
+   the one of the option off. Before
    that, a **provisional** step comes after 3 readings (or 10 s), from the median of what is
    known after the jump; neighbouring jumps of the same sign share one; the confirmed step
    takes the id of the nearest provisional one of the same sign, and a provisional step no
@@ -889,7 +990,8 @@ Tests (`tests/test_live.py`): the samples of the stream equal those of `build_sa
 days give exactly the steps of `detect_steps` (noise, overlapping loads, multi-phase
 appliances, motor bursts, solar with dropouts, recorder gaps, irregular readings, 2 s
 meters, the night threshold on a solar day with meter drift, cloudy days with a slow or late
-solar meter in `tests/test_solar_doubt.py`); closed events equal `pair_steps`; a hob is one session with the night's cycle
+solar meter in `tests/test_solar_doubt.py`, the noise-adaptive threshold alone and with the
+night threshold, the solar doubt and late sub-meters in `tests/test_adaptive_threshold.py`); closed events equal `pair_steps`; a hob is one session with the night's cycle
 count; on 60 uses of 6 steady appliances the right one is first in ≥ 80 % and in the top 3
 in ≥ 95 %. A day of a 10 s meter replays in about 0.1 s. Burst series
 (`tests/test_bursts.py`): a 1 kW heater on for 40 s every 4 minutes for 2 hours is one
@@ -1186,9 +1288,10 @@ summary with `curve: []` and `curve_pruned: true`.
 | `peaks` | `{start, end, max_ts, house_w, grid_w, pv_w, parts: [{kind: submetered\|estimated\|known\|signature, name, power_w, since?, registry_id?}], unexplained_w, notable}` |
 | `known_loads` | Switched loads: `{name, entity_id, power_w, transitions, matched, on_states, inverted, on_s}`; an operation-state load (add-on 0.14.0+) adds `mode: "run"` and `runs` |
 | `activations` | `{start, end, power_w, cycling, duty, on_s, period_s, signature, registry_id}`; a burst series (add-on 0.16.0+, § 4.5) is `cycling` and adds `blocks` (`[[start, end]]`: when it was on, bursts less than 2 minutes apart as one); a recognised multi-phase cycle (add-on 0.10.0+) adds `multiphase: true` and `phases`, its `power_w` is its mean power and its `signature` the registry id of its template |
+| `small_uses` | Only with the noise-adaptive threshold (add-on 0.17.0+, § 4.2): the uses under the fixed thresholds, `{start, end, power_w, on_w, off_w}` (`on_w` / `off_w`: the size of its two steps). Kept apart: never in `activations`, `signatures`, the curve's breakdown nor the registry |
 | `cycles` | Candidate multi-phase cycles (add-on 0.10.0+): `{start, end, power_w (heating), energy_kwh, phases: [{kind: heat\|motor, offset_s, duration_s, power_w}], members, template, distance}` |
 | `signatures` | Daily signatures: `{id, kind, band, power_w, count, duration_s, energy_kwh, hours, on_s, period_s, duty, examples, registry_id}`, and `phases` for kind `multiphase` |
-| `quality` | `{samples, steps, submeters, pv_unknown_s, max_gap_s, compute_s}`; `steps` leaves out those the sub-meters' reports made, and `submeters` (add-on 0.16.0+, § 4.12) lists, per sub-meter that measures and has something to say, `{entity_id, name, explained_steps, changes, located, lag_s, lag_min_s, lag_max_s}`; with a PV meter (add-on 0.16.0+, § 4.2) `solar_held` (samples set aside by the solar doubt) and `solar_interval_s` (how long the solar meter takes to tell a change, `null` when not measured) |
+| `quality` | `{samples, steps, submeters, pv_unknown_s, max_gap_s, compute_s}`; `steps` leaves out those the sub-meters' reports made, and `submeters` (add-on 0.16.0+, § 4.12) lists, per sub-meter that measures and has something to say, `{entity_id, name, explained_steps, changes, located, lag_s, lag_min_s, lag_max_s}`; with a PV meter (add-on 0.16.0+, § 4.2) `solar_held` (samples set aside by the solar doubt) and `solar_interval_s` (how long the solar meter takes to tell a change, `null` when not measured); `meters` (add-on 0.17.0+, § 4.2 and 8.11): `{grid: {median_s, p90_s}, solar: {median_s, p90_s} \| null, window_s, noise_w: {no_solar, solar}, visible_w}`, the meters' reporting intervals, the detector's window, the noise of the residual load apart from and during the solar hours, and the smallest step the curve can show; with the noise-adaptive threshold, `low_steps` (the steps kept under the fixed thresholds) |
 | `ground_truth` | Only while an appliance learns from a sensor (add-on 0.11.0+, § 8.6): `[{key, entity_id, runs: [{start, end, energy_kwh, power_w, max_w, kind, duty, on_s?, period_s?, phases?}], covered: [[start, end]], covered_s, energy_kwh}]`; from a connected appliance (0.14.0+) also `mode: "state"`, `program_recorded?`, and per run `source: "state"`, `baseline_w`, `program?`, `counter_kwh?`, `named_phases?` |
 | `config` | Sensors used: `grid_entity`, `extra_grid_entities`, `grid_export_entity`, `pv_entity`, `extra_pv_entities`, `battery_entity`, `tracked` (`{name, energy_entity, power_entity, role, source_entity}`), `findings` |
 | `findings` | `{kind, entity_id, detail, params}` (derive findings and tracking gaps); `params` (add-on 0.11.0+) per kind in § 5 *Findings*, `detail` the English fallback |
@@ -2339,19 +2442,36 @@ after.
   would give. Per device, the merged evaluation of its days (`merge_evaluations`): uses,
   found, detections, precision, recall, energy ratio. A device with no use on a day still
   counts that day's detections as false.
-- **Below the threshold**: a device the curve cannot show (`learned.recognisable` false) is
-  `below_threshold`: its uses and energy are counted, none found, so that a lower threshold
-  (`--threshold`, `--night-threshold`) or a later detector shows its gain.
-- **Meters** (`meter_quality`): the reporting interval of the grid meter and of the solar
+- **Below the threshold**: a device the analysis does not track (`learned.recognisable`
+  false) is `below_threshold`: its uses and energy are counted, none found, so that a lower
+  threshold (`--threshold`, `--night-threshold`) or a later detector shows its gain.
+- **Without the registry** (`free`, #88). The score above goes through the signature
+  registry: it compares with the power read on the device's own meter and depends on the
+  one-use signatures that happen to be near it (on the reference installation a pump went
+  from 88 % to 50 % when another appliance of about its power got a signature of its own,
+  while 7 of its 8 runs were still detected). So each device also gets a score that needs
+  no signature (`free_score`): a use is **found** when the uses of the hidden analysis of
+  similar power (within 30 % of the use's own) cover at least half of it, whatever their
+  signature, the small uses of the adaptive threshold (`--adaptive`) among them. The
+  **detections** are the hidden analysis' uses of the device's power that the real analysis
+  (the device subtracted) does not have, those being other appliances; one is right when
+  the device's runs cover half of it. Recall and precision are given overall and apart for
+  the uses that start without and with solar production (above 20 W in the report's curve).
+  It is given for every device that ran, `below_threshold` or not.
+- **Meters** (`nilm_core.quality.meter_quality`, read from each day's report,
+  `quality.meters`): the reporting interval of the grid meter and of the solar
   meter while it produces (median, 90th percentile), and the **noise of the residual load**:
   the detector's own statistic (the difference between the medians of the readings before and
   after an instant, same windows) taken every minute, summarised by its robust spread
   (1.4826 x the median absolute value, so that the appliances that switch do not count),
   apart from the solar hours and during them. It is what a step must exceed to be seen.
 - **Product figures**: the share of the house energy in each category (sub-metered, switched,
-  signatures, base, unexplained), the number of signatures of the registry, the steps per day.
-- **Output**: a table, and `--json` a result that `--compare` sets against a later run
-  (recall, precision and energy ratio of each device, signatures, shares).
+  signatures, base, unexplained), the number of signatures of the registry, the steps and
+  the small uses per day.
+- **Output**: a table (the registry-free score below it), and `--json` a result that
+  `--compare` sets against a later run (recall, precision, energy ratio, registry-free recall
+  and precision of each device, signatures, shares). With the option off the result is the
+  one of before #88, plus the new figures.
 
 Tests (`tests/test_benchmark.py`, synthetic): a water heater is found again on each day, a
 100 W fridge is `below_threshold` with its 96 uses and found again with a 60 W threshold, a
@@ -2383,7 +2503,8 @@ Accepted keys and ranges: `grid_entity`, `grid_export_entity`, `pv_entity`, `bat
 `manual`), `submeters` (`sensor.*` list), `excluded_submeters` (`sensor.*` list),
 `switched_loads` (`{entity_id, name?, on_states?}` list), `excluded_switched_loads` (entity id
 list, § 8.2), `step_threshold_w` 50–10000, `night_step_threshold_w` 50 to the step threshold
-(that of the settings, else of the add-on options, else 300; § 4.2),
+(that of the settings, else of the add-on options, else 300; § 4.2), `adaptive_threshold`
+(bool, off by default: the noise-adaptive threshold, § 4.2),
 `peak_threshold_w` 100–100000, `analysis_time` `HH:MM`, `backfill_days` 0–365,
 `half_life_days` and `peak_window_days` 1–365, `report_retention_days` 7–3650,
 `review_min_uses` 2–1000, `review_min_days` and `review_wait_days` 1–365, `review_wait_factor`
@@ -2453,7 +2574,12 @@ cannot be read).
   not counted yet.
 - Loads below `step_threshold_w` (below `night_step_threshold_w` while PV produces nothing),
   continuously variable loads and uses shorter than two meter
-  readings are not recognised. Multi-phase appliances (§ 4.9): two appliances running at once
+  readings are not recognised. With the noise-adaptive threshold (§ 4.2) the smaller uses are
+  found where the curve is quiet (about half of a freezer's cycles on the reference
+  installation) and only listed in the report (`small_uses`): they are not named, tracked nor
+  counted in the breakdown until the recurring-appliance detector (#89) groups them. Its
+  noise is that of the last 30 minutes: when the curve gets noisy at once, the threshold
+  takes a quarter of an hour to follow. Multi-phase appliances (§ 4.9): two appliances running at once
   or back to back make one candidate, a low load next to a cycle is counted in it, one
   appliance can give one signature per programme, and recognised cycles only absorb their
   activations once the user validated the signature.

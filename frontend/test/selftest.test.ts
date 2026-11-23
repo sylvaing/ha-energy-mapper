@@ -68,6 +68,8 @@ test("too small for the curve, and no use yet", () => {
     listing([
       device({ entity_id: "sensor.fridge_power", name: "Fridge", state: "not_recognisable", tests: 0, rate: null, learned: { power_w: 100 } }),
       device({ entity_id: "sensor.oven_power", name: "Oven", state: "no_use", tests: 0, rate: null, learned: null }),
+      // the curve's measured noise lets it show (#88): not "too low", only not tracked
+      device({ entity_id: "sensor.freezer_power", name: "Freezer", state: "not_recognisable", tests: 0, rate: null, learned: { power_w: 70, visible: true } }),
     ]),
     t,
     info,
@@ -75,6 +77,7 @@ test("too small for the curve, and no use yet", () => {
   assert.deepEqual(
     rows.map((r) => [r.name, plain(r.headline), r.detail, r.rate]),
     [
+      ["Freezer", "Seen on the whole-house curve, too small to be tracked yet (70 W)", "", null],
       ["Fridge", "Too low for the whole-house curve (100 W)", "", null],
       ["Oven", "No use seen yet", "", null],
     ],

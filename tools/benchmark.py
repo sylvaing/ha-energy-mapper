@@ -5,8 +5,17 @@ This tool replays days of raw history through ``nilm_core`` and, for each
 measured device in turn, hides it (the device is left in the whole-house
 curve, as if it had no meter) and scores how well the analysis finds its
 uses again: the nightly self-test (#15), for every device and every day at
-once. It also measures the meters (reporting interval, noise of the curve)
-and the share of the house energy in each category.
+once. It also gives the meters' quality (reporting interval, noise of the
+curve: the report's ``quality.meters``) and the share of the house energy in
+each category.
+
+A second score needs no signature (``free``): a use of the hidden device is
+found when at least half of its duration is covered by activations of
+similar power (within 30 %), whatever the signature they were given, the
+small uses of the adaptive threshold (``--adaptive``, #88) among them. The
+score through the registry compares with the power read on the device's own
+meter and depends on the other signatures near it; this one tells whether
+the curve showed the use at all.
 
 Run it before and after a change of the engine and compare the two results:
 
@@ -33,6 +42,9 @@ What a device's line means:
   the engine shows its gain.
 - ``no_use``: the device never ran in the export.
 
+The registry-free score is given for every device that ran, whatever its
+status, overall and apart from / during the solar hours.
+
 Standard library only, not shipped in the add-on image.
 """
 
@@ -50,7 +62,6 @@ import sys
 import zoneinfo
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from itertools import pairwise
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "energy_mapper" / "app"))
 
@@ -58,12 +69,13 @@ import selftest  # noqa: E402
 from nilm_core import AnalysisConfig, SubmeterConfig, SwitchedLoadConfig, analyze  # noqa: E402
 from nilm_core.groundtruth import merge_evaluations, runs_of  # noqa: E402
 from nilm_core.registry import update as update_registry  # noqa: E402
-from nilm_core.signal import SampleBuilder, parse_numeric  # noqa: E402
-from nilm_core.steps import PV_QUIET_W, Signal, adapted_windows, meter_interval  # noqa: E402
+from nilm_core.signal import parse_numeric  # noqa: E402
+from nilm_core.steps import PV_QUIET_W  # noqa: E402
 
 VERSION = 1
 BELOW_THRESHOLD = "below_threshold"
-NOISE_EVERY_S = 60.0  # the noise is sampled at these instants
+FREE_POWER_TOL = 0.3  # the registry-free score: an activation of similar power
+FREE_COVER = 0.5  # ... covering this share of a use finds it
 MARGIN_S = 1800.0  # history kept after a day (a run ending after midnight, baselines)
 
 Histories = dict[str, list[tuple[float, str]]]
@@ -132,79 +144,10 @@ def days_of(ts: Sequence[float], tz: dt.tzinfo | None) -> list[tuple[str, float,
 # ---------------------------------------------------------------------------
 # the meters
 # ---------------------------------------------------------------------------
-def _quantile(values: Sequence[float], q: float) -> float | None:
-    if not values:
-        return None
-    v = sorted(values)
-    return v[min(len(v) - 1, int(q * (len(v) - 1)))]
-
-
-def _intervals(ts: Sequence[float]) -> dict | None:
-    gaps = [b - a for a, b in pairwise(ts)]
-    if not gaps:
-        return None
-    return {"median_s": round(statistics.median(gaps), 1), "p90_s": round(_quantile(gaps, 0.9), 1)}
-
-
-def _robust_sigma(values: Sequence[float]) -> float | None:
-    """1.4826 x the median absolute value: the standard deviation of the
-    noise, whatever the appliances that switch (the outliers)."""
-    if len(values) < 30:
-        return None
-    return round(1.4826 * statistics.median(abs(v) for v in values), 1)
-
-
-def meter_quality(hist: Histories, config: AnalysisConfig, start: float, end: float) -> dict:
-    """How the meters report within ``[start, end)``, and the noise of the
-    residual load: the detector's own statistic (the difference between the
-    medians of the readings before and after an instant) at regular
-    instants, where no appliance switches most of the time. Its robust
-    spread is what a step must exceed to be seen, apart from the solar
-    hours (production above ``PV_QUIET_W``) and during them."""
-    builder = SampleBuilder.from_config(config)
-    for entity in builder.entities:
-        for ts, state in hist.get(entity, ()):
-            builder.push(entity, ts, state)
-    samples = [s for s in builder.flush() if start <= s.ts < end]
-    points = [(s.ts, s.residual) for s in samples if s.residual is not None]
-    out: dict = {"grid": _intervals([s.ts for s in samples]), "solar": None, "noise_w": {}}
-    if config.pv_entity:
-        producing = [
-            ts
-            for ts, v in parse_numeric(hist.get(config.pv_entity, ()))
-            if start <= ts < end
-            and v is not None
-            and v * config.scales.get(config.pv_entity, 1.0) > PV_QUIET_W
-        ]
-        # the nights between two productions are not reporting intervals
-        gaps = [b - a for a, b in pairwise(producing) if b - a < 3600]
-        if gaps:
-            out["solar"] = {
-                "median_s": round(statistics.median(gaps), 1),
-                "p90_s": round(_quantile(gaps, 0.9), 1),
-            }
-    if len(points) < 3:
-        return out
-    sig = Signal(points)
-    win, _ = adapted_windows(meter_interval(sig.ts), 20.0, 15.0)
-    pv = Signal([(s.ts, s.pv) for s in samples if s.pv is not None])
-    quiet: list[float] = []
-    sunny: list[float] = []
-    t = start + win
-    while t < end - win:
-        before = sig.median(t - win, t - 1e-3)
-        after = sig.median(t, t + win)
-        if before is not None and after is not None:
-            production = pv.median(t - 60, t + 60) if config.pv_entity else 0.0
-            if production is not None:
-                (sunny if production > PV_QUIET_W else quiet).append(after - before)
-        t += NOISE_EVERY_S
-    out["window_s"] = round(win, 1)
-    out["noise_w"] = {"no_solar": _robust_sigma(quiet), "solar": _robust_sigma(sunny)}
-    return out
-
-
 def _merge_quality(parts: Sequence[Mapping]) -> dict:
+    """The meters over the days: the median of each day's
+    ``quality.meters`` (:func:`nilm_core.quality.meter_quality`)."""
+
     def med(path: tuple[str, str]) -> float | None:
         values = [p[path[0]][path[1]] for p in parts if (p.get(path[0]) or {}).get(path[1]) is not None]
         return round(statistics.median(values), 1) if values else None
@@ -214,6 +157,116 @@ def _merge_quality(parts: Sequence[Mapping]) -> dict:
         "solar": {"median_s": med(("solar", "median_s")), "p90_s": med(("solar", "p90_s"))},
         "noise_w": {"no_solar": med(("noise_w", "no_solar")), "solar": med(("noise_w", "solar"))},
     }
+
+
+# ---------------------------------------------------------------------------
+# the registry-free score
+# ---------------------------------------------------------------------------
+def _spans(activation: Mapping) -> list[tuple[float, float]]:
+    """When an activation was on: its blocks (a burst series), else its span."""
+    blocks = activation.get("blocks")
+    return [(a, b) for a, b in blocks] if blocks else [(activation["start"], activation["end"])]
+
+
+def _uses_of(report: Mapping) -> list[dict]:
+    """Every use the analysis found: its activations and its small uses."""
+    return [*report.get("activations", ()), *(report.get("small_uses") or ())]
+
+
+def _covered(a: float, b: float, spans: Sequence[tuple[float, float]]) -> float:
+    """The seconds of ``[a, b)`` within the union of ``spans``."""
+    total, at = 0.0, a
+    for x, y in sorted(spans):
+        x, y = max(x, at), min(y, b)
+        if y > x:
+            total += y - x
+            at = y
+    return total
+
+
+def _similar(power: float, ref: float) -> bool:
+    return abs(power - ref) <= FREE_POWER_TOL * ref
+
+
+def _same(u: Mapping, v: Mapping) -> bool:
+    """Two analyses found the same use: similar power, each covering half of
+    the other."""
+    shared = min(u["end"], v["end"]) - max(u["start"], v["start"])
+    return (
+        _similar(u["power_w"], v["power_w"])
+        and shared >= FREE_COVER * (u["end"] - u["start"])
+        and shared >= FREE_COVER * (v["end"] - v["start"])
+    )
+
+
+def free_score(
+    runs: Sequence,
+    power_w: float,
+    hidden: Mapping,
+    visible: Mapping,
+    solar=lambda ts: False,
+) -> dict:
+    """One device on one day, without the registry.
+
+    ``runs``: its true uses; ``power_w``: its usual power; ``hidden``: the
+    report of the day with the device left in the curve; ``visible``: the
+    real report (the device subtracted). A use is **found** when the
+    hidden analysis' uses of similar power (``FREE_POWER_TOL`` of the use's
+    own) cover ``FREE_COVER`` of it. The **detections** are the uses of the
+    hidden analysis of the device's power that the real analysis does not
+    have (those are other appliances); one is **true** when the device's
+    runs cover ``FREE_COVER`` of it. ``solar(ts)``: the panels produce at
+    ``ts``; the counts are also given apart for the uses (and detections)
+    that start with and without solar production.
+    """
+    uses = _uses_of(hidden)
+    others = _uses_of(visible)
+    out = {k: {"uses": 0, "found": 0, "detections": 0, "true": 0} for k in ("all", "no_solar", "solar")}
+
+    def count(ts: float, what: str) -> None:
+        out["all"][what] += 1
+        out["solar" if solar(ts) else "no_solar"][what] += 1
+
+    for r in runs:
+        count(r.start, "uses")
+        spans = [x for u in uses if _similar(u["power_w"], r.power_w) for x in _spans(u)]
+        if _covered(r.start, r.end, spans) >= FREE_COVER * (r.end - r.start):
+            count(r.start, "found")
+    truth = [(r.start, r.end) for r in runs]
+    for u in uses:
+        if not _similar(u["power_w"], power_w) or any(_same(u, v) for v in others):
+            continue
+        count(u["start"], "detections")
+        on = _spans(u)
+        if sum(_covered(a, b, truth) for a, b in on) >= FREE_COVER * sum(b - a for a, b in on):
+            count(u["start"], "true")
+    return out
+
+
+def _free_merge(parts: Sequence[Mapping]) -> dict:
+    """The registry-free score over the days: recall and precision overall
+    (top level) and under ``no_solar`` / ``solar``."""
+
+    def total(key: str) -> dict:
+        t = {w: sum(p[key][w] for p in parts) for w in ("uses", "found", "detections", "true")}
+        t["recall"] = round(t["found"] / t["uses"], 3) if t["uses"] else None
+        t["precision"] = round(t["true"] / t["detections"], 3) if t["detections"] else None
+        return t
+
+    return {**total("all"), "no_solar": total("no_solar"), "solar": total("solar")}
+
+
+def _solar_hours(report: Mapping):
+    """``solar(ts)`` from a report's curve: the production of the bucket of
+    ``ts`` is above ``PV_QUIET_W``."""
+    rows = report.get("curve") or []
+    ts = [r["t"] for r in rows]
+
+    def solar(t: float) -> bool:
+        i = bisect.bisect_right(ts, t) - 1
+        return i >= 0 and (rows[i].get("pv") or 0) > PV_QUIET_W
+
+    return solar
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +314,7 @@ def run(
     for day, start, end in days:
         w = windows[day] = window(hist, start - config.context_s - MARGIN_S, end + MARGIN_S)
         reports[day] = analyze(w, config, start, end, local_hour=hour)
-        quality[day] = meter_quality(w, config, start, end)
+        quality[day] = reports[day]["quality"]["meters"]
         log(f"{day}: analysed in {reports[day]['quality']['compute_s']} s")
     summaries = {d: {k: v for k, v in r.items() if k != "curve"} for d, r in reports.items()}
     now = days[-1][2] if days else 0.0
@@ -283,8 +336,24 @@ def run(
     for entity in chosen:
         hidden = selftest.hidden_config(config, entity)
         tests = []
+        free = []
+        every = [r for runs in truth[entity].values() for r in runs]
+        usual = statistics.median(r.power_w for r in every) if every else None
         for day, start, end in days:
             others = [r for d, runs in truth[entity].items() if d != day for r in runs]
+            found: dict = {}  # the hidden analysis of the day, made once
+
+            def analysis(w=windows[day], c=hidden, a=start, b=end, found=found) -> dict:
+                if "report" not in found:
+                    found["report"] = analyze(w, c, a, b, local_hour=hour)
+                return found["report"]
+
+            if truth[entity][day]:
+                free.append(
+                    free_score(
+                        truth[entity][day], usual, analysis(), reports[day], _solar_hours(reports[day])
+                    )
+                )
             tests.append(
                 selftest.hide_and_find(
                     day,
@@ -293,14 +362,14 @@ def run(
                     points[entity],
                     start,
                     end,
-                    lambda w=windows[day], c=hidden, a=start, b=end: analyze(w, c, a, b, local_hour=hour),
+                    analysis,
                     registry,
                     others,
                     now,
                     step_threshold_w=config.smallest_step_w(),
                 )
             )
-        out_devices.append(_device(entity, names[entity], tests))
+        out_devices.append({**_device(entity, names[entity], tests), "free": _free_merge(free)})
         d = out_devices[-1]
         log(f"{names[entity]}: {d['status']}, {d['found']} of {d['uses']} use(s) found")
 
@@ -310,11 +379,18 @@ def run(
         "thresholds": {
             "step_w": config.step_threshold_w,
             "night_step_w": config.low_step_threshold(),
+            # only with the option: the result is unchanged without it
+            **({"adaptive": True} if config.adaptive_threshold else {}),
         },
         "meters": {**_merge_quality(list(quality.values())), "per_day": quality},
         "energy": _energy(reports),
         "signatures": len(registry.get("signatures") or []),
         "steps_per_day": round(statistics.mean(r["quality"]["steps"] for r in reports.values()), 1)
+        if reports
+        else None,
+        "small_uses_per_day": round(
+            statistics.mean(len(r.get("small_uses") or ()) for r in reports.values()), 1
+        )
         if reports
         else None,
         "devices": out_devices,
@@ -383,13 +459,15 @@ def table(result: Mapping) -> str:
         f"{len(result['days'])} day(s): {result['days'][0]} .. {result['days'][-1]}"
         if result["days"]
         else "no whole day in the export",
-        f"thresholds: {th['step_w']:g} W{night}",
+        f"thresholds: {th['step_w']:g} W{night}"
+        + (", adaptive to the noise (smaller uses kept apart)" if th.get("adaptive") else ""),
         f"grid meter: {_every(m['grid'])} | solar meter: {_every(m['solar'])}",
         f"noise of the curve: {_num(m['noise_w']['no_solar'], ' W')} without solar,"
         f" {_num(m['noise_w']['solar'], ' W')} with solar",
         f"house {e.get('house', 0):.1f} kWh: "
         + ", ".join(f"{k} {_pct(v).strip()}" for k, v in (e.get("shares") or {}).items()),
-        f"signatures: {result['signatures']} | steps per day: {_num(result['steps_per_day'])}",
+        f"signatures: {result['signatures']} | steps per day: {_num(result['steps_per_day'])}"
+        f" | small uses per day: {_num(result.get('small_uses_per_day'))}",
         "",
         f"{'device':28} {'status':16} {'power':>7} {'uses':>5} {'found':>5} {'recall':>6} "
         f"{'detect.':>7} {'precis.':>7} {'energy':>6}",
@@ -400,7 +478,29 @@ def table(result: Mapping) -> str:
             f"{d['found']:5d} {_pct(d['recall']):>6} {d['detections']:7d} {_pct(d['precision']):>7} "
             f"{_pct(d['energy_ratio']):>6}"
         )
+    lines += [
+        "",
+        "without the registry (a use is found when activations of similar power cover half of it):",
+        f"{'device':28} {'uses':>5} {'found':>5} {'recall':>6} {'detect.':>7} {'precis.':>7} "
+        f"{'no solar: rec. / prec.':>24} {'solar: rec. / prec.':>24}",
+    ]
+    for d in result["devices"]:
+        f = d.get("free")
+        if not f or not f["uses"]:
+            continue
+        lines.append(
+            f"{d['name'][:28]:28} {f['uses']:5d} {f['found']:5d} {_pct(f['recall']):>6} "
+            f"{f['detections']:7d} {_pct(f['precision']):>7} "
+            f"{_free_part(f['no_solar']):>24} {_free_part(f['solar']):>24}"
+        )
     return "\n".join(lines)
+
+
+def _free_part(part: Mapping) -> str:
+    return (
+        f"{part['found']}/{part['uses']} {_pct(part['recall']).strip()}"
+        f" / {part['true']}/{part['detections']} {_pct(part['precision']).strip()}"
+    )
 
 
 def compare(before: Mapping, after: Mapping) -> str:
@@ -416,21 +516,27 @@ def compare(before: Mapping, after: Mapping) -> str:
     old = {d["entity_id"]: d for d in before.get("devices") or []}
     lines = [
         f"signatures: {delta(before.get('signatures'), after.get('signatures'), False)}"
-        f" | steps per day: {delta(before.get('steps_per_day'), after.get('steps_per_day'), False)}",
+        f" | steps per day: {delta(before.get('steps_per_day'), after.get('steps_per_day'), False)}"
+        f" | small uses per day: "
+        f"{delta(before.get('small_uses_per_day'), after.get('small_uses_per_day'), False)}",
         "shares: "
         + ", ".join(
             f"{k} {delta((before.get('energy', {}).get('shares') or {}).get(k), v)}"
             for k, v in (after.get("energy", {}).get("shares") or {}).items()
         ),
         "",
-        f"{'device':28} {'recall':>14} {'precision':>14} {'energy':>14}",
+        f"{'device':28} {'recall':>14} {'precision':>14} {'energy':>14} "
+        f"{'free recall':>14} {'free precis.':>14}",
     ]
     for d in after.get("devices") or []:
         o = old.get(d["entity_id"], {})
+        of, f = o.get("free") or {}, d.get("free") or {}
         lines.append(
             f"{d['name'][:28]:28} {delta(o.get('recall'), d['recall']):>14} "
             f"{delta(o.get('precision'), d['precision']):>14} "
-            f"{delta(o.get('energy_ratio'), d['energy_ratio']):>14}"
+            f"{delta(o.get('energy_ratio'), d['energy_ratio']):>14} "
+            f"{delta(of.get('recall'), f.get('recall')):>14} "
+            f"{delta(of.get('precision'), f.get('precision')):>14}"
         )
     return "\n".join(lines)
 
@@ -458,6 +564,7 @@ def build_config(args: argparse.Namespace) -> AnalysisConfig:
         scales={entity: float(factor) for entity, factor in (_pair(s, "1") for s in args.scale)},
         step_threshold_w=args.threshold,
         night_step_threshold_w=args.night_threshold,
+        adaptive_threshold=getattr(args, "adaptive", False),
     )
 
 
@@ -483,6 +590,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     ap.add_argument("--threshold", type=float, default=300.0, help="step threshold, W")
     ap.add_argument("--night-threshold", type=float, help="step threshold without solar production, W")
+    ap.add_argument(
+        "--adaptive",
+        action="store_true",
+        help="noise-adaptive threshold: smaller uses kept apart (#88)",
+    )
     ap.add_argument("--device", action="append", metavar="ENTITY", help="hide only these measured devices")
     ap.add_argument("--tz", help="time zone of the days (default: this machine's)")
     ap.add_argument("--json", help="write the result to this file")

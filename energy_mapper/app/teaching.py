@@ -263,6 +263,7 @@ def status(
     step_threshold_w: float = 300.0,
     config: RegistryConfig | None = None,
     gt_config: GroundTruthConfig | None = None,
+    visible_w: float | None = None,
 ) -> dict:
     """The learning status of a taught appliance: the days and uses seen,
     the learned signature, the registry signature it is, and the measured
@@ -271,7 +272,7 @@ def status(
     key, entity = appliance["key"], teacher["entity_id"]
     days = truth_days(summaries, key, entity)
     runs = _runs(days)
-    learned = learn(runs, step_threshold_w, gt_config)
+    learned = learn(runs, step_threshold_w, gt_config, visible_w)
     out: dict = {
         "key": key,
         "name": appliance.get("name"),
@@ -366,19 +367,23 @@ def apply(
     now: float,
     step_threshold_w: float = 300.0,
     config: RegistryConfig | None = None,
+    visible_w: float | None = None,
 ) -> tuple[dict, bool, dict]:
     """The signature to link to a taught appliance: ``(signature, created,
     learned)``. A new expected signature is added to ``registry`` (modified)
     when it has none. Raises :class:`TeachingError`."""
     teacher = appliance["teacher"]
     days = truth_days(summaries, appliance["key"], teacher["entity_id"])
-    learned = learn(_runs(days), step_threshold_w)
+    learned = learn(_runs(days), step_threshold_w, visible_w=visible_w)
     if learned is None:
         raise TeachingError("not_learned", "no use of the appliance seen by its teacher yet")
     if not learned.recognisable:
         raise TeachingError(
             "not_recognisable",
-            f"{round(learned.power_w)} W is below the step threshold: the curve cannot show it",
+            f"{round(learned.power_w)} W is under the smallest appliance tracked: the curve shows it,"
+            " but such small uses are not tracked"
+            if learned.visible
+            else f"{round(learned.power_w)} W is too low for the noise of the whole-house curve",
         )
     sig = resolve(registry, learned, config)
     if sig is not None:

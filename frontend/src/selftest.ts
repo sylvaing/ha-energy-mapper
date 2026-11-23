@@ -28,7 +28,7 @@ export interface SelfTestDevice {
   rate: number | null;
   trend: SelfTestTrend | null;
   last_day: string;
-  learned?: { power_w: number; recognisable?: boolean } | null;
+  learned?: { power_w: number; recognisable?: boolean; visible?: boolean } | null;
 }
 
 export interface SelfTestListing {
@@ -109,9 +109,12 @@ export function selfTestRows(
         detail = detailOf(d, t, info);
         break;
       case "not_recognisable":
-        headline = d.learned?.power_w
-          ? t("selftest_too_small", { power: nb(formatPower(d.learned.power_w, info)) })
-          : t("selftest_too_small_plain");
+        // too low for the curve's noise, or seen by it but under what is tracked (#88)
+        headline = !d.learned?.power_w
+          ? t("selftest_too_small_plain")
+          : t(d.learned.visible ? "selftest_small_untracked" : "selftest_too_small", {
+              power: nb(formatPower(d.learned.power_w, info)),
+            });
         break;
       default:
         headline = t("selftest_no_use");

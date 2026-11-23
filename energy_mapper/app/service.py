@@ -6,7 +6,7 @@ import datetime as dt
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 
 import selftest
@@ -26,6 +26,7 @@ from ha_client import HAError
 from nilm_core import analyze, parse_numeric
 from nilm_core.correlation import CorrelationConfig
 from nilm_core.correlation import suggest as correlate
+from nilm_core.quality import visible_w
 from nilm_core.registry import (
     Matcher,
     RegistryConfig,
@@ -76,6 +77,7 @@ DEFAULT_BACKFILL_DAYS = 30
 DEFAULT_HALF_LIFE_DAYS = 30
 DEFAULT_REPORT_RETENTION_DAYS = 90
 DEFAULT_PEAK_WINDOW_DAYS = 30
+VISIBLE_DAYS = 14  # the noise of the curve: the median of the last days' reports
 # the first grid reading must be at most this late after midnight, otherwise
 # the recorder no longer holds the whole day (purged) and the day is skipped
 MAX_START_GAP_S = 3600
@@ -110,6 +112,8 @@ def derive_options(options: dict) -> dict:
             out[key] = value
     for key in ("grid_invert", "battery_invert"):
         out[key] = bool(options.get(key))
+    if options.get("adaptive_threshold"):  # the noise-adaptive threshold (#88), off by default
+        out["adaptive_threshold"] = True
     submeters = [s.strip() for s in options.get("submeters") or [] if s and s.strip()]
     if options.get("submeters_mode") == "manual":
         # the exact list, possibly empty: "no sub-meters" (#33)
@@ -631,6 +635,7 @@ class Analyzer:
         def hour(ts: float) -> int:
             return dt.datetime.fromtimestamp(ts, tz).hour
 
+        visible = self.visible_w(self.store.summaries_all())
         tests = []
         for entity in chosen:
             t0 = time.perf_counter()
@@ -653,6 +658,7 @@ class Analyzer:
                 appliance_of.get(entity),
                 cfg.smallest_step_w(),
                 self.registry_config,
+                visible_w=visible,
             )
             tests.append(test)
             ev = test.get("evaluation") or {}
@@ -692,9 +698,10 @@ class Analyzer:
 
     @property
     def smallest_step_w(self) -> float:
-        """The smallest step the analysis can keep: the night threshold when
-        it applies (#77), else the step threshold. What "too low for the
-        whole-house curve" means for teaching and the labelled examples."""
+        """The smallest step the analysis tracks: the night threshold when
+        it applies (#77), else the step threshold. Under it an appliance is
+        not tracked; whether the curve can show it at all is decided from
+        the measured noise (:meth:`visible_w`)."""
         step = self.step_threshold_w
         try:
             night = float(self.options.get("night_step_threshold_w") or 0.0) or None
@@ -704,6 +711,13 @@ class Analyzer:
         low = night_threshold(step, night, has_pv)
         return low if low is not None else step
 
+    @staticmethod
+    def visible_w(summaries: Mapping) -> float | None:
+        """The smallest step the whole-house curve can show, from the noise
+        measured on the last analysed days (#88); None before any report
+        has it. What "too low for the whole-house curve" means."""
+        return visible_w(list(summaries.values())[-VISIBLE_DAYS:])
+
     def teaching(self) -> dict:
         """The learning status of each appliance with a teacher."""
         summaries = self.store.summaries_all()
@@ -711,7 +725,15 @@ class Analyzer:
         now = self.clock()
         return {
             "teachers": [
-                teaching_status(a, summaries, registry, now, self.smallest_step_w, self.registry_config)
+                teaching_status(
+                    a,
+                    summaries,
+                    registry,
+                    now,
+                    self.smallest_step_w,
+                    self.registry_config,
+                    visible_w=self.visible_w(summaries),
+                )
                 for a, _ in teachers(self.appliances)
             ]
         }
@@ -727,7 +749,13 @@ class Analyzer:
         with self._registry_lock:
             registry = self.store.load_registry() or empty_registry(self.registry_config)
             sig, created, learned = apply_teaching(
-                appliance, summaries, registry, self.clock(), self.smallest_step_w, self.registry_config
+                appliance,
+                summaries,
+                registry,
+                self.clock(),
+                self.smallest_step_w,
+                self.registry_config,
+                self.visible_w(summaries),
             )
             # the other programmes of a connected appliance (#79)
             others = program_signatures(appliance, learned, registry, self.clock(), self.registry_config)

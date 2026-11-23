@@ -156,6 +156,7 @@ const en = {
   teach_learned: "Learned: {name}",
   teach_accuracy: "Found from the curve: {found} of {uses} uses (recall {recall}), precision {precision}",
   teach_too_small: "{power} is too low for the whole-house curve: it cannot be tracked from it.",
+  teach_small_untracked: "{power}: the whole-house curve shows it, but appliances this small are not tracked yet.",
   teach_conflict: "This signature already belongs to {name}.",
   teach_finish: "Finish",
   teach_finish_confirm:
@@ -209,6 +210,7 @@ const en = {
   selftest_rate: "Found again {rate} of the time",
   selftest_not_enough: "Not enough data yet ({uses} of {min} uses)",
   selftest_too_small: "Too low for the whole-house curve ({power})",
+  selftest_small_untracked: "Seen on the whole-house curve, too small to be tracked yet ({power})",
   selftest_too_small_plain: "Too low for the whole-house curve",
   selftest_no_use: "No use seen yet",
   selftest_tests: "{count} tests",
@@ -717,6 +719,7 @@ const fr: Table = {
   teach_learned: "Appris : {name}",
   teach_accuracy: "Retrouvé dans la courbe : {found} utilisations sur {uses} (rappel {recall}), précision {precision}",
   teach_too_small: "{power}, c'est trop faible pour la courbe de la maison : l'appareil ne peut pas y être suivi.",
+  teach_small_untracked: "{power} : la courbe de la maison le montre, mais les appareils aussi petits ne sont pas encore suivis.",
   teach_conflict: "Cette signature appartient déjà à {name}.",
   teach_finish: "Terminer",
   teach_finish_confirm:
@@ -769,6 +772,7 @@ const fr: Table = {
   selftest_rate: "Retrouvé {rate} du temps",
   selftest_not_enough: "Pas encore assez de données ({uses} utilisations sur {min})",
   selftest_too_small: "Trop faible pour la courbe de la maison ({power})",
+  selftest_small_untracked: "Visible sur la courbe de la maison, trop petit pour être suivi pour l'instant ({power})",
   selftest_too_small_plain: "Trop faible pour la courbe de la maison",
   selftest_no_use: "Aucune utilisation vue pour l'instant",
   selftest_tests: "{count} tests",

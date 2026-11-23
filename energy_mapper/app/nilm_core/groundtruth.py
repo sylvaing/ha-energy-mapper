@@ -435,6 +435,10 @@ class Learned:
     # the engine can see it: a step of at least the step threshold, or a
     # multi-phase cycle with heating
     recognisable: bool = True
+    # the curve can show it, tracked or not: decided from the measured noise
+    # of the curve (``quality.meters.visible_w``, #88) when it is known,
+    # else it is ``recognisable``. False: too low for the whole-house curve
+    visible: bool = True
     # connected appliance (#79)
     source: str | None = None  # "state": learned from an operation state
     measured_kwh: float | None = None  # median energy of one use from the curve
@@ -474,15 +478,26 @@ class Learned:
             "cycle_kwh": None if self.cycle_kwh is None else round(self.cycle_kwh, 3),
             "energy_kwh": round(self.energy_kwh, 3),
             "recognisable": self.recognisable,
+            "visible": self.visible,
         }
 
 
 def learn(
-    runs: Sequence[Run], step_threshold_w: float = 300.0, config: GroundTruthConfig | None = None
+    runs: Sequence[Run],
+    step_threshold_w: float = 300.0,
+    config: GroundTruthConfig | None = None,
+    visible_w: float | None = None,
 ) -> Learned | None:
     """The signature of the most frequent kind of run (None without runs).
     A steady appliance whose runs fall in several duration bands keeps the
-    most frequent band; a multi-phase one its most frequent programme."""
+    most frequent band; a multi-phase one its most frequent programme.
+
+    ``step_threshold_w``: under it the appliance is not ``recognisable``
+    (the analysis does not track it). ``visible_w``: the smallest step the
+    curve can show, from its measured noise
+    (:func:`~.quality.visible_w`); under it the appliance is not
+    ``visible`` either: too low for the whole-house curve. None (not
+    measured yet): as ``recognisable``."""
     cfg = config or GroundTruthConfig()
     if not runs:
         return None
@@ -511,6 +526,7 @@ def learn(
             energy_kwh=statistics.median(s.energy_kwh for s in best),
             recognisable=any(p.kind == mp.HEAT for p in template),
         )
+        out.visible = out.recognisable
         best_runs = {(s.start, s.end) for s in best}
         return _connected(
             out, runs, [r for r in mine if (r.start, r.end) in best_runs], programs, program, cfg
@@ -542,6 +558,7 @@ def learn(
         duty=med(r.duty for r in mine) if kind == CYCLING else None,
         energy_kwh=statistics.median(r.energy_kwh for r in mine),
         recognisable=power >= step_threshold_w,
+        visible=power >= step_threshold_w or (visible_w is not None and power >= visible_w),
     )
     return _connected(out, runs, mine, programs, None, cfg)
 

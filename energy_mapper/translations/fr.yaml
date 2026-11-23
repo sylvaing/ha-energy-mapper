@@ -72,6 +72,15 @@ configuration:
       quand les panneaux solaires ne produisent rien (PV sous 20 W la minute avant et
       après la marche). Entre 50 W et le seuil des marches. Seulement avec un capteur
       PV ; sans, baissez plutôt le seuil des marches. Vide par défaut (désactivé).
+  adaptive_threshold:
+    name: Seuil adapté au bruit de la courbe
+    description: >-
+      Expérimental. Les variations de puissance plus petites que les seuils
+      ci-dessus sont aussi retenues quand elles se détachent du bruit mesuré de
+      la courbe (au moins 40 W et 4 fois le bruit des 30 dernières minutes). Ces
+      petits usages sont listés à part dans le rapport quotidien : ils ne sont
+      pas encore proposés à la revue. Tout le reste est analysé comme sans
+      l'option. Désactivé par défaut.
   peak_threshold_w:
     name: Seuil des pics (W)
     description: >-

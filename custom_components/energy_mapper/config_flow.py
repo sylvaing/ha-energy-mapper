@@ -54,6 +54,7 @@ from .appliances import (
 )
 from .appliances import signature as signature_source
 from .const import (
+    ADAPTIVE_THRESHOLD,
     ADDON_PORT,
     ADDON_SLUG,
     ANALYSIS_KEYS,
@@ -61,6 +62,7 @@ from .const import (
     CONF_DISCOVERED,
     CONF_URL,
     DOMAIN,
+    INVERT_KEYS,
     OPT_REVIEW_REPAIR,
     OPT_SETTINGS,
     REVIEW_KEYS,
@@ -283,6 +285,7 @@ OPTIONS_SCHEMA = vol.Schema(
                 {
                     vol.Optional("step_threshold_w"): _number(50, 10000, 10, "W"),
                     vol.Optional("night_step_threshold_w"): _number(50, 10000, 10, "W"),
+                    vol.Optional(ADAPTIVE_THRESHOLD, default=False): BooleanSelector(),
                     vol.Optional("peak_threshold_w"): _number(100, 100000, 100, "W"),
                 }
             ),
@@ -317,9 +320,9 @@ OPTIONS_SCHEMA = vol.Schema(
     }
 )
 SECTIONS = {
-    "sensors": (*SENSOR_KEYS, *BOOL_KEYS, SUBMETERS_MODE, "submeters"),
+    "sensors": (*SENSOR_KEYS, *INVERT_KEYS, SUBMETERS_MODE, "submeters"),
     "loads": ("switched_loads", "excluded_switched_loads"),
-    "thresholds": THRESHOLD_KEYS,
+    "thresholds": (*THRESHOLD_KEYS, ADAPTIVE_THRESHOLD),
     "analysis": ANALYSIS_KEYS,
     "review": REVIEW_KEYS,
 }

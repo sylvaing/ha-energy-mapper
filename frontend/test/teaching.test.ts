@@ -71,6 +71,10 @@ test("teachingLines", () => {
     "Learned: 2.4 kW appliance, ~45 min",
     "Found from the curve: 4 of 5 uses (recall 80 %), precision 80 %",
   ]);
+  const small = status({ learned: { ...status().learned!, power_w: 120, recognisable: false, visible: false }, evaluation: null });
+  assert.equal(teachingLines(teachState(listing([small]), OVEN) as never, t, info, (k) => k)[2], t("teach_too_small", { power: "120 W" }));
+  const seen = status({ learned: { ...small.learned!, visible: true } , evaluation: null });
+  assert.equal(teachingLines(teachState(listing([seen]), OVEN) as never, t, info, (k) => k)[2], t("teach_small_untracked", { power: "120 W" }));
   const waiting = teachingLines(teachState(listing([]), OVEN) as never, t, info, (k) => k);
   assert.deepEqual(waiting, [t("teach_waiting")]);
   const owned = status({ conflict: { id: "medium-2400w", appliance: HEATER.key } });
