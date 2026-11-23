@@ -18,7 +18,7 @@ from .activations import (
 from .cold import COLD, ColdConfig, Quiet, Track, track_dict
 from .cold import detect as detect_cold
 from .cycles import CycleConfig, Phase, attribute, find_cycles
-from .known import RUN, KnownLoad, SwitchedLoadConfig, resolve_switched_load
+from .known import RUN, KnownLoad, SwitchedLoadConfig, explain_low_steps, resolve_switched_load
 from .quality import meter_quality
 from .signal import build_samples, parse_numeric, scaled, sum_series
 from .signatures import cluster
@@ -213,6 +213,9 @@ def small_uses(
     config: AnalysisConfig,
     base_w: float,
     window_s: float,
+    histories: dict[str, list[tuple[float, str]]] | None = None,
+    known: list[KnownLoad] | None = None,
+    until: float | None = None,
 ) -> list[Activation]:
     """The small uses (#88): the pairs the low steps make, among themselves
     or with a step of the fixed thresholds that nothing else used.
@@ -222,12 +225,17 @@ def small_uses(
     detector read (:func:`_detect`). The low steps a sub-meter's misaligned
     reports left are first marked ``explained_by`` it, as the others were
     (#85), in a pass of their own: what explains the other steps does not
-    change. The pairs are those of :func:`~.activations.pair_steps`, with a
+    change. Those a switched load's transitions make are then marked
+    ``explained_by`` that load (#99, :func:`~.known.explain_low_steps`;
+    ``histories``, ``known`` the loads of :func:`resolve_known` and ``until``
+    the end of the analysis: without them nothing is). Neither kind is
+    paired, nor read by the cold appliances (:mod:`.cold`).
+    The pairs are those of :func:`~.activations.pair_steps`, with a
     tolerance fit for small powers, and are validated on the load as any
     use. They exist only because of the adaptive threshold: they are
     reported apart and never reach the signatures.
     """
-    low = [s for s in steps if s.low]
+    low = sorted((s for s in steps if s.low), key=lambda s: s.ts)
     if not low:
         return []
     echoes = SubmeterEchoes.for_config(config)
@@ -238,6 +246,10 @@ def small_uses(
         for step in steps:
             # the other steps are fed as copies: their own explanation stays
             echoes.feed(step if step.low else _copy(step), window_s, merge_s)
+    if histories is not None and until is not None:
+        loads = known or [None] * len(config.switched_loads)
+        for c, load in zip(config.switched_loads, loads, strict=True):
+            explain_low_steps(c, histories.get(c.entity_id, []), low, until, load, SMALL_TOL_W)
     free = [s for s in steps if s.low or not (s.used or s.explained_by)]
     pairs = pair_steps(free, tol_w=SMALL_TOL_W)
     # two steps of the fixed thresholds were already refused as a use
@@ -382,11 +394,12 @@ def analyze(
     adaptive = {}
     tracks: list[Track] = []
     if config.adaptive_threshold:  # only with the option: the report is unchanged without it
-        small = small_uses(every_step, read, read_from, config, base_est, window_s)
+        small = small_uses(every_step, read, read_from, config, base_est, window_s, histories, known, end)
         adaptive = {"small_uses": [_small_use(a) for a in small if a.end > start and a.start < end]}
         cold_cfg = config.cold_config()
         if cold_cfg is not None:  # cold appliances (#89): only with their own option too
-            # after the small uses: the low steps a sub-meter explains are marked
+            # after the small uses: the low steps a sub-meter or a switched
+            # load explains are marked
             calm = PvQuiet([(s.ts, s.pv) for s in samples if s.pv is not None]) if config.pv_entity else None
             quiet = Quiet([s.ts for s in every_step if not s.low], calm, cold_cfg.quiet_margin_s)
             tracks = detect_cold(every_step, read, quiet, start, end, config.cold_models, cold_cfg)

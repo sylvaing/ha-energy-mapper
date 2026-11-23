@@ -166,6 +166,15 @@ def resolve_switched_load(
     states = sorted(states, key=lambda x: x[0])
     if cfg.measure == RUN and points is not None:
         return resolve_state_load(cfg, states, points, until, run_config)
+    load, marked = _either_polarity(cfg, states, steps, until, threshold, window_s)
+    for s in marked:
+        s.explained_by = cfg.name
+    return load
+
+
+def _either_polarity(cfg, states, steps, until, threshold, window_s):
+    """:func:`_resolve` with the configured states, or with the opposite
+    ones (``auto_polarity``) when more transitions agree with the load."""
     load, marked = _resolve(cfg, cfg.on_states, states, steps, until, threshold, window_s)
     if cfg.auto_polarity:
         seen = {s for _, s in states if s not in UNAVAILABLE}
@@ -175,12 +184,53 @@ def resolve_switched_load(
             if alt.matched > load.matched:
                 alt.inverted = True
                 load, marked = alt, alt_marked
+    return load, marked
+
+
+def explain_low_steps(
+    cfg: SwitchedLoadConfig,
+    states: Iterable[tuple[float, str]],
+    low: list[Step],
+    until: float,
+    load: KnownLoad | None,
+    tol_w: float,
+    window_s: float = 30.0,
+) -> list[Step]:
+    """The low steps of the adaptive threshold (#88) that a switched load's
+    transitions make (#99), marked ``explained_by`` it and returned.
+
+    ``low``: the low steps, in time order; ``load``: what
+    :func:`resolve_switched_load` made of the steps of the fixed thresholds.
+    The rule is the one of those steps (:func:`_resolve`): the largest free
+    step of the right sign within ``window_s`` of each transition, kept when
+    its size agrees with the load's power within 20 % or ``tol_w``.
+
+    - A load the fixed thresholds measured (a power just above the step
+      threshold: some of its steps fall under it) keeps its power and its
+      polarity: only the low steps of that size are its own.
+    - A load they never saw (a 100 W pump on a relay) has its power taken
+      from the low steps themselves, the median of those at its transitions,
+      in the polarity more of them agree with.
+
+    The load itself is left as it is: its power, its on-periods and its
+    energy are still those of the steps of the fixed thresholds. A
+    run-mode load marks no step (it is transparent to the detection)."""
+    if cfg.measure == RUN:
+        return []
+    states = sorted(states, key=lambda x: x[0])
+    threshold = 2 * tol_w  # the tolerance of _resolve is half the threshold it is given
+    if load is not None and load.matched and load.power_w > 0:
+        _, marked = _resolve(cfg, load.on_states, states, low, until, threshold, window_s, load.power_w)
+    else:
+        _, marked = _either_polarity(cfg, states, low, until, threshold, window_s)
     for s in marked:
         s.explained_by = cfg.name
-    return load
+    return marked
 
 
-def _resolve(cfg, on_states, states, steps, until, threshold, window_s):
+def _resolve(cfg, on_states, states, steps, until, threshold, window_s, power_w=None):
+    """``power_w``: the load's power when it is already known (else the
+    median of the candidate steps, or the configured power)."""
     periods = state_intervals(states, on_states, until)
     step_ts = [s.ts for s in steps]
     free = lambda s: not s.explained_by  # noqa: E731 - steps of other known loads are taken
@@ -197,7 +247,7 @@ def _resolve(cfg, on_states, states, steps, until, threshold, window_s):
             if near_b:
                 downs.append((min(near_b, key=lambda s: s.delta), b))
     sizes = [s.delta for s, _ in ups] + [-s.delta for s, _ in downs]
-    power = statistics.median(sizes) if sizes else cfg.power_w
+    power = power_w if power_w is not None else statistics.median(sizes) if sizes else cfg.power_w
 
     load = KnownLoad(cfg.name, cfg.entity_id, round(power, 1), on_states=tuple(on_states))
     load.transitions = len(periods) + sum(1 for _, b in periods if b < until)

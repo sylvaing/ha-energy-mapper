@@ -435,9 +435,35 @@ report is then identical, field for field, apart from what follows). Afterwards:
    others were (§ 4.12), in a pass of their own on a second `SubmeterEchoes` fed with copies
    of the other steps, so that what explains those does not change (a 70 W appliance on a
    plug that reports late leaves ±70 W steps in the residual load);
-2. the low steps left, and the steps of the fixed thresholds nothing used, are paired
+2. the low steps a **switched load's transition** makes are marked `explained_by` that load
+   (#99, `known.explain_low_steps`): a relay driving a 100 W pump leaves a low step each time
+   it switches, which the installation already knows. The rule is the one of the other steps
+   (§ 4.3): the largest free step of the right sign within 30 s of each transition, kept when
+   its size agrees with the load's power within 20 % (or 20 W). That power is the one the
+   steps of the fixed thresholds gave when they measured the load (one just above the step
+   threshold, some of whose edges fall under it: same polarity too); for a load they never
+   saw it is the median of the low steps at its transitions, in the polarity more of them
+   agree with (`auto_polarity`). A step a sub-meter explained stays that sub-meter's, and an
+   operation-state load (run mode, § 4.3) marks none, as it marks no other step;
+3. the low steps left, and the steps of the fixed thresholds nothing used, are paired
    (`pair_steps`, sizes within 25 % or 20 W), a pair needing at least one low step;
-3. the pairs are validated on the load like any use (§ 4.5).
+4. the pairs are validated on the load like any use (§ 4.5).
+
+The steps of a switched load are only **left out**: the load itself (`known_loads`: its
+power, its matched transitions, its on-periods, its energy in the curve) is still what the
+steps of the fixed thresholds make of it, so a load that only shows in the low steps keeps a
+power of 0 and no energy. Measuring it from its low steps would move energy from *other* to
+the switched loads with the option on, on the strength of steps that are kept or not with
+the noise of the hour (an on-period counts when one of its edges is seen): left for when
+the low steps are trusted for more than a list.
+
+On the reference installation (§ 8.11) nothing moves: its two switched loads draw 0.9 and
+1.8 kW, both measured by the fixed thresholds, and none of the 35 low steps found within
+30 s of one of their transitions over the 8 days (50 to 200 W) has their size, so none is
+explained and the benchmark is equal figure for figure (41.9 small uses a day before and
+after). The rule is exercised by the synthetic days of `tests/test_switched_low_steps.py`
+(a 100 W pump on a relay next to an 80 W fridge, in either polarity; the same pump as a
+regular cycle, which the cold appliances would otherwise learn).
 
 They are reported as `small_uses` (`{start, end, power_w, on_w, off_w}`: a compressor starts
 higher than it stops) and never reach `activations`, the daily signatures, the registry, the
@@ -1161,8 +1187,8 @@ size" (§ 4.5) mixes them. So these appliances have their own model, behind the 
 `cold_appliances` (off by default; it needs `adaptive_threshold`, and does nothing without
 it).
 
-**Input.** The `low` steps of the adaptive threshold that no sub-meter explains (the unpaired
-ones too), the curve the detector read, and the cold models the registry already holds
+**Input.** The `low` steps of the adaptive threshold that no sub-meter and no switched load
+explains (§ 4.2; the unpaired ones too), the curve the detector read, and the cold models the registry already holds
 (`AnalysisConfig.cold_models`). The small uses are not read: their pairing is the problem.
 
 **Learning** (`learn`), in the quiet stretches only: no solar production at the two edges of

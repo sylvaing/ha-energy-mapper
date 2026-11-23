@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.18.1
+
+- Adaptive threshold: the low steps a switched load's transition makes are
+  explained by that load (#99). A load under the step threshold behind a
+  configured switch (a relay driving a 100 W pump, a towel rail on its low
+  setting) left a low step each time it switched, and those steps could be
+  paired into a small use, or learned as a cold appliance, although the
+  installation already knew what they were. They are now matched to the
+  switch's transitions with the rule of the other steps (within 30 s, the
+  right sign, a size that agrees with the load's power, either polarity) and
+  left out of the small uses and of the cold appliances.
+- The switched load itself is unchanged: its power and its energy are still
+  measured from the steps of the fixed thresholds only (a load seen only in
+  the low steps stays at 0 W). No report field changes, and with
+  `adaptive_threshold` off the reports are the ones of 0.18.0.
+
 ## 0.18.0
 
 - Cold appliances (#89): fridges and freezers, behind the new option

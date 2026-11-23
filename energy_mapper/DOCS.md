@@ -170,6 +170,10 @@ measured noise:
   least 40 W and 4 times that noise: about 40 W in a quiet night, 100 to
   200 W under a changing sky, nothing more where the curve is noisier than
   that;
+- a small change made by a load the add-on already knows is not a use to
+  find: the ones a late sub-meter report leaves and (add-on 0.18.1+) the
+  ones at the transitions of a switched load (a relay driving a 100 W pump)
+  are set aside;
 - these **small uses** are listed apart in the daily report (`small_uses`).
   They are not signatures: they are not proposed for review, not tracked as
   appliances and not counted in the breakdown of the curve. A real curve has
