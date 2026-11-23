@@ -634,7 +634,8 @@ appliance with examples:
       "status": "found", "reason": null, "signature_id": "short-850w",
       "activation": {"day": "2027-03-09", "start": 1800000001, "end": 1800000128, "power_w": 846}},
      {"t_on": 1800090000.0, "t_off": null, "power_w": 850, "source": "guided",
-      "status": "pending", "reason": "day_not_analysed", "signature_id": null, "activation": null}
+      "status": "pending", "reason": "day_not_analysed", "signature_id": null, "activation": null,
+      "small_use": null}
    ]}
 ]}
 ```
@@ -655,11 +656,25 @@ appliance with examples:
    appliance's signatures), `other` (as another signature, `owner` when it
    belongs to another appliance; listed in `disagreement`) or `pending` with
    a `reason`: `day_not_analysed` (today), `day_missing` (no stored summary:
-   the analysis failed or the day was pruned), `no_activation`, `too_small`
-   (below the step threshold), `not_in_registry`, or `measured` (the
-   appliance is measured by a switch or a power sensor: its uses are not in
-   the curve). `found` of `total` is the recognition shown on the
-   appliance's card.
+   the analysis failed or the day was pruned), `no_activation`,
+   `small_untracked` or `too_small` (below the step threshold, see below),
+   `not_in_registry`, or `measured` (the appliance is measured by a switch
+   or a power sensor: its uses are not in the curve). `found` of `total` is
+   the recognition shown on the appliance's card.
+
+An example with no activation and a power below the step threshold (the
+night one when it applies) is not tracked. Whether the curve can show it is
+decided from the measured noise of the curve, as for
+[learning from a measured device](#learning-from-a-measured-device)
+(add-on 0.18.2+): `small_untracked` when its power reaches the smallest step
+the curve can show (`quality.meters.visible_w`, the median of the last 14
+analysed days): seen on the whole-house curve, too small to be tracked yet;
+`too_small` under it: too low for the whole-house curve; and `too_small`
+too while no report has the figure yet. With `adaptive_threshold`, one of
+the day's `small_uses` that overlaps the example by the rule of step 1 is
+the curve showing it: `small_untracked` whatever the noise, with that small
+use in `small_use` (`{"day", "start", "end", "power_w"}`, else null). The
+example stays `pending` in both cases: small uses do not reach the registry.
 
 ### Learning from a measured device
 

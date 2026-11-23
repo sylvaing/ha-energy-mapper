@@ -487,10 +487,10 @@ async def test_night_links_the_examples(
         "key": "appliance:toaster",
         "name": "Toaster",
         "measured": False,
-        "total": 1,
+        "total": 2,
         "found": 1,
         "other": 0,
-        "pending": 0,
+        "pending": 1,
         "signature": None,
         "link": {
             "id": "short-1200w",
@@ -513,7 +513,20 @@ async def test_night_links_the_examples(
                 "reason": None,
                 "signature_id": "short-1200w",
                 "activation": {"day": "2027-03-09", "start": start - 2, "end": start + 170, "power_w": 1190},
-            }
+                "small_use": None,
+            },
+            # under the step threshold, seen by the curve (#100, add-on 0.18.2+)
+            {
+                "t_on": start + 600,
+                "t_off": start + 720,
+                "power_w": 70,
+                "source": "live",
+                "status": "pending",
+                "reason": "small_untracked",
+                "signature_id": None,
+                "activation": None,
+                "small_use": {"day": "2027-03-09", "start": start + 604, "end": start + 718, "power_w": 68},
+            },
         ],
     }
     replace(aioclient_mock, "get", "/api/examples", json={"last_day": "2027-03-09", "appliances": [status]})
@@ -533,6 +546,9 @@ async def test_night_links_the_examples(
     toaster = next(a for a in answer["result"]["appliances"] if a["key"] == "appliance:toaster")
     assert toaster["examples"] == [example]
     assert toaster["examples_status"]["found"] == 1
+    # the reasons reach the panel as the add-on gives them
+    assert toaster["examples_status"]["examples"][1]["reason"] == "small_untracked"
+    assert toaster["examples_status"]["examples"][1]["small_use"]["power_w"] == 68
 
 
 async def test_example_helpers() -> None:

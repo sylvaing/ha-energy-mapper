@@ -564,7 +564,9 @@ has the figure, `visible` is `recognisable` (the former verdict). So a 70 W free
 curve is `recognisable: false, visible: true`: the panel says that the curve shows it but that
 appliances this small are not tracked yet, and keeps "too low for the whole-house curve" for
 those under the noise. `recognisable` still decides what is taught and self-tested, since the
-small uses do not reach the registry.
+small uses do not reach the registry. The labelled examples (§ 8.9) follow the same rule
+(#100): an example under the fixed threshold with no activation is `small_untracked` at or
+above `visible_w` and `too_small` under it, or before any report has the figure.
 
 ### 4.3 Switched loads (`known.py`)
 
@@ -2527,12 +2529,37 @@ summaries, so after each nightly analysis):
 4. *Measure*: each example is `found` (one of the appliance's signatures, the linked one
    included), `other` (another signature: `owner`, and `disagreement` lists them: contradicting
    examples) or `pending` with a `reason` (`day_not_analysed`, `day_missing`, `no_activation`,
-   `too_small`, `not_in_registry`, `measured`). `found` of `total` is the recognition shown on
-   the appliance's card (`examples_status` in `energy_mapper/appliances`).
+   `small_untracked`, `too_small`, `not_in_registry`, `measured`). `found` of `total` is the
+   recognition shown on the appliance's card (`examples_status` in `energy_mapper/appliances`).
+
+**Under the step threshold** (#100, add-on 0.18.2). An example with no activation and a power
+under `smallest_step_w()` is not tracked; what the curve can show of it is said from the
+measured noise, as for teaching and the self-test (§ 4.2, "Too low for the whole-house
+curve"). `examples.resolve` / `status` take `visible_w` (`Analyzer.visible_w`, the median
+`quality.meters.visible_w` of the last 14 summaries): at or above it the reason is
+`small_untracked`, under it `too_small`, and `too_small` too while it is None (no report has
+the figure yet: the former verdict). With the adaptive threshold, the day's `small_uses` are
+searched with the rule of *Find* (`find_activation(..., field="small_uses")`): a small use that
+is the example is the curve showing it, so the reason is `small_untracked` whatever
+`visible_w` says (a median of other days), and the item carries it in `small_use`
+(`{day, start, end, power_w}`). The example stays `pending` and takes no part in the votes:
+small uses do not reach the registry. Not done: finding an example again in the runs of a
+`cold` signature (§ 4.13), which would make it `found` and link the appliance; it needs the
+votes and the link to know the kind, and is left for a follow-up.
+
+**Panel** (`frontend/src/examples.ts`, unit tested). `exampleLines` gives the appliance card
+(Appliances tab, every user) one line for its pending examples `small_untracked` ("Labelled
+example at 70 W: the whole-house curve shows it, but appliances this small are not tracked
+yet.") and one for those `too_small` ("… too low for the whole-house curve, it cannot be
+tracked from it."), each with the median power of its examples, singular or plural, in the
+words of the teaching lines (§ 8.6). A reason the panel does not know (an older add-on never
+sends `small_untracked`) gives no line.
 
 **Tests.** Add-on (`tests/test_examples.py`): validation; find by overlap and by start;
 found, linked, an expected signature replaced, a conflict, contradicting examples, the majority,
-every pending reason, a measured appliance; end to end on synthetic days (examples a few seconds
+every pending reason, under the threshold the three cases of the noise (at or above it, under
+it, not measured yet) and the small use of the day that is the example, the endpoint reading the
+noise from the stored reports, a measured appliance; end to end on synthetic days (examples a few seconds
 off, one open: all found, the toaster's signature linked with all its past uses, labelled after
 `apply_to_registry`, kept by the next night); the endpoints; the live event accessor
 (`tests/test_live_service.py`). Integration (`tests_integration/test_live_label.py`): every

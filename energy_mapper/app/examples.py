@@ -24,6 +24,15 @@ analysed days (the day summaries of the nightly analysis):
    with a reason. ``found`` of ``total`` is the recognition the panel shows
    on the appliance's card.
 
+An example with no activation and a power under the step threshold is not
+tracked. Whether the curve can show it is said from the measured noise of
+the curve (``visible_w``, #88, #100), as for teaching and the self-test: at
+or above it, ``small_untracked`` (seen by the curve, too small to be tracked
+yet); under it, ``too_small``. A small use of the day (``small_uses``, the
+low steps of the adaptive threshold) that overlaps the example by the rule
+of the activations is the curve showing it: ``small_untracked`` whatever the
+noise, with the small use in ``small_use``.
+
 Pure (no I/O, no clock): the caller passes the summaries and the registry.
 """
 
@@ -43,7 +52,9 @@ FOUND, OTHER, PENDING = "found", "other", "pending"
 DAY_NOT_ANALYSED = "day_not_analysed"  # its day is not analysed yet (today)
 DAY_MISSING = "day_missing"  # its day has no stored summary (failed or pruned)
 NO_ACTIVATION = "no_activation"  # the analysis saw no activation there
-TOO_SMALL = "too_small"  # below the step threshold: the curve cannot show it
+# below the step threshold, so not tracked, and ...
+TOO_SMALL = "too_small"  # ... under the noise of the curve: it cannot show it
+SMALL_UNTRACKED = "small_untracked"  # ... at or above it: seen by the curve, not tracked yet
 NOT_IN_REGISTRY = "not_in_registry"  # an activation the registry does not know (yet)
 MEASURED = "measured"  # the appliance is measured by a switch or a power sensor
 
@@ -68,12 +79,15 @@ def _last_end(summaries: Mapping[str, Mapping]) -> float | None:
     return max(ends) if ends else None
 
 
-def find_activation(example: Mapping, summary: Mapping, min_overlap: float = 0.5) -> Mapping | None:
-    """The activation of a day summary that is this example (None: none)."""
+def find_activation(
+    example: Mapping, summary: Mapping, min_overlap: float = 0.5, field: str = "activations"
+) -> Mapping | None:
+    """The activation of a day summary that is this example (None: none).
+    ``field``: the list searched (``small_uses``: the day's small uses)."""
     t_on = float(example["t_on"])
     t_off = example.get("t_off")
     best, best_key = None, None
-    for a in summary.get("activations") or []:
+    for a in summary.get(field) or []:
         try:
             start, end = float(a["start"]), float(a["end"])
         except (KeyError, TypeError, ValueError):
@@ -103,6 +117,16 @@ def _item(example: Mapping, reason: str | None = None) -> dict:
         "reason": reason,
         "signature_id": None,
         "activation": None,
+        "small_use": None,
+    }
+
+
+def _found(day: str, a: Mapping) -> dict:
+    return {
+        "day": day,
+        "start": round(float(a["start"])),
+        "end": round(float(a["end"])),
+        "power_w": round(float(a.get("power_w") or 0.0)),
     }
 
 
@@ -112,9 +136,13 @@ def resolve(
     matcher: Matcher,
     step_threshold_w: float = 300.0,
     min_overlap: float = 0.5,
+    visible_w: float | None = None,
 ) -> dict:
     """One example: the activation it is and its registry signature, or why
-    it is pending (``status`` is set by :func:`status`)."""
+    it is pending (``status`` is set by :func:`status`). ``visible_w``: the
+    smallest step the whole-house curve can show
+    (:func:`nilm_core.quality.visible_w`); None (not measured yet): an
+    example under the step threshold is ``too_small``, the former verdict."""
     out = _item(example)
     t_on = float(example["t_on"])
     day = _day_of(summaries, t_on)
@@ -124,15 +152,19 @@ def resolve(
         return out
     a = find_activation(example, summaries[day], min_overlap)
     if a is None:
-        small = float(example.get("power_w") or 0.0) < step_threshold_w
-        out["reason"] = TOO_SMALL if small else NO_ACTIVATION
+        power = float(example.get("power_w") or 0.0)
+        if power >= step_threshold_w:
+            out["reason"] = NO_ACTIVATION
+            return out
+        # not tracked; the curve shows it when one of the day's small uses
+        # is this example, or when its power reaches the measured noise
+        small = find_activation(example, summaries[day], min_overlap, "small_uses")
+        if small is not None:
+            out["small_use"] = _found(day, small)
+        seen = small is not None or (visible_w is not None and power >= visible_w)
+        out["reason"] = SMALL_UNTRACKED if seen else TOO_SMALL
         return out
-    out["activation"] = {
-        "day": day,
-        "start": round(float(a["start"])),
-        "end": round(float(a["end"])),
-        "power_w": round(float(a.get("power_w") or 0.0)),
-    }
+    out["activation"] = _found(day, a)
     sid = matcher.match(a)
     if sid is None:
         out["reason"] = NOT_IN_REGISTRY
@@ -166,8 +198,10 @@ def status(
     step_threshold_w: float = 300.0,
     matcher: Matcher | None = None,
     min_overlap: float = 0.5,
+    visible_w: float | None = None,
 ) -> dict:
-    """What the analysed days say about the examples of one appliance."""
+    """What the analysed days say about the examples of one appliance
+    (``visible_w``: see :func:`resolve`)."""
     key = appliance["key"]
     matcher = matcher or Matcher(registry)
     sigs = {s.get("id"): s for s in (registry or {}).get("signatures") or []}
@@ -179,7 +213,7 @@ def status(
         if measured:
             items.append(_item(e, MEASURED))
         else:
-            items.append(resolve(e, summaries, matcher, step_threshold_w, min_overlap))
+            items.append(resolve(e, summaries, matcher, step_threshold_w, min_overlap, visible_w))
     # votes: how many examples each signature was found as (ties: the latest)
     votes: dict[str, tuple[int, float]] = {}
     for it in items:

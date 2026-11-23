@@ -782,10 +782,11 @@ class Analyzer:
         summaries = self.store.summaries_all()
         registry = self.store.load_registry() or empty_registry(self.registry_config)
         matcher = Matcher(registry)
+        visible = self.visible_w(summaries)
         return {
             "last_day": next(reversed(summaries), None) if summaries else None,
             "appliances": [
-                examples_status(a, summaries, registry, self.smallest_step_w, matcher)
+                examples_status(a, summaries, registry, self.smallest_step_w, matcher, visible_w=visible)
                 for a, _ in examples_of(self.appliances)
             ],
         }

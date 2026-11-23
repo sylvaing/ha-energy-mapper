@@ -28,6 +28,7 @@ from examples import (  # noqa: E402
     NOT_IN_REGISTRY,
     OTHER,
     PENDING,
+    SMALL_UNTRACKED,
     TOO_SMALL,
     find_activation,
     status,
@@ -202,6 +203,74 @@ class FindTests(unittest.TestCase):
                 (item,) = status(kettle(examples=[ex]), SUMMARIES, registry)["examples"]
                 self.assertEqual((item["status"], item["reason"]), (PENDING, reason))
 
+    def test_under_the_threshold_the_measured_noise_decides(self):
+        """#100: no activation and a power under the step threshold."""
+        ex = example(D0 + 5 * HOUR, D0 + 5 * HOUR + 120, power_w=70)
+
+        def reason(visible_w, e=ex, threshold=300.0):
+            got = status(kettle(examples=[e]), SUMMARIES, REGISTRY, threshold, visible_w=visible_w)
+            (item,) = got["examples"]
+            self.assertEqual((item["status"], item["small_use"], got["pending"]), (PENDING, None, 1))
+            return item["reason"]
+
+        # at or above the noise: the curve shows it, it is not tracked yet
+        self.assertEqual(reason(40.0), SMALL_UNTRACKED)
+        self.assertEqual(reason(70.0), SMALL_UNTRACKED)
+        # under the noise: the curve cannot show it
+        self.assertEqual(reason(120.0), TOO_SMALL)
+        # the noise is not measured yet: the former verdict
+        self.assertEqual(reason(None), TOO_SMALL)
+        # at or above the step threshold the noise says nothing
+        big = example(D0 + 5 * HOUR, D0 + 5 * HOUR + 120, power_w=300)
+        self.assertEqual(reason(40.0, big), NO_ACTIVATION)
+        self.assertEqual(reason(600.0, big), NO_ACTIVATION)
+        self.assertEqual(reason(40.0, ex, 60.0), NO_ACTIVATION)
+
+    def test_a_small_use_of_the_day_is_the_example(self):
+        """#100: the day's small uses, by the overlap rule of the activations."""
+        t0 = D0 + 5 * HOUR
+        day = {
+            **SUMMARIES["2027-01-01"],
+            "small_uses": [
+                {"start": t0 + 4, "end": t0 + 118, "power_w": 68.4, "on_w": 71.0, "off_w": 66.0},
+                {"start": t0 + 3600, "end": t0 + 3660, "power_w": 55.0, "on_w": 55.0, "off_w": 55.0},
+            ],
+        }
+        summaries = {**SUMMARIES, "2027-01-01": day}
+
+        def item(e, visible_w=None):
+            return status(kettle(examples=[e]), summaries, REGISTRY, visible_w=visible_w)["examples"][0]
+
+        found = {"day": "2027-01-01", "start": t0 + 4, "end": t0 + 118, "power_w": 68}
+        # seen by the curve whatever the noise of the last days says
+        for visible in (None, 40.0, 120.0):
+            got = item(example(t0, t0 + 120, power_w=70), visible)
+            self.assertEqual(
+                (got["status"], got["reason"], got["small_use"]), (PENDING, SMALL_UNTRACKED, found)
+            )
+            self.assertIsNone(got["activation"])
+            self.assertIsNone(got["signature_id"])
+        # an open example: the small use that starts with it
+        got = item(example(t0, power_w=70))
+        self.assertEqual((got["reason"], got["small_use"]), (SMALL_UNTRACKED, found))
+        # no overlap: the noise decides
+        apart = example(t0 + 1800, t0 + 1900, power_w=70)
+        self.assertEqual((item(apart)["reason"], item(apart)["small_use"]), (TOO_SMALL, None))
+        self.assertEqual(item(apart, 40.0)["reason"], SMALL_UNTRACKED)
+        # an example the analysis tracks is not looked for in the small uses
+        got = item(example(t0, t0 + 120, power_w=2000))
+        self.assertEqual((got["reason"], got["small_use"]), (NO_ACTIVATION, None))
+        # an activation comes first
+        act = {**day, "small_uses": [{"start": D0 + 3600, "end": D0 + 3780, "power_w": 70.0}]}
+        got = status(
+            kettle(examples=[example(D0 + 3600, D0 + 3780, power_w=70)]),
+            {**SUMMARIES, "2027-01-01": act},
+            REGISTRY,
+        )
+        self.assertEqual(
+            (got["examples"][0]["signature_id"], got["examples"][0]["small_use"]), ("short-2000w", None)
+        )
+
     def test_measured_appliance_is_not_evaluated(self):
         a = kettle([{"type": "switched_load", "entity_id": "switch.kettle"}], [example(D0 + 3600, D0 + 3780)])
         got = status(a, SUMMARIES, REGISTRY)
@@ -321,6 +390,26 @@ class ApiTests(unittest.TestCase):
         self.assertEqual((item["key"], item["found"], item["total"]), ("appliance:kettle", 1, 1))
         self.assertIsNotNone(item["link"])
         self.assertEqual(self.call("POST", "/api/examples")[0], 405)
+
+    def test_examples_endpoint_reads_the_measured_noise(self):
+        """#100: the endpoint decides "too small" from the stored reports."""
+        report = self.analyzer.analyze_day(TODAY - dt.timedelta(days=1))
+        visible = report["quality"]["meters"]["visible_w"]
+        self.assertEqual(self.analyzer.visible_w(self.store.summaries_all()), visible)
+        self.assertLess(visible, self.analyzer.smallest_step_w)
+        # a quiet minute of the day: no activation there
+        t0 = next(
+            t
+            for t in range(int(report["start"]) + 600, int(report["end"]), 600)
+            if all(a["end"] < t - 300 or a["start"] > t + 360 for a in report["activations"])
+        )
+        seen = example(t0, t0 + 60, power_w=visible + 5)
+        under = example(t0 + 1, t0 + 60, power_w=visible - 5)
+        body = json.dumps({"appliances": [kettle(examples=[seen, under])]}).encode()
+        self.assertEqual(route(self.analyzer, self.store, "PUT", "/api/appliances", body)[0], 200)
+        (item,) = self.call("GET", "/api/examples")[1]["appliances"]
+        self.assertEqual([e["reason"] for e in item["examples"]], [SMALL_UNTRACKED, TOO_SMALL])
+        self.assertEqual((item["found"], item["pending"]), (0, 2))
 
     def test_live_event_endpoint(self):
         live = FakeLive()

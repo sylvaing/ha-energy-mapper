@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.18.2
+
+- Labelled examples: "too small" is decided from the measured noise of the
+  curve (#100), as learning from a measured device and the self-test do
+  since 0.17.0. An example the analysis did not find and whose power is
+  under the step threshold gets the new reason `small_untracked` in
+  `GET /api/examples` when its power reaches the smallest step the curve can
+  show (`quality.meters.visible_w` over the last 14 analysed days): seen on
+  the whole-house curve, too small to be tracked yet. Under it, and while no
+  report has the figure, it stays `too_small`.
+- With `adaptive_threshold`, such an example is also looked for in the day's
+  small uses, with the overlap rule of the activations: when one is the
+  example, the reason is `small_untracked` and the item carries it in the
+  new field `small_use`. The example stays pending: small uses are not
+  tracked.
+- Integration 0.15.1: the appliance's card tells the two cases of its
+  labelled examples apart, English and French.
+
 ## 0.18.1
 
 - Adaptive threshold: the low steps a switched load's transition makes are

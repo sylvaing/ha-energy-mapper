@@ -4,6 +4,7 @@
 
 import { addDays, dayOf, startOfDay } from "./format.ts";
 import type { UsageRow } from "./data.ts";
+import type { ExamplesStatus } from "./examples.ts";
 import type { Registry, Report } from "./types.ts";
 
 /** One source of an appliance (energy_mapper/appliances). */
@@ -35,6 +36,8 @@ export interface ApplianceInfo {
     energy_entity?: string | null;
     program_entity?: string | null;
   } | null;
+  /** what the analysed days found of its labelled examples (#17), null without any */
+  examples_status?: ExamplesStatus | null;
 }
 
 export interface ApplianceListing {

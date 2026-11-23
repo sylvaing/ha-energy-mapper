@@ -30,6 +30,7 @@ import {
   type Tracking,
 } from "./appliances.ts";
 import { energyState, pickList, preselected, type TrackingListing } from "./takeover.ts";
+import { exampleLines } from "./examples.ts";
 import { sensorChoices, teachingLines, teachState, type TeachingListing } from "./teaching.ts";
 import {
   canStart,
@@ -1301,6 +1302,7 @@ export class EnergyMapperPanel extends LitElement {
           </button>`
         : html`<div class="appliance-main">${body}</div>`}
       ${this.isAdmin ? this.renderTakeover(c, t) : nothing} ${this.renderTeaching(c, t, info)}
+      ${this.renderExampleLines(c, t, info)}
       ${this.isAdmin
         ? html`<div class="appliance-actions">
             ${this.teachAction(c)}
@@ -1415,6 +1417,17 @@ export class EnergyMapperPanel extends LitElement {
       "plain",
       t("teach_action_hint"),
     )}`;
+  }
+
+  /** The labelled examples under the step threshold (#100): seen by the
+   * whole-house curve but not tracked yet, or too low for it. */
+  private renderExampleLines(c: ApplianceCard, t: Translate, info: LocaleInfo): TemplateResult | typeof nothing {
+    const appliance = this._appliances?.appliances.find((a) => a.key === c.key);
+    const lines = exampleLines(appliance?.examples_status, t, info);
+    if (!lines.length) return nothing;
+    return html`<div class="appliance-takeover">
+      <div class="teach-status">${lines.map((l) => html`<span class="teach-line">${l}</span>`)}</div>
+    </div>`;
   }
 
   /** Learning from a measured device (#14): the status while a sensor

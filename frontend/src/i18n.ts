@@ -158,6 +158,10 @@ const en = {
   teach_accuracy: "Found from the curve: {found} of {uses} uses (recall {recall}), precision {precision}",
   teach_too_small: "{power} is too low for the whole-house curve: it cannot be tracked from it.",
   teach_small_untracked: "{power}: the whole-house curve shows it, but appliances this small are not tracked yet.",
+  examples_small_untracked: "Labelled examples at {power}: the whole-house curve shows them, but appliances this small are not tracked yet.",
+  examples_small_untracked_one: "Labelled example at {power}: the whole-house curve shows it, but appliances this small are not tracked yet.",
+  examples_too_small: "Labelled examples at {power}: too low for the whole-house curve, they cannot be tracked from it.",
+  examples_too_small_one: "Labelled example at {power}: too low for the whole-house curve, it cannot be tracked from it.",
   teach_conflict: "This signature already belongs to {name}.",
   teach_finish: "Finish",
   teach_finish_confirm:
@@ -729,6 +733,10 @@ const fr: Table = {
   teach_accuracy: "Retrouvé dans la courbe : {found} utilisations sur {uses} (rappel {recall}), précision {precision}",
   teach_too_small: "{power}, c'est trop faible pour la courbe de la maison : l'appareil ne peut pas y être suivi.",
   teach_small_untracked: "{power} : la courbe de la maison le montre, mais les appareils aussi petits ne sont pas encore suivis.",
+  examples_small_untracked: "Exemples étiquetés à {power} : la courbe de la maison les montre, mais les appareils aussi petits ne sont pas encore suivis.",
+  examples_small_untracked_one: "Exemple étiqueté à {power} : la courbe de la maison le montre, mais les appareils aussi petits ne sont pas encore suivis.",
+  examples_too_small: "Exemples étiquetés à {power} : c'est trop faible pour la courbe de la maison, l'appareil ne peut pas y être suivi.",
+  examples_too_small_one: "Exemple étiqueté à {power} : c'est trop faible pour la courbe de la maison, l'appareil ne peut pas y être suivi.",
   teach_conflict: "Cette signature appartient déjà à {name}.",
   teach_finish: "Terminer",
   teach_finish_confirm:

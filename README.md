@@ -449,7 +449,10 @@ unnamed signature is the review's *Validate*; a new appliance whose start and st
 recognised from its first night (its signature is created at once), one labelled before its stop
 when the stop comes or at night. Each night the add-on finds the examples again in the analysed
 day, links the appliance to the signature they were found as when it has none yet, and the card
-shows how many of your labelled uses the curve finds.
+shows how many of your labelled uses the curve finds. An example below the step threshold is not
+tracked: the card says whether the measured noise of the curve lets it show ("the whole-house
+curve shows it, but appliances this small are not tracked yet") or not ("too low for the
+whole-house curve").
 
 **Self-test** ([#15](https://github.com/sylvaing/ha-energy-mapper/issues/15)): how well does
 the curve find an appliance it cannot see? Each night, after the analysis, the add-on takes one
@@ -1119,7 +1122,10 @@ dans la revue ; un nouvel appareil dont le début et la fin sont connus est reco
 première nuit (sa signature est créée tout de suite), un appareil étiqueté avant son arrêt quand
 l'arrêt arrive ou la nuit. Chaque nuit, l'add-on retrouve les exemples dans la journée analysée,
 relie l'appareil à la signature sous laquelle ils ont été retrouvés s'il n'en a pas encore, et
-la carte indique combien de vos utilisations étiquetées la courbe retrouve.
+la carte indique combien de vos utilisations étiquetées la courbe retrouve. Un exemple sous le
+seuil de marche n'est pas suivi : la carte dit si le bruit mesuré de la courbe permet de le voir
+(« la courbe de la maison le montre, mais les appareils aussi petits ne sont pas encore suivis »)
+ou non (« trop faible pour la courbe de la maison »).
 
 **Auto-test** ([#15](https://github.com/sylvaing/ha-energy-mapper/issues/15)) : la courbe
 retrouve-t-elle un appareil qu'elle ne voit pas ? Chaque nuit, après l'analyse, l'add-on prend
