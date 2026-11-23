@@ -100,6 +100,10 @@ export interface DailySignature {
   duration_s: number;
   energy_kwh: number;
   registry_id?: string | null;
+  /** cold appliances (#89): the part of energy_kwh estimated from the rhythm
+   * learned in the quiet hours, where the appliance could not be followed */
+  estimated_kwh?: number;
+  period_s?: number | null;
 }
 
 /** One run of an appliance found in the curve (a daily signature). */
@@ -168,7 +172,9 @@ export interface Report {
 
 export interface RegistrySignature {
   id: string;
-  kind: "steady" | "cycling" | "multiphase" | string;
+  kind: "steady" | "cycling" | "multiphase" | "cold" | string;
+  /** cold (#89): of energy_kwh, the part estimated where it was not followed */
+  estimated_kwh?: number | null;
   /** multiphase (#26): the template, its phases in order */
   phases?: CyclePhase[];
   /** multiphase: typical energy of one cycle (kWh) */

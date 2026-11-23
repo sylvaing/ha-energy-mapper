@@ -43,6 +43,7 @@ DEFAULTS = {
     "step_threshold_w": 300.0,
     "night_step_threshold_w": None,
     "adaptive_threshold": False,
+    "cold_appliances": False,
     "peak_threshold_w": None,
     "review_min_uses": 5,
     "review_min_days": 3,

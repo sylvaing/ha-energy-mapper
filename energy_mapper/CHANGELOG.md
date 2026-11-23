@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.18.0
+
+- Cold appliances (#89): fridges and freezers, behind the new option
+  `cold_appliances`, **off by default** (experimental; it needs
+  `adaptive_threshold` and does nothing without it). The low steps of the
+  adaptive threshold that come back with the same sizes, the same run length
+  and a regular pause are learned in the quiet hours (no solar production,
+  no larger appliance switching; at least 5 runs) as one appliance: its
+  on-step, its off-step (a compressor starts higher than it stops, which is
+  what tells two such appliances apart), its usual run lengths and its usual
+  pause.
+- The appliance is then followed through the whole day with that model: a
+  detection that spanned two runs is split, a run with one step missing is
+  completed (the other edge is looked for in the curve where the run length
+  says it is due), one or two runs missing between two others are filled.
+  Where more is missing (busy hours) no run is reported: the energy is
+  **estimated** from the duty learned in the quiet hours and given apart
+  (`estimated_kwh`), an estimate, not a detection.
+- A new kind of signature, `cold` (`cold-80w`), in the daily report
+  (`cold`: the model, the runs with how each was found, the estimated spans,
+  the energy) and in the registry, which keeps the model from day to day: on
+  a day whose night taught nothing the appliance is still followed, and one
+  that is gone is no longer reported. It is reviewed, named and counted in
+  the hourly statistics like the others; its energy leaves the unexplained
+  share of the day. Only these regular groups reach the review: the other
+  small uses stay where they were.
+- With either option off, the reports are the ones of 0.17.0. The live view
+  is unchanged (cold appliances are a nightly analysis).
+- Integration 0.15.0: *Cold appliances (fridge, freezer)* in the options
+  (*Thresholds*), English and French; the panel names such a signature
+  ("Runs in cycles all day, about 80 W, every 43 min"), shows its cycle in
+  the review and says which part of its energy is estimated.
+- `tools/benchmark.py --cold`: the days are analysed in order with the models
+  learned before each, and a hidden device gets the score of the cold
+  appliance its absence adds: runs found and right, by night and by day, and
+  daily energy against the device's own meter.
+
 ## 0.17.0
 
 - Step threshold adapted to the noise of the curve (#88), behind the new

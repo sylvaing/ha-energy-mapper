@@ -85,6 +85,14 @@ test("provisional name of a cycling signature: no duration", () => {
   assert.equal(provisionalName(sig, tFr, fr), "Appareil de 900 W en cycles, le soir");
 });
 
+test("provisional name of a cold appliance: its rhythm, not its hours", () => {
+  const sig = { kind: "cold", power_w: 79, duration_s: 540, period_s: 2580, hours: Array(24).fill(1) };
+  assert.equal(provisionalName(sig, tEn, en), "Runs in cycles all day, about 79 W, every 45 min");
+  assert.equal(provisionalName(sig, tFr, fr), "Tourne en cycles toute la journée, environ 79 W, toutes les 45 min");
+  assert.equal(provisionalName({ kind: "cold", power_w: 106 }, tEn, en), "Runs in cycles all day, about 110 W");
+  assert.equal(provisionalName({ kind: "cold" }, tFr, fr), "Tourne en cycles toute la journée");
+});
+
 test("provisional name with missing fields: fewer parts", () => {
   // a daily signature has no hours
   assert.equal(provisionalName({ kind: "steady", power_w: 2000, duration_s: 120 }, tEn, en), "2 kW appliance, ~2 min");

@@ -45,6 +45,15 @@ What a device's line means:
 The registry-free score is given for every device that ran, whatever its
 status, overall and apart from / during the solar hours.
 
+With ``--cold`` (cold appliances, #89; needs ``--adaptive``) the days are
+analysed in order, each one with the cold appliances the days before it
+taught (as the add-on does from its registry), and a hidden device also gets
+the score of the cold appliance its absence adds (``cold``): the one the
+real analysis does not have. Its runs against the device's (found, right,
+apart from and during the solar hours), and its daily energy against the
+device's own meter, the estimated part included. The runs of the cold
+appliances count as uses in the registry-free score too.
+
 Standard library only, not shipped in the add-on image.
 """
 
@@ -53,6 +62,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import csv
+import dataclasses
 import datetime as dt
 import gzip
 import json
@@ -67,7 +77,10 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "energy_map
 
 import selftest  # noqa: E402
 from nilm_core import AnalysisConfig, SubmeterConfig, SwitchedLoadConfig, analyze  # noqa: E402
+from nilm_core.cold import GROUP as COLD  # noqa: E402
+from nilm_core.cold import alike  # noqa: E402
 from nilm_core.groundtruth import merge_evaluations, runs_of  # noqa: E402
+from nilm_core.registry import cold_models  # noqa: E402
 from nilm_core.registry import update as update_registry  # noqa: E402
 from nilm_core.signal import parse_numeric  # noqa: E402
 from nilm_core.steps import PV_QUIET_W  # noqa: E402
@@ -169,8 +182,14 @@ def _spans(activation: Mapping) -> list[tuple[float, float]]:
 
 
 def _uses_of(report: Mapping) -> list[dict]:
-    """Every use the analysis found: its activations and its small uses."""
-    return [*report.get("activations", ()), *(report.get("small_uses") or ())]
+    """Every use the analysis found: its activations, its small uses and
+    the runs of its cold appliances (#89)."""
+    runs = [
+        {"start": c["start"], "end": c["end"], "power_w": item["power_w"]}
+        for item in report.get("cold") or ()
+        for c in item.get("cycles") or ()
+    ]
+    return [*report.get("activations", ()), *(report.get("small_uses") or ()), *runs]
 
 
 def _covered(a: float, b: float, spans: Sequence[tuple[float, float]]) -> float:
@@ -270,17 +289,158 @@ def _solar_hours(report: Mapping):
 
 
 # ---------------------------------------------------------------------------
+# cold appliances (#89)
+# ---------------------------------------------------------------------------
+def _in_order(windows, config, days, hour, log=None) -> tuple[dict[str, dict], dict]:
+    """``(reports, registry)``: the days analysed in order, each one with
+    the cold appliances the days before it taught."""
+    reports: dict[str, dict] = {}
+    summaries: dict[str, dict] = {}
+    registry = None
+    for day, start, end in days:
+        cfg = dataclasses.replace(config, cold_models=cold_models(registry))
+        reports[day] = analyze(windows[day], cfg, start, end, local_hour=hour)
+        summaries[day] = {k: v for k, v in reports[day].items() if k != "curve"}
+        registry = update_registry(registry, summaries, end, local_hour=hour)
+        if log:
+            log(f"{day}: analysed in {reports[day]['quality']['compute_s']} s")
+    return reports, registry or {}
+
+
+def _cold_energy_kwh(item: Mapping, a: float, b: float) -> tuple[float, float]:
+    """``(energy, estimated part)`` of a cold appliance within ``[a, b)``."""
+    runs = sum(max(0.0, min(b, c["end"]) - max(a, c["start"])) for c in item.get("cycles") or ())
+    est = sum(
+        e["power_w"] * max(0.0, min(b, e["end"]) - max(a, e["start"])) for e in item.get("estimated") or ()
+    )
+    return (item["power_w"] * runs + est) / 3.6e6, est / 3.6e6
+
+
+def cold_score(
+    runs: Sequence,
+    span: tuple[float, float] | None,
+    hidden: Mapping,
+    visible: Mapping,
+    solar=lambda ts: False,
+) -> dict | None:
+    """The cold appliance a hidden device adds, on one day.
+
+    Among the cold appliances of the hidden analysis that the real one does
+    not have (other steps, :func:`nilm_core.cold.alike`, or runs that do
+    not cover the device's), the one whose runs cover the device's the
+    most; None when there is none. A run of the
+    device is **found** when the appliance's runs cover ``FREE_COVER`` of
+    it, a run of the appliance is **true** when the device's cover
+    ``FREE_COVER`` of it (overall, and apart from / during the solar
+    hours). ``span``: when the device's meter reported on that day; the
+    energies are those within it."""
+    truth = [(r.start, r.end) for r in runs]
+
+    def cover(item: Mapping) -> float:
+        spans = [(c["start"], c["end"]) for c in item.get("cycles") or ()]
+        return sum(_covered(a, b, spans) for a, b in truth)
+
+    # not the device's: the real analysis has it too, and its runs there
+    # cover the device's as well (half as much at least)
+    others = visible.get("cold") or ()
+    new = [
+        c
+        for c in hidden.get("cold") or ()
+        if not any(alike(c, o) is not None and cover(o) >= 0.5 * cover(c) for o in others)
+    ]
+    if not new:
+        return None
+    item = max(new, key=cover)
+    spans = [(c["start"], c["end"]) for c in item.get("cycles") or ()]
+    out = {k: {"uses": 0, "found": 0, "detections": 0, "true": 0} for k in ("all", "no_solar", "solar")}
+
+    def count(ts: float, what: str) -> None:
+        out["all"][what] += 1
+        out["solar" if solar(ts) else "no_solar"][what] += 1
+
+    for a, b in truth:
+        count(a, "uses")
+        if _covered(a, b, spans) >= FREE_COVER * (b - a):
+            count(a, "found")
+    a, b = span or (hidden["start"], hidden["end"])
+    for x, y in spans:
+        if not a <= x < b:
+            continue  # the device's meter did not report yet (or no longer): nothing to compare with
+        count(x, "detections")
+        if _covered(x, y, truth) >= FREE_COVER * (y - x):
+            count(x, "true")
+    energy, estimated = _cold_energy_kwh(item, a, b)
+    out["energy_kwh"] = energy
+    out["estimated_kwh"] = estimated
+    out["truth_kwh"] = sum(r.energy_kwh for r in runs)
+    out["whole_day"] = b - a >= 0.95 * (hidden["end"] - hidden["start"])
+    out["model"] = {k: item.get(k) for k in ("power_w", "on_w", "off_w", "on_s", "period_s", "duty")}
+    return out
+
+
+def _cold_merge(parts: Sequence[Mapping | None], days: int, signature: Mapping | None) -> dict:
+    """The cold score over the days. ``energy_ratio``: over the days the
+    device's meter covered; ``worst_day_ratio``: the daily ratio farthest
+    from 1 among them."""
+    found = [p for p in parts if p]
+    out = _free_merge(found) if found else {}
+    whole = [p for p in found if p["whole_day"] and p["truth_kwh"] > 0]
+    ratios = [p["energy_kwh"] / p["truth_kwh"] for p in whole]
+    truth = sum(p["truth_kwh"] for p in whole)
+    energy = sum(p["energy_kwh"] for p in whole)
+    return {
+        **out,
+        "days": days,  # with runs of the device
+        "days_followed": len(found),
+        "energy_days": len(whole),
+        "truth_kwh": round(truth, 3),
+        "energy_kwh": round(energy, 3),
+        "estimated_share": round(sum(p["estimated_kwh"] for p in whole) / energy, 3) if energy else None,
+        "energy_ratio": round(energy / truth, 3) if truth else None,
+        "worst_day_ratio": round(max(ratios, key=lambda r: abs(r - 1)), 3) if ratios else None,
+        "model": found[-1]["model"] if found else None,
+        # what the registry of the hidden analyses proposes for it
+        "signature": signature,
+    }
+
+
+def _cold_signatures(registry: Mapping) -> list[dict]:
+    """The cold signatures of a registry, as the result gives them."""
+    keys = ("id", "power_w", "on_w", "off_w", "on_s", "period_s", "duty", "count", "days_seen")
+    keys = (*keys, "energy_kwh", "estimated_kwh")
+    return [
+        {k: s.get(k) for k in keys}
+        for s in registry.get("signatures") or []
+        if (s.get("kind"), s.get("band")) == COLD
+    ]
+
+
+def _meter_span(points: Sequence, start: float, end: float) -> tuple[float, float] | None:
+    """From the first to the last reading of a device's meter within the
+    day (the whole day when it reported before and after it)."""
+    known = [t for t, v in points if v is not None]
+    i, j = bisect.bisect_left(known, start), bisect.bisect_right(known, end)
+    if i >= j:
+        return None
+    return (start if i > 0 else known[i]), (end if j < len(known) else known[j - 1])
+
+
+# ---------------------------------------------------------------------------
 # the benchmark
 # ---------------------------------------------------------------------------
 def _energy(reports: Mapping[str, Mapping]) -> dict:
-    """The house energy of the days by category, and each one's share."""
+    """The house energy of the days by category, and each one's share. The
+    cold appliances (#89) are apart from the other signatures."""
     total = defaultdict(float)
     for r in reports.values():
         e = r["energy_kwh"]
+        cold = {c["id"] for c in r.get("cold") or ()}
         total["house"] += e["house"]
         total["submetered"] += e["submetered"]
         total["switched"] += sum(e["known"].values())
-        total["signatures"] += sum(e["signatures"].values())
+        total["signatures"] += sum(v for k, v in e["signatures"].items() if k not in cold)
+        if "cold" in r:
+            total["cold"] += sum(v for k, v in e["signatures"].items() if k in cold)
         total["base"] += e["base"]
         total["unexplained"] += e["other"]
     house = total["house"]
@@ -306,16 +466,20 @@ def run(
     days = days_of([t for t, _ in hist.get(config.grid_entity, ())], tz)
     names = dict(selftest.candidates(config.submeters))
     chosen = [e for e in names if devices is None or e in devices]
+    cold = config.cold_config() is not None
 
     # 1. the real analysis of each day (every sub-meter subtracted)
     windows: dict[str, Histories] = {}
     reports: dict[str, dict] = {}
-    quality: dict[str, dict] = {}
     for day, start, end in days:
-        w = windows[day] = window(hist, start - config.context_s - MARGIN_S, end + MARGIN_S)
-        reports[day] = analyze(w, config, start, end, local_hour=hour)
-        quality[day] = reports[day]["quality"]["meters"]
-        log(f"{day}: analysed in {reports[day]['quality']['compute_s']} s")
+        windows[day] = window(hist, start - config.context_s - MARGIN_S, end + MARGIN_S)
+    if cold:  # in order: each day with the cold appliances learned before it
+        reports, _ = _in_order(windows, config, days, hour, log)
+    else:
+        for day, start, end in days:
+            reports[day] = analyze(windows[day], config, start, end, local_hour=hour)
+            log(f"{day}: analysed in {reports[day]['quality']['compute_s']} s")
+    quality = {day: r["quality"]["meters"] for day, r in reports.items()}
     summaries = {d: {k: v for k, v in r.items() if k != "curve"} for d, r in reports.items()}
     now = days[-1][2] if days else 0.0
     registry = update_registry(None, summaries, now, local_hour=hour)
@@ -337,11 +501,15 @@ def run(
         hidden = selftest.hidden_config(config, entity)
         tests = []
         free = []
+        chilled = []
         every = [r for runs in truth[entity].values() for r in runs]
         usual = statistics.median(r.power_w for r in every) if every else None
+        # with the cold appliances, the hidden analyses are made in order too
+        hidden_reports, hidden_registry = _in_order(windows, hidden, days, hour) if cold else ({}, {})
         for day, start, end in days:
             others = [r for d, runs in truth[entity].items() if d != day for r in runs]
-            found: dict = {}  # the hidden analysis of the day, made once
+            # the hidden analysis of the day, made once
+            found: dict = {"report": hidden_reports[day]} if cold else {}
 
             def analysis(w=windows[day], c=hidden, a=start, b=end, found=found) -> dict:
                 if "report" not in found:
@@ -349,11 +517,11 @@ def run(
                 return found["report"]
 
             if truth[entity][day]:
-                free.append(
-                    free_score(
-                        truth[entity][day], usual, analysis(), reports[day], _solar_hours(reports[day])
-                    )
-                )
+                solar = _solar_hours(reports[day])
+                free.append(free_score(truth[entity][day], usual, analysis(), reports[day], solar))
+                if cold:
+                    span = _meter_span(points[entity], start, end)
+                    chilled.append(cold_score(truth[entity][day], span, analysis(), reports[day], solar))
             tests.append(
                 selftest.hide_and_find(
                     day,
@@ -371,6 +539,20 @@ def run(
             )
         out_devices.append({**_device(entity, names[entity], tests), "free": _free_merge(free)})
         d = out_devices[-1]
+        if cold and chilled:
+            last = next((c for c in reversed(chilled) if c), None)
+            sig = next(
+                (
+                    s
+                    for s in _cold_signatures(hidden_registry)
+                    if last and alike(s, last["model"]) is not None
+                ),
+                None,
+            )
+            if sig is not None:
+                # the real analysis has it too: the device was not metered on some of the days
+                sig["in_real_analysis"] = any(alike(sig, o) is not None for o in _cold_signatures(registry))
+            d["cold"] = _cold_merge(chilled, len(chilled), sig)
         log(f"{names[entity]}: {d['status']}, {d['found']} of {d['uses']} use(s) found")
 
     return {
@@ -381,10 +563,15 @@ def run(
             "night_step_w": config.low_step_threshold(),
             # only with the option: the result is unchanged without it
             **({"adaptive": True} if config.adaptive_threshold else {}),
+            **({"cold": True} if cold else {}),
         },
         "meters": {**_merge_quality(list(quality.values())), "per_day": quality},
         "energy": _energy(reports),
-        "signatures": len(registry.get("signatures") or []),
+        # the cold signatures (#89) are counted apart
+        "signatures": sum(
+            1 for s in registry.get("signatures") or [] if (s.get("kind"), s.get("band")) != COLD
+        ),
+        **({"cold": _cold_signatures(registry)} if cold else {}),
         "steps_per_day": round(statistics.mean(r["quality"]["steps"] for r in reports.values()), 1)
         if reports
         else None,
@@ -460,7 +647,8 @@ def table(result: Mapping) -> str:
         if result["days"]
         else "no whole day in the export",
         f"thresholds: {th['step_w']:g} W{night}"
-        + (", adaptive to the noise (smaller uses kept apart)" if th.get("adaptive") else ""),
+        + (", adaptive to the noise (smaller uses kept apart)" if th.get("adaptive") else "")
+        + (", cold appliances followed" if th.get("cold") else ""),
         f"grid meter: {_every(m['grid'])} | solar meter: {_every(m['solar'])}",
         f"noise of the curve: {_num(m['noise_w']['no_solar'], ' W')} without solar,"
         f" {_num(m['noise_w']['solar'], ' W')} with solar",
@@ -493,6 +681,41 @@ def table(result: Mapping) -> str:
             f"{f['detections']:7d} {_pct(f['precision']):>7} "
             f"{_free_part(f['no_solar']):>24} {_free_part(f['solar']):>24}"
         )
+    if th.get("cold"):
+        lines += ["", "cold appliances of the real analysis (regular low-power cycles):"]
+        for c in result.get("cold") or []:
+            run, period = round((c["on_s"] or 0) / 60, 1), round((c["period_s"] or 0) / 60, 1)
+            lines.append(
+                f"  {c['id']:12} {_num(c['power_w'], ' W'):>6},"
+                f" {_num(run, ' min')} every {_num(period, ' min')},"
+                f" {c['count']} run(s) on {c['days_seen']} day(s),"
+                f" {c['energy_kwh']:.2f} kWh ({c['estimated_kwh']:.2f} estimated)"
+            )
+        if not result.get("cold"):
+            lines.append("  none")
+        lines += [
+            "",
+            "the cold appliance a hidden device adds"
+            " (its runs against the device's, its energy against its meter):",
+            f"{'device':28} {'followed':>9} {'uses':>5} {'found':>5} {'recall':>6} {'detect.':>7} "
+            f"{'precis.':>7} {'no solar: rec. / prec.':>24} {'solar: rec. / prec.':>24} "
+            + f"{'energy':>7} {'worst day':>9} {'estim.':>6}",
+        ]
+        for d in result["devices"]:
+            c = d.get("cold")
+            if not c:
+                continue
+            if not c.get("uses"):
+                lines.append(
+                    f"{d['name'][:28]:28} {'0/' + str(c['days']):>9}  no cold appliance found for it"
+                )
+                continue
+            lines.append(
+                f"{d['name'][:28]:28} {str(c['days_followed']) + '/' + str(c['days']):>9} {c['uses']:5d} "
+                f"{c['found']:5d} {_pct(c['recall']):>6} {c['detections']:7d} {_pct(c['precision']):>7} "
+                f"{_free_part(c['no_solar']):>24} {_free_part(c['solar']):>24} {_pct(c['energy_ratio']):>7} "
+                f"{_pct(c['worst_day_ratio']):>9} {_pct(c['estimated_share']):>6}"
+            )
     return "\n".join(lines)
 
 
@@ -538,6 +761,18 @@ def compare(before: Mapping, after: Mapping) -> str:
             f"{delta(of.get('recall'), f.get('recall')):>14} "
             f"{delta(of.get('precision'), f.get('precision')):>14}"
         )
+    if any(d.get("cold") for d in after.get("devices") or []):
+        lines += ["", f"{'cold appliance of':28} {'recall':>14} {'precision':>14} {'energy':>14}"]
+        for d in after.get("devices") or []:
+            c = d.get("cold")
+            if not c:
+                continue
+            oc = old.get(d["entity_id"], {}).get("cold") or {}
+            lines.append(
+                f"{d['name'][:28]:28} {delta(oc.get('recall'), c.get('recall')):>14} "
+                f"{delta(oc.get('precision'), c.get('precision')):>14} "
+                f"{delta(oc.get('energy_ratio'), c.get('energy_ratio')):>14}"
+            )
     return "\n".join(lines)
 
 
@@ -565,6 +800,7 @@ def build_config(args: argparse.Namespace) -> AnalysisConfig:
         step_threshold_w=args.threshold,
         night_step_threshold_w=args.night_threshold,
         adaptive_threshold=getattr(args, "adaptive", False),
+        cold_appliances=getattr(args, "cold", False),
     )
 
 
@@ -595,11 +831,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="noise-adaptive threshold: smaller uses kept apart (#88)",
     )
+    ap.add_argument(
+        "--cold",
+        action="store_true",
+        help="cold appliances: the regular low-power cycles followed (#89; needs --adaptive)",
+    )
     ap.add_argument("--device", action="append", metavar="ENTITY", help="hide only these measured devices")
     ap.add_argument("--tz", help="time zone of the days (default: this machine's)")
     ap.add_argument("--json", help="write the result to this file")
     ap.add_argument("--compare", help="a result written earlier with --json")
     args = ap.parse_args(argv)
+    if args.cold and not args.adaptive:
+        ap.error("--cold needs --adaptive")
 
     hist = load(args.history)
     config = build_config(args)

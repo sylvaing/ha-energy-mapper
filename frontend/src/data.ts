@@ -259,6 +259,9 @@ export interface UsageRow {
   /** signatures: activations; switched loads: on periods */
   runs: number | null;
   cycling: boolean;
+  /** cold appliances (#89): the share of the energy (0..1) that is an
+   * estimate, where the appliance could not be followed; null otherwise */
+  estimated: number | null;
   /** first and last second with some power, null when unknown */
   span: [number, number] | null;
   /** switched loads: time on (s) */
@@ -313,6 +316,7 @@ export function usageRows(report: Report, registry: Registry | null, namer?: Nam
       registry_id: null,
       runs: null,
       cycling: false,
+      estimated: null,
       span: curveSpan,
       on_s: null,
       power_w: null,
@@ -336,6 +340,14 @@ export function usageRows(report: Report, registry: Registry | null, namer?: Nam
       } else {
         const count = daily.reduce((n, d) => n + (d.count ?? 0), 0);
         row.runs = count || null;
+      }
+      const cold = daily.filter((d) => d.kind === "cold");
+      if (cold.length) {
+        // a cold appliance (#89) runs in cycles; a part of its energy may be an estimate
+        row.cycling = true;
+        const total = cold.reduce((n, d) => n + (d.energy_kwh ?? 0), 0);
+        const estimated = cold.reduce((n, d) => n + (d.estimated_kwh ?? 0), 0);
+        row.estimated = total > 0 && estimated > 0 ? Math.min(estimated / total, 1) : null;
       }
     }
     rows.push(row);
@@ -386,6 +398,10 @@ export function usageDetail(row: UsageRow, t: Translate, info: LocaleInfo): stri
       break;
     case "signature":
       parts.push(row.unnamed ? t("usage_to_name") : null, row.cycling ? t("usage_cycles") : runs, span);
+      // said plainly: an estimate, not a detection
+      if (row.estimated != null && row.estimated >= 0.005) {
+        parts.push(t("usage_partly_estimated", { share: formatNumber(Math.round(row.estimated * 100), info) }));
+      }
       break;
   }
   return parts.filter((p): p is string => Boolean(p)).join(" · ");

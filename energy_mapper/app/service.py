@@ -30,6 +30,7 @@ from nilm_core.quality import visible_w
 from nilm_core.registry import (
     Matcher,
     RegistryConfig,
+    cold_models,
     cycle_templates,
     day_max_w,
     empty_registry,
@@ -114,6 +115,8 @@ def derive_options(options: dict) -> dict:
         out[key] = bool(options.get(key))
     if options.get("adaptive_threshold"):  # the noise-adaptive threshold (#88), off by default
         out["adaptive_threshold"] = True
+    if options.get("cold_appliances"):  # cold appliances (#89), off by default
+        out["cold_appliances"] = True
     submeters = [s.strip() for s in options.get("submeters") or [] if s and s.strip()]
     if options.get("submeters_mode") == "manual":
         # the exact list, possibly empty: "no sub-meters" (#33)
@@ -513,7 +516,10 @@ class Analyzer:
             raise AnalysisError("partial_day", f"{day}: the recorder history starts after midnight")
         tz = ctx.tz
         cfg.peak_reference_w = self.peak_reference(day)
-        cfg.cycle_templates = cycle_templates(self.store.load_registry())
+        registry = self.store.load_registry()
+        cfg.cycle_templates = cycle_templates(registry)
+        # the cold appliances learned so far (#89): followed again today
+        cfg.cold_models = cold_models(registry) if cfg.cold_config() is not None else []
         report = analyze(
             histories, cfg, start, end, local_hour=lambda ts: dt.datetime.fromtimestamp(ts, tz).hour
         )

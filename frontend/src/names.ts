@@ -12,6 +12,8 @@ export interface NameSource {
   power_w?: number | null;
   duration_s?: number | null;
   hours?: number[] | null;
+  /** cold appliances (#89): how often a run starts */
+  period_s?: number | null;
 }
 
 export type TimeOfDay = "morning" | "midday" | "afternoon" | "evening" | "night";
@@ -67,8 +69,17 @@ const valid = (v: number | null | undefined): v is number => typeof v === "numbe
 
 /** "2.6 kW appliance, ~50 min, in the evening"; cycling: "900 W appliance in
  * cycles, in the evening"; multi-phase (#26): "Cycle with 2 kW heating,
- * ~1 h 30, in the evening". Missing fields leave their part out. */
+ * ~1 h 30, in the evening"; cold (#89): "Runs in cycles all day, about 80 W,
+ * every 45 min". Missing fields leave their part out. */
 export function provisionalName(sig: NameSource, t: Translate, info: LocaleInfo): string {
+  if (sig.kind === "cold") {
+    const parts: string[] = [t("name_cold")];
+    if (valid(sig.power_w)) parts.push(t("name_cold_power", { power: roundedPower(sig.power_w, info) }));
+    if (valid(sig.period_s)) {
+      parts.push(t("name_cold_every", { period: formatDuration(roundedDuration(sig.period_s), info) }));
+    }
+    return parts.join(", ");
+  }
   const cycling = sig.kind === "cycling";
   const multiphase = sig.kind === "multiphase";
   const power = valid(sig.power_w) ? roundedPower(sig.power_w, info) : null;

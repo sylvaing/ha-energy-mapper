@@ -475,6 +475,7 @@ const row = (over: Partial<UsageRow>): UsageRow => ({
   registry_id: null,
   runs: null,
   cycling: false,
+  estimated: null,
   span: null,
   on_s: null,
   power_w: null,
@@ -496,6 +497,31 @@ test("usage detail texts", () => {
   assert.equal(usageDetail(row({ kind: "base", power_w: 221 }), tFr, fr), "221 W en permanence");
   assert.equal(usageDetail(row({ kind: "base" }), tEn, en), "");
   assert.equal(usageDetail(row({ kind: "other" }), tEn, en), "");
+  // a cold appliance (#89): the part of its energy that is an estimate is said
+  assert.equal(
+    usageDetail(row({ runs: 34, cycling: true, unnamed: true, estimated: 0.224 }), tEn, en),
+    "to name · in cycles · 22 % estimated",
+  );
+  assert.equal(usageDetail(row({ runs: 34, cycling: true, estimated: 0.224 }), tFr, fr), "en cycles · 22 % estimé");
+  assert.equal(usageDetail(row({ runs: 34, cycling: true, estimated: 0.001 }), tEn, en), "in cycles");
+});
+
+test("usage rows: a cold appliance runs in cycles, a part of its energy estimated", () => {
+  const r = usageReport();
+  for (const p of r.curve) p.signatures = { ...p.signatures, "cold-80w": 17 };
+  r.energy_kwh.signatures = { ...r.energy_kwh.signatures, "cold-80w": 0.4 };
+  r.signatures = [
+    ...r.signatures,
+    { id: "cold-80w", kind: "cold", band: "cold", power_w: 79, count: 34, duration_s: 540, energy_kwh: 0.4, estimated_kwh: 0.1, registry_id: "cold-80w" },
+  ];
+  const cold = usageRows(r, registry).find((x) => x.id === "sig:cold-80w")!;
+  assert.equal(cold.cycling, true);
+  assert.equal(cold.runs, 34);
+  assert.equal(cold.estimated, 0.25);
+  assert.equal(cold.unnamed, true);
+  assert.equal(cold.registry_id, "cold-80w");
+  // the other rows have no estimated part
+  assert.deepEqual([...new Set(usageRows(r, registry).filter((x) => x.id !== "sig:cold-80w").map((x) => x.estimated))], [null]);
 });
 
 test("time span: one time for the same minute", () => {

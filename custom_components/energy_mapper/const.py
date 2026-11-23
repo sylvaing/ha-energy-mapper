@@ -45,7 +45,9 @@ LIST_KEYS: Final = ("submeters", "switched_loads")
 INVERT_KEYS: Final = ("grid_invert", "battery_invert")
 # the noise-adaptive step threshold (#88), shown with the thresholds
 ADAPTIVE_THRESHOLD: Final = "adaptive_threshold"
-BOOL_KEYS: Final = (*INVERT_KEYS, ADAPTIVE_THRESHOLD)
+# the cold appliances (#89): regular low-power cycles, needs the adaptive threshold
+COLD_APPLIANCES: Final = "cold_appliances"
+BOOL_KEYS: Final = (*INVERT_KEYS, ADAPTIVE_THRESHOLD, COLD_APPLIANCES)
 THRESHOLD_KEYS: Final = ("step_threshold_w", "night_step_threshold_w", "peak_threshold_w")
 # entities whose state tells whether an appliance runs
 SWITCH_DOMAINS: Final = [

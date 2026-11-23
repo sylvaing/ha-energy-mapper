@@ -78,6 +78,15 @@ configuration:
       40 W and 4 times the noise of the last 30 minutes). Such small uses are
       listed apart in the daily report: they are not proposed for review yet.
       Everything else is analysed as without the option. Off by default.
+  cold_appliances:
+    name: Cold appliances (fridge, freezer)
+    description: >-
+      Experimental, needs the threshold adapted to the noise. The small uses
+      that come back regularly (a compressor that runs a few minutes, pauses,
+      starts again) are learned in the quiet hours and followed through the
+      day: each such appliance is a signature of its own, proposed for review.
+      Where it cannot be followed, its energy is estimated from the rhythm
+      learned at night, and shown as an estimate. Off by default.
   peak_threshold_w:
     name: Peak threshold (W)
     description: >-

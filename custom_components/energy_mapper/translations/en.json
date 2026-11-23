@@ -70,12 +70,14 @@
               "step_threshold_w": "Smallest appliance",
               "night_step_threshold_w": "Smallest appliance at night",
               "adaptive_threshold": "Threshold adapted to the noise of the curve",
+              "cold_appliances": "Cold appliances (fridge, freezer)",
               "peak_threshold_w": "Fixed peak threshold"
             },
             "data_description": {
               "step_threshold_w": "Smallest power change considered as an appliance switching.",
               "night_step_threshold_w": "Optional: smaller power changes, down to this value, are also kept while the solar panels produce nothing (below 20 W in the minute before and after). Between 50 W and the smallest appliance. Only with a solar production sensor; without one, lower the smallest appliance instead. Empty: off.",
               "adaptive_threshold": "Experimental: power changes smaller than the thresholds above are also kept when they stand out of the measured noise of the curve (at least 40 W and 4 times the noise of the last 30 minutes). Such small uses are listed apart in the daily report and are not proposed for review yet; everything else is analysed as without the option.",
+              "cold_appliances": "Experimental, needs the threshold adapted to the noise: the small uses that come back regularly (a compressor that runs a few minutes, pauses, starts again) are learned in the quiet hours and followed through the day. Each such appliance is a signature of its own, proposed for review; where it cannot be followed, its energy is estimated from the rhythm learned at night and shown as an estimate.",
               "peak_threshold_w": "Peaks above this power are notable (for example the subscribed power). Empty: 80 % of the recent maximum."
             }
           },

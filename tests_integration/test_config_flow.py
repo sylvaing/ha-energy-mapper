@@ -205,7 +205,12 @@ FORM = {
         ],
         "excluded_switched_loads": ["switch.pump", "switch.pump"],
     },
-    "thresholds": {"step_threshold_w": 200, "night_step_threshold_w": 150, "adaptive_threshold": True},
+    "thresholds": {
+        "step_threshold_w": 200,
+        "night_step_threshold_w": 150,
+        "adaptive_threshold": True,
+        "cold_appliances": True,
+    },
     "analysis": {
         "analysis_time": "03:15:00",
         "backfill_days": 30,
@@ -227,6 +232,7 @@ EXPECTED = {
     "step_threshold_w": 200.0,
     "night_step_threshold_w": 150.0,
     "adaptive_threshold": True,
+    "cold_appliances": True,
     "analysis_time": "03:15",
     "half_life_days": 20,
     "self_test_devices": 0,
@@ -263,6 +269,7 @@ def test_suggested_values() -> None:
     assert "peak_threshold_w" not in values["thresholds"]
     assert "night_step_threshold_w" not in values["thresholds"]  # off by default
     assert values["thresholds"]["adaptive_threshold"] is False  # the noise-adaptive threshold (#88): off
+    assert values["thresholds"]["cold_appliances"] is False  # the cold appliances (#89): off
     assert values["review"] == {
         "review_min_uses": 5,
         "review_min_days": 3,

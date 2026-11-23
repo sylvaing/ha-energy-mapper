@@ -84,6 +84,7 @@ below (see `PUT /api/settings`).
 | `step_threshold_w` | `300` | Smallest power change considered as an appliance switching. |
 | `night_step_threshold_w` | empty (off) | Smaller steps, down to this value, are also kept while the solar panels produce nothing: see [Night threshold](#night-threshold). Only with a PV sensor. |
 | `adaptive_threshold` | `false` | Experimental: smaller power changes are also kept where they stand out of the measured noise of the curve, and listed apart: see [Threshold adapted to the noise](#threshold-adapted-to-the-noise). |
+| `cold_appliances` | `false` | Experimental, needs `adaptive_threshold`: the small uses that come back regularly (fridge, freezer) are learned, followed and proposed for review: see [Cold appliances](#cold-appliances). |
 | `peak_threshold_w` | 80 % of the recent maximum | Fixed threshold of the notable peaks (for example the subscribed power). |
 | `live_view` | `true` | The [live view](#live-view) of the panel's *Live* tab. It runs only while the tab is open; `false` turns it off entirely (kill switch). Add-on option only. |
 | `log_level` | `info` | `debug`, `info`, `warning` or `error`. |
@@ -172,8 +173,8 @@ measured noise:
 - these **small uses** are listed apart in the daily report (`small_uses`).
   They are not signatures: they are not proposed for review, not tracked as
   appliances and not counted in the breakdown of the curve. A real curve has
-  tens of them a day; a later version will group those that come back
-  regularly (a fridge, a freezer) and propose only those.
+  tens of them a day; those that come back regularly (a fridge, a freezer)
+  are grouped and proposed by the [cold appliances](#cold-appliances) option.
 
 Everything else is analysed exactly as without the option: the same steps,
 activations, signatures and energies, in the nightly analysis and in the live
@@ -187,6 +188,35 @@ measured by a plug is said *too low for the whole-house curve* from that
 figure, no longer from the thresholds: under the thresholds but above the
 noise, the panel says that the curve shows it and that appliances this small
 are not tracked yet.
+
+### Cold appliances
+
+A fridge or a freezer runs a few minutes, pauses and starts again, day and
+night. `cold_appliances` (add-on 0.18.0+, `false` by default, experimental)
+finds such appliances among the low steps of the adaptive threshold: it does
+nothing without `adaptive_threshold`.
+
+- **Learned in the quiet hours.** Where the solar panels produce nothing and
+  no larger appliance switches, the on-steps and off-steps that come back
+  with the same sizes, the same run length and a regular pause are one
+  appliance (at least 5 runs). Two appliances are told apart by their steps,
+  which differ (a compressor starts higher than it stops).
+- **Followed all day.** The appliance is then followed through the low steps
+  of the whole day: a run with one step missing is completed (the other edge
+  is looked for in the curve, where the usual run length says it is due), one
+  or two runs missing between two others are filled.
+- **Estimated where it cannot be followed.** In the busy hours its energy is
+  estimated from the rhythm learned in the quiet hours. This part is an
+  estimate, not a detection: the report gives it apart (`estimated_kwh`) and
+  the panel shows its share.
+- **A signature of its own kind** (`cold`, id `cold-80w`): "runs in cycles
+  all day, about 80 W, every 43 min". It is proposed for review and named like
+  the others; its energy leaves the unexplained share of the day. The model
+  is kept by the registry: on a day whose night taught nothing, the appliance
+  is still followed; when it is gone, it is no longer reported.
+
+Everything else is analysed as without the option; the small uses stay
+listed as before, and the live view is unchanged.
 
 ### Solar readings that come late
 
@@ -237,6 +267,12 @@ Each report is a JSON document with:
   under the thresholds that stand out of the noise of the curve, each with
   `start`, `end`, `power_w`, and the size of its two steps `on_w` and
   `off_w`. They are in no other field of the report;
+- `cold` (add-on 0.18.0+, only with `cold_appliances`): the cold appliances
+  of the day, each with its model (`on_w`, `off_w`, `power_w`, `on_s`,
+  `period_s`, `duty`), its runs (`cycles`: `start`, `end` and `how`:
+  `detected`, `completed`, `placed` or `filled`), where it was not followed
+  (`estimated`), and `energy_kwh` with its estimated part `estimated_kwh`.
+  Each one is also in `signatures` with kind `cold`;
 - `peaks`: the day's top episodes (up to 5, above 80 % of the day's own
   maximum, so a normal day always has some) and what was running
   (`registry_id` on the signature parts). `notable` is `true` when the
@@ -287,8 +323,8 @@ Each signature keeps:
 
 | Field | Description |
 |---|---|
-| `id` | Stable identity, for example `short-2000w` (steady, under 10 min), `medium-...` (10 to 60 min), `long-...` (over 1 h), `cyc-1400w` (cycling session) or `cycle-2000w` (multi-phase cycle, named after its heating power). |
-| `kind`, `band` | `steady`, `cycling` or `multiphase`; `short`, `medium`, `long`, `session` or `cycle`. |
+| `id` | Stable identity, for example `short-2000w` (steady, under 10 min), `medium-...` (10 to 60 min), `long-...` (over 1 h), `cyc-1400w` (cycling session), `cycle-2000w` (multi-phase cycle, named after its heating power) or `cold-80w` (cold appliance, add-on 0.18.0+). |
+| `kind`, `band` | `steady`, `cycling`, `multiphase` or `cold`; `short`, `medium`, `long`, `session`, `cycle` or `cold`. A `cold` signature also has its model (`on_w`, `off_w`, `on_modes_s`, `run_s`, `pause_s`) and `estimated_kwh`, the part of its energy estimated where it was not followed; one use is one run of the compressor. |
 | `label`, `appliance` | Name and key of the Home Assistant appliance this signature belongs to (`null` when none). A named signature is never forgotten. |
 | `power_w`, `duration_s` | Typical power and duration (weighted medians). |
 | `on_s`, `period_s`, `duty` | Typical cycle of a cycling session or of a thermostat's bursts (`null` for steady loads). |
@@ -470,6 +506,7 @@ Accepted keys (all optional; `null`, `""` and `[]` mean "absent"):
 | `step_threshold_w` | 50 to 10000 |
 | `night_step_threshold_w` | 50 to the step threshold (that of the settings, else of the add-on options, else 300) |
 | `adaptive_threshold` | `true` / `false` (add-on 0.17.0+) |
+| `cold_appliances` | `true` / `false` (add-on 0.18.0+; acts only with `adaptive_threshold`) |
 | `peak_threshold_w` | 100 to 100000 |
 | `analysis_time` | `HH:MM` (or `HH:MM:SS`, stored as `HH:MM`); applies after the next analysis |
 | `backfill_days` | 0 to 365 |
@@ -1005,7 +1042,8 @@ the integration is set up with the address of the service.
   nothing, below `night_step_threshold_w`) and loads whose power varies
   continuously (EV chargers, inverter heat pumps) are not recognised well yet.
   With `adaptive_threshold` the smaller uses are found where the curve is
-  quiet and listed apart (`small_uses`); they are not named nor tracked yet.
+  quiet and listed apart (`small_uses`); only the regular ones (a fridge, a
+  freezer) are named and tracked, with `cold_appliances`.
   Multi-phase appliances have a first version: two of them running at once,
   or a low load running next to a cycle, blur their cycles. See the
   [README](https://github.com/sylvaing/ha-energy-mapper#limits) for the full

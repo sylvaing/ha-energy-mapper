@@ -15,6 +15,8 @@ from .activations import (
     pair_steps,
     validate_activations,
 )
+from .cold import COLD, ColdConfig, Quiet, Track, track_dict
+from .cold import detect as detect_cold
 from .cycles import CycleConfig, Phase, attribute, find_cycles
 from .known import RUN, KnownLoad, SwitchedLoadConfig, resolve_switched_load
 from .quality import meter_quality
@@ -75,6 +77,14 @@ class AnalysisConfig:
     # (``small_uses``); everything else is found exactly as without it
     adaptive_threshold: bool = False
     noise: NoiseConfig = NOISE
+    # cold appliances (#89, off by default; needs the adaptive threshold):
+    # the regular cycles among the low steps are learned in the quiet hours
+    # and followed through the day (:mod:`.cold`), reported as ``cold`` and
+    # as signatures of kind ``cold``. ``cold_models``: those the registry
+    # already knows (:func:`~.registry.cold_models`)
+    cold_appliances: bool = False
+    cold_models: list[dict] = field(default_factory=list)
+    cold: ColdConfig = COLD
     # peaks: the top episodes above peak_relative x the period's maximum;
     # a peak is "notable" above peak_threshold_w, or when None above
     # peak_relative x the highest of the period's maximum and
@@ -103,6 +113,10 @@ class AnalysisConfig:
     def noise_config(self) -> NoiseConfig | None:
         """The adaptive threshold's settings when it is on, else None."""
         return self.noise if self.adaptive_threshold else None
+
+    def cold_config(self) -> ColdConfig | None:
+        """The cold appliances' settings when they are looked for, else None."""
+        return self.cold if self.adaptive_threshold and self.cold_appliances else None
 
     def entities(self) -> list[str]:
         ids = [self.grid_entity, *self.extra_grid_entities, *self.extra_pv_entities]
@@ -366,11 +380,20 @@ def analyze(
     acts = [a for a in every if a.end > start and a.start < end]
     signatures = cluster(acts, local_hour=local_hour)
     adaptive = {}
+    tracks: list[Track] = []
     if config.adaptive_threshold:  # only with the option: the report is unchanged without it
         small = small_uses(every_step, read, read_from, config, base_est, window_s)
         adaptive = {"small_uses": [_small_use(a) for a in small if a.end > start and a.start < end]}
+        cold_cfg = config.cold_config()
+        if cold_cfg is not None:  # cold appliances (#89): only with their own option too
+            # after the small uses: the low steps a sub-meter explains are marked
+            calm = PvQuiet([(s.ts, s.pv) for s in samples if s.pv is not None]) if config.pv_entity else None
+            quiet = Quiet([s.ts for s in every_step if not s.low], calm, cold_cfg.quiet_margin_s)
+            tracks = detect_cold(every_step, read, quiet, start, end, config.cold_models, cold_cfg)
+            adaptive["cold"] = [track_dict(t, start, end) for t in tracks]
 
-    curve, totals = _curve(samples, config, known, acts, start, end)
+    # the cold appliances take their energy in the curve as the signatures do
+    curve, totals = _curve(samples, config, known, [*acts, *tracks], start, end)
     houses = [s.house for s in samples if start <= s.ts < end and s.house is not None]
     max_house = max(houses) if houses else None
     threshold = peak_threshold(config, max_house)
@@ -403,7 +426,8 @@ def analyze(
         "peak_threshold_w": round(threshold) if threshold is not None else None,
         "curve": curve,
         "peaks": peaks,
-        "signatures": [s.to_dict() for s in signatures],
+        "signatures": [s.to_dict() for s in signatures]
+        + [_cold_signature(t, start, end, local_hour) for t in tracks],
         "known_loads": [
             {
                 "name": k.name,
@@ -438,6 +462,32 @@ def analyze(
             "meters": meter_quality(samples, pv if config.pv_entity else None, start, end, config.noise),
             "compute_s": round(time.perf_counter() - t0, 2),
         },
+    }
+
+
+def _cold_signature(track: Track, start: float, end: float, local_hour: Callable[[float], int]) -> dict:
+    """A cold appliance (#89) among the day's signatures: kind ``cold``,
+    one use per run, ``energy_kwh`` with the estimated part
+    (``estimated_kwh``) of the hours it could not be followed in."""
+    m = track.model
+    runs = [c for c in track.cycles if c[1] > start and c[0] < end]
+    hours = [0] * 24
+    for a, _, _ in runs:
+        hours[local_hour(a) % 24] += 1
+    return {
+        "id": track.signature,
+        "kind": "cold",
+        "band": "cold",
+        "power_w": round(m.power_w),
+        "count": len(runs),
+        "duration_s": round(m.on_s[0]),
+        "energy_kwh": round(track.overlap_energy_wh(start, end) / 1000, 3),
+        "estimated_kwh": round(track.overlap_energy_wh(start, end, estimated=True) / 1000, 3),
+        "hours": hours,
+        "on_s": round(m.on_s[0], 1),
+        "period_s": round(m.period_s, 1),
+        "duty": round(m.duty, 2),
+        "examples": [a for a, _, how in runs if how == "detected"][:3],
     }
 
 

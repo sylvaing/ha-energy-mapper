@@ -2385,7 +2385,7 @@ export class EnergyMapperPanel extends LitElement {
     const c = model?.colors.get(`sig:${s.id}`);
     const profile = hourProfile(s.hours);
     const cycle =
-      s.kind === "cycling" && s.on_s && s.period_s
+      (s.kind === "cycling" || s.kind === "cold") && s.on_s && s.period_s
         ? t("cycle", { on: formatDuration(s.on_s, info), period: formatDuration(s.period_s, info) })
         : s.kind === "multiphase"
           ? phasesSummary(s.phases, t, info)
@@ -2400,7 +2400,8 @@ export class EnergyMapperPanel extends LitElement {
           ${seen.has(s.id) ? html`<span class="badge neutral">${t("seen_this_day")}</span>` : nothing}
         </div>
         <div class="secondary sig-id">${s.id}</div>`,
-      kind: s.kind === "cycling" ? t("cycling") : s.kind === "multiphase" ? t("multiphase") : t("steady"),
+      kind:
+        s.kind === "cycling" ? t("cycling") : s.kind === "multiphase" ? t("multiphase") : s.kind === "cold" ? t("cold") : t("steady"),
       cycle,
       power: formatPower(s.power_w, info),
       duration: formatDuration(s.duration_s, info),
@@ -2753,10 +2754,11 @@ export class EnergyMapperPanel extends LitElement {
   private renderFacts(s: ReviewSignature, t: Translate): TemplateResult {
     const info = this.info;
     const facts: Array<[string, string, string?]> = [[t("rq_power"), formatPower(s.power_w, info)]];
-    if (s.kind === "cycling" && s.on_s && s.period_s) {
+    const cold = s.kind === "cold";
+    if ((s.kind === "cycling" || cold) && s.on_s && s.period_s) {
       facts.push([t("rq_cycle"), t("cycle", { on: formatDuration(s.on_s, info), period: formatDuration(s.period_s, info) })]);
     }
-    if (s.duration_s) facts.push([t("rq_duration"), formatDuration(s.duration_s, info)]);
+    if (s.duration_s && !cold) facts.push([t("rq_duration"), formatDuration(s.duration_s, info)]);
     if (s.kind === "multiphase" && s.cycle_kwh) facts.push([t("rq_cycle_energy"), formatEnergy(s.cycle_kwh, info)]);
     if (s.per_week != null) {
       facts.push([t("rq_frequency"), t("rq_times_week", { count: formatNumber(s.per_week, info, s.per_week < 10 ? 1 : 0) })]);
@@ -2766,6 +2768,10 @@ export class EnergyMapperPanel extends LitElement {
       formatEnergy(s.energy_kwh, info),
       `${t("rq_energy_hint")} · ${t("review_uses", { count: formatNumber(s.count, info), days: formatNumber(s.days_seen, info) })}`,
     ]);
+    if (cold && s.estimated_kwh && s.estimated_kwh > 0) {
+      // the part that is an estimate, not a detection (#89)
+      facts.push([t("rq_estimated"), formatEnergy(s.estimated_kwh, info), t("rq_estimated_hint")]);
+    }
     if (s.first_seen) facts.push([t("rq_first_seen"), formatDay(s.first_seen, info, "short")]);
     const phases = s.kind === "multiphase" && s.phases?.length ? phasesSummary(s.phases, t, info) : "";
     return html`<dl class="rq-facts">

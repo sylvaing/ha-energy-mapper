@@ -287,3 +287,92 @@ def small_loads_day(
             p.append((t, f"{prod:.0f}"))
         t += dt
     return {grid: g, pv: p} if pv_peak_w else {grid: g}
+
+
+@dataclass
+class Compressor:
+    """A cold appliance (#89): it starts at ``on_w``, decays to ``off_w``
+    over the run, pauses, and starts again. Each pause is the usual one
+    within ``jitter`` (a share of it), drawn from ``seed``. ``long_every``:
+    every that many runs, one lasts ``long_s``. ``skip``: the runs (by
+    index) that do not happen."""
+
+    start: float
+    end: float
+    on_w: float
+    off_w: float
+    on_s: float
+    off_s: float
+    jitter: float = 0.03
+    seed: int = 7
+    long_every: int = 0
+    long_s: float = 0.0
+    skip: tuple[int, ...] = ()
+    runs: list[tuple[float, float]] = field(default_factory=list, init=False)
+
+    def __post_init__(self) -> None:
+        rnd = random.Random(self.seed)
+        t = self.start + rnd.uniform(0, self.off_s)
+        k = 0
+        while t < self.end:
+            length = (
+                self.long_s if self.long_every and k % self.long_every == self.long_every - 1 else self.on_s
+            )
+            if k not in self.skip:
+                self.runs.append((t, t + length))
+            t += length + self.off_s * (1 + rnd.uniform(-self.jitter, self.jitter))
+            k += 1
+        self._starts = [a for a, _ in self.runs]
+
+    def power_at(self, t: float) -> float:
+        import bisect
+
+        i = bisect.bisect_right(self._starts, t) - 1
+        if i < 0 or t >= self.runs[i][1]:
+            return 0.0
+        a, b = self.runs[i]
+        return self.on_w + (self.off_w - self.on_w) * (t - a) / (b - a)
+
+    def energy_kwh(self, start: float, end: float) -> float:
+        """The energy of its runs within ``[start, end)``."""
+        total = 0.0
+        for a, b in self.runs:
+            x, y = max(a, start), min(b, end)
+            if y > x:
+                total += (self.power_at(x) + self.power_at(y - 1e-6)) / 2 * (y - x)
+        return total / 3.6e6
+
+
+def cold_day(
+    loads: list,
+    day0: float = DAY0,
+    dt: float = 10.0,
+    quiet_w: float = 4.0,
+    solar_noise: float = 0.0,
+    pv_peak_w: float = 0.0,
+    busy: tuple[tuple[float, float, float], ...] = (),
+    seed: int = 5,
+    grid: str = "sensor.grid_power",
+    pv: str = "sensor.pv_power",
+) -> dict[str, list[tuple[float, str]]]:
+    """A day for the cold appliances (#89), from 21:00 the day before: base
+    load 250 W, noise ``quiet_w``, the ``loads`` (anything with
+    ``power_at``). ``busy``: ``(from hour, to hour, noise W)``, hours of the
+    day when the house is busy (a noise of its own on the curve). With
+    ``pv_peak_w``, PV from 08:00 to 18:00 and a grid reading off by
+    ``solar_noise`` x the production (a changing sky)."""
+    rnd = random.Random(seed)
+    house = House(base_w=250.0, pv_peak_w=pv_peak_w, noise_w=0.0)
+    g, p = [], []
+    t = day0 - 3 * HOUR
+    while t < day0 + 24 * HOUR:
+        prod = house.pv_at(t)
+        use = house.base_w + sum(x.power_at(t) for x in loads)
+        h = (t - day0) / HOUR
+        extra = next((w for a, b, w in busy if a <= h < b), 0.0)
+        noise = rnd.gauss(0, quiet_w) + rnd.gauss(0, solar_noise * prod) + rnd.gauss(0, extra)
+        g.append((t, f"{use - prod + noise:.1f}"))
+        if pv_peak_w:
+            p.append((t, f"{prod:.0f}"))
+        t += dt
+    return {grid: g, pv: p} if pv_peak_w else {grid: g}

@@ -59,6 +59,7 @@ from .const import (
     ADDON_SLUG,
     ANALYSIS_KEYS,
     BOOL_KEYS,
+    COLD_APPLIANCES,
     CONF_DISCOVERED,
     CONF_URL,
     DOMAIN,
@@ -286,6 +287,7 @@ OPTIONS_SCHEMA = vol.Schema(
                     vol.Optional("step_threshold_w"): _number(50, 10000, 10, "W"),
                     vol.Optional("night_step_threshold_w"): _number(50, 10000, 10, "W"),
                     vol.Optional(ADAPTIVE_THRESHOLD, default=False): BooleanSelector(),
+                    vol.Optional(COLD_APPLIANCES, default=False): BooleanSelector(),
                     vol.Optional("peak_threshold_w"): _number(100, 100000, 100, "W"),
                 }
             ),
@@ -322,7 +324,7 @@ OPTIONS_SCHEMA = vol.Schema(
 SECTIONS = {
     "sensors": (*SENSOR_KEYS, *INVERT_KEYS, SUBMETERS_MODE, "submeters"),
     "loads": ("switched_loads", "excluded_switched_loads"),
-    "thresholds": (*THRESHOLD_KEYS, ADAPTIVE_THRESHOLD),
+    "thresholds": (*THRESHOLD_KEYS, ADAPTIVE_THRESHOLD, COLD_APPLIANCES),
     "analysis": ANALYSIS_KEYS,
     "review": REVIEW_KEYS,
 }

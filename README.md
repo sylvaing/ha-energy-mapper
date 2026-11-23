@@ -85,7 +85,8 @@ one cycling use too, from its fourth regular burst.
 
 - loads below the step threshold (300 W by default; with solar panels, the *smallest
   appliance at night* lowers it while they produce nothing): lighting, electronics, fridges
-  (they end up in the base load or in "unexplained");
+  (they end up in the base load or in "unexplained"; the experimental *cold appliances*
+  option finds fridges and freezers, see the settings);
 - loads whose power varies continuously: EV chargers that modulate, inverter heat pumps and
   air conditioners, induction hobs at high power (a measured EV charger or heat pump is best
   declared as a sub-meter; variable loads will be handled in [#16](https://github.com/sylvaing/ha-energy-mapper/issues/16));
@@ -192,6 +193,7 @@ appliances that come from the Energy dashboard, and your changes (excluded, adde
 | Thresholds | Smallest appliance (step threshold) | 300 W | Smaller detects more appliances, and more noise. |
 | | Smallest appliance at night | empty | Only with a solar production sensor. Smaller steps, down to this value (50 W to the step threshold, 150 W is a good start), are also kept while the solar panels produce nothing: below 20 W in the minute before and after the step. It catches small evening appliances (TV, lighting) without the false midday steps that come from the solar and grid meters drifting apart. Without a solar sensor it has no effect: lower the step threshold instead. |
 | | Threshold adapted to the noise of the curve | off | Experimental. Power changes smaller than the thresholds above are also kept where they stand out of the measured noise of the curve (at least 40 W and 4 times the noise of the last 30 minutes): a fridge at night, for example. These small uses are listed apart in the daily report; they are not proposed for review nor tracked yet, and everything else is analysed as without the option. |
+| | Cold appliances (fridge, freezer) | off | Experimental, needs the threshold adapted to the noise. The small uses that come back regularly (a compressor that runs a few minutes, pauses, starts again) are learned in the quiet hours and followed through the day: each such appliance is a signature of its own ("runs in cycles all day, about 80 W, every 43 min"), proposed for review and named like the others. Where it cannot be followed (busy hours), its energy is estimated from the rhythm learned at night, and shown as an estimate. |
 | | Fixed peak threshold | empty | Empty: a peak is *notable* above 80 % of the highest power of the recent days. Set a value (for example your subscribed power) to use it instead. |
 | Analysis and storage | Time of the nightly analysis | 04:30 | Applies after the next analysis. |
 | | Past days analysed on start | 30 | Limited by what the recorder still holds. |
@@ -520,7 +522,12 @@ on/off states come with real-time detection
   panels, the *smallest appliance at night* lowers it only while they produce nothing. The
   experimental *threshold adapted to the noise of the curve* (add-on 0.17.0, off by default)
   also keeps the smaller uses that stand out of the measured noise, down to 40 W in a quiet
-  night, and lists them apart in the daily report: they are not named nor tracked yet.
+  night, and lists them apart in the daily report: they are not named nor tracked, except the
+  regular ones. The experimental *cold appliances* option (add-on 0.18.0, off by default)
+  makes a signature of each fridge or freezer it finds among them; in the busy hours it
+  cannot follow their cycles and estimates their energy from the rhythm of the quiet hours.
+  Two cold appliances with the same power steps are not told apart, and the live view does
+  not show them.
 - The **meter rate** sets the shortest visible use: an appliance must last at least two meter
   readings.
 - With **solar panels**, the grid and the solar sensors do not report together: since add-on
@@ -709,7 +716,8 @@ quatrième rafale régulière.
 - les appareils sous le seuil de marche (300 W par défaut ; avec des panneaux solaires, le
   *plus petit appareil la nuit* l'abaisse quand ils ne produisent rien) : éclairage,
   électronique, réfrigérateurs (ils finissent dans la consommation de fond ou dans « non
-  expliqué ») ;
+  expliqué » ; l'option expérimentale *appareils de froid* retrouve les réfrigérateurs et
+  les congélateurs, voir les réglages) ;
 - les appareils dont la puissance varie en continu : borne de recharge qui module, pompe à
   chaleur et climatisation *inverter*, plaque à induction à pleine puissance (une borne ou
   une pompe à chaleur mesurée se déclare de préférence en sous-compteur ; les charges
@@ -825,6 +833,7 @@ viennent du tableau Énergie, et vos changements (exclus, ajoutés ou modifiés)
 | Seuils | Plus petit appareil (seuil de marche) | 300 W | Plus bas détecte plus d'appareils, et plus de bruit. |
 | | Plus petit appareil la nuit | vide | Seulement avec un capteur de production solaire. Des marches plus petites, jusqu'à cette valeur (de 50 W au seuil de marche, 150 W pour commencer), sont aussi retenues quand les panneaux solaires ne produisent rien : moins de 20 W la minute avant et après la marche. On voit ainsi les petits appareils du soir (télé, éclairage) sans les fausses marches de midi, dues aux compteurs solaire et réseau qui dérivent un peu l'un de l'autre. Sans capteur solaire, aucun effet : baissez plutôt le seuil de marche. |
 | | Seuil adapté au bruit de la courbe | désactivé | Expérimental. Les variations de puissance plus petites que les seuils ci-dessus sont aussi retenues quand elles se détachent du bruit mesuré de la courbe (au moins 40 W et 4 fois le bruit des 30 dernières minutes) : un réfrigérateur la nuit, par exemple. Ces petits usages sont listés à part dans le rapport quotidien ; ils ne sont ni proposés à la revue ni suivis pour l'instant, et tout le reste est analysé comme sans l'option. |
+| | Appareils de froid (réfrigérateur, congélateur) | désactivé | Expérimental, demande le seuil adapté au bruit. Les petits usages qui reviennent régulièrement (un compresseur qui tourne quelques minutes, s'arrête, repart) sont appris pendant les heures calmes et suivis toute la journée : chaque appareil de ce genre devient une signature à part (« tourne en cycles toute la journée, environ 80 W, toutes les 43 min »), proposée à la revue et nommée comme les autres. Là où il ne peut pas être suivi (heures chargées), son énergie est estimée d'après le rythme appris la nuit, et présentée comme une estimation. |
 | | Seuil fixe des pics | vide | Vide : un pic est *notable* au-dessus de 80 % de la puissance la plus haute des derniers jours. Une valeur (par exemple la puissance souscrite) la remplace. |
 | Analyse et stockage | Heure de l'analyse de nuit | 04:30 | S'applique après la prochaine analyse. |
 | | Jours passés analysés au démarrage | 30 | Limité par ce que le *recorder* contient encore. |
@@ -1190,7 +1199,12 @@ La puissance et l'état de marche en direct viendront avec la détection en temp
   produisent rien. Le *seuil adapté au bruit de la courbe*, expérimental (add-on 0.17.0,
   désactivé par défaut), retient aussi les usages plus petits qui se détachent du bruit
   mesuré, jusqu'à 40 W par nuit calme, et les liste à part dans le rapport quotidien : ils ne
-  sont ni nommés ni suivis pour l'instant.
+  sont ni nommés ni suivis, sauf ceux qui reviennent régulièrement. L'option expérimentale
+  *appareils de froid* (add-on 0.18.0, désactivée par défaut) fait une signature de chaque
+  réfrigérateur ou congélateur qu'elle y trouve ; pendant les heures chargées elle ne peut pas
+  suivre leurs cycles et estime leur énergie d'après le rythme des heures calmes. Deux
+  appareils de froid aux mêmes marches de puissance ne sont pas distingués, et la vue en
+  direct ne les montre pas.
 - Le **rythme du compteur** fixe l'utilisation la plus courte visible : un appareil doit
   durer au moins deux mesures.
 - Avec des **panneaux solaires**, le capteur du réseau et celui du solaire ne donnent pas

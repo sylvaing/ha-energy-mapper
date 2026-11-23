@@ -81,6 +81,16 @@ configuration:
       petits usages sont listés à part dans le rapport quotidien : ils ne sont
       pas encore proposés à la revue. Tout le reste est analysé comme sans
       l'option. Désactivé par défaut.
+  cold_appliances:
+    name: Appareils de froid (réfrigérateur, congélateur)
+    description: >-
+      Expérimental, demande le seuil adapté au bruit. Les petits usages qui
+      reviennent régulièrement (un compresseur qui tourne quelques minutes,
+      s'arrête, repart) sont appris pendant les heures calmes et suivis toute
+      la journée : chaque appareil de ce genre devient une signature à part,
+      proposée à la revue. Là où il ne peut pas être suivi, son énergie est
+      estimée d'après le rythme appris la nuit, et présentée comme une
+      estimation. Désactivé par défaut.
   peak_threshold_w:
     name: Seuil des pics (W)
     description: >-

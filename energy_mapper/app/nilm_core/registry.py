@@ -42,6 +42,15 @@ follows the previous signature whose template is within ``cycle_distance``.
 Recognised cycles (activations with ``multiphase``) are not clustered with
 the steady ones.
 
+Cold appliances (#89) too: each day's report lists those it followed
+(``cold``: the model learned in its quiet hours, the runs, the energy with
+its estimated part). Those of the stored days with the same steps
+(:func:`.cold.alike`) are one signature of kind ``cold`` (band ``cold``,
+id ``cold-<power>w``): its model is the weighted median of the days that
+learned it, and goes back to the daily analysis (:func:`cold_models`), so
+the appliance is followed, or estimated, on a day whose quiet hours taught
+nothing.
+
 Everything here is pure (no I/O, no clock): the caller passes the day
 summaries, the previous registry and ``now``.
 """
@@ -56,6 +65,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 
+from . import cold as cd
 from . import cycles as mp
 from .signatures import duration_band, signature_id
 
@@ -134,6 +144,7 @@ def _group_of(kind: str, band: str) -> tuple[str, str]:
 
 
 MULTIPHASE = ("multiphase", "cycle")
+COLD = cd.GROUP  # cold appliances (#89)
 
 
 def activation_group(activation: Mapping) -> tuple[str, str]:
@@ -337,7 +348,7 @@ def update(
     used_ids = set(prev_sigs)
     tol = config.power_tol
     previous_groups = {_group_of(s["kind"], s["band"]) for s in prev_sigs.values()}
-    for g in sorted((set(groups) | previous_groups) - {MULTIPHASE}):
+    for g in sorted((set(groups) | previous_groups) - {MULTIPHASE, COLD}):
         clusters = _cluster_group(groups.get(g, []), tol, config.max_iterations)
         clusters.sort(key=lambda m: -sum(a.weight for a in m))
         centers = [weighted_median((a.power, a.weight) for a in m) for m in clusters]
@@ -385,6 +396,7 @@ def update(
             ):
                 out.append(sig)
     out += _multiphase(summaries, days, prev_sigs, used_ids, now, days_w, carry, occ, config, local_hour)
+    out += _cold(summaries, day_weight, prev_sigs, used_ids, now, days_w, carry, occ, config, local_hour)
     out = _cap_faded_ignored(out, config.forget_weight)
     out.sort(key=lambda s: (-s["weight"], s["id"]))
 
@@ -641,6 +653,194 @@ def _multiphase(
     return out
 
 
+# ---------------------------------------------------------------------------
+# cold appliances (#89)
+# ---------------------------------------------------------------------------
+_COLD_LEARNED = ("on_w", "off_w", "power_w", "on_s", "run_s", "pause_s")
+
+
+@dataclass
+class _ColdDay:
+    """One cold appliance on one stored day (an item of its ``cold``)."""
+
+    day: str
+    item: Mapping
+    weight: float  # the day's
+    runs: list[_Run]
+
+    @property
+    def learned(self) -> float:
+        """What the day's own quiet hours say about the model."""
+        return self.weight * float(self.item.get("learned_cycles") or 0)
+
+
+@dataclass
+class _Run:
+    """A run of a cold appliance, seen as an activation by the occurrences."""
+
+    start: float
+    duration: float
+    power: float
+    weight: float = 1.0
+
+
+def _cold_days(summaries: Mapping[str, Mapping], day_weight: Mapping[str, float]) -> list[_ColdDay]:
+    out = []
+    for d in sorted(summaries):
+        for x in summaries[d].get("cold") or []:
+            try:
+                ok = all(float(x[k]) > 0 for k in _COLD_LEARNED) and float(x.get("energy_kwh") or 0) >= 0
+                power = float(x["power_w"])
+                runs = [
+                    _Run(float(c["start"]), float(c["end"]) - float(c["start"]), power)
+                    for c in x.get("cycles") or []
+                ]
+            except (KeyError, TypeError, ValueError):
+                continue
+            if ok:
+                out.append(_ColdDay(d, x, day_weight[d], runs))
+    return out
+
+
+def _cold_value(members: list[_ColdDay], key: str, old: Mapping | None) -> float | None:
+    """A value of the model: the weighted median of the days that learned
+    it in their own quiet hours; else the previous one; else the days'."""
+    value = weighted_median((float(m.item[key]), m.learned) for m in members)
+    if value is None and old and old.get(key):
+        return float(old[key])
+    return value if value is not None else weighted_median((float(m.item[key]), m.weight) for m in members)
+
+
+def _cold(
+    summaries, day_weight, prev_sigs, used_ids, now, days_w, carry, occ, config, local_hour
+) -> list[dict]:
+    """The ``cold`` signatures, from the cold appliances of the stored days."""
+    # the days with the same steps are one appliance; those that learned
+    # the most seed the groups
+    groups: list[list[_ColdDay]] = []
+    for e in sorted(_cold_days(summaries, day_weight), key=lambda e: (-e.learned, e.day)):
+        for g in groups:
+            if e.day not in {m.day for m in g} and cd.alike(e.item, g[0].item) is not None:
+                g.append(e)
+                break
+        else:
+            groups.append([e])
+    olds = [s for s in prev_sigs.values() if _group_of(s["kind"], s["band"]) == COLD]
+
+    def closeness(g: list[_ColdDay], old: Mapping) -> float | None:
+        d = cd.alike(g[0].item, old)
+        if d is not None or old.get("on_w"):
+            return d
+        # expected before it is seen (no model yet): by its power
+        power, mine = float(old.get("power_w") or 0.0), float(g[0].item["power_w"])
+        if power > 0 and abs(mine - power) <= config.power_tol * power:
+            return abs(mine - power) / power
+        return None
+
+    pairs = sorted(
+        (not s.get("label"), d, i, s["id"])
+        for i, g in enumerate(groups)
+        for s in olds
+        if (d := closeness(g, s)) is not None
+    )
+    ids: dict[int, str] = {}
+    for _, _, i, sid in pairs:
+        if i not in ids and sid not in ids.values():
+            ids[i] = sid
+    out: list[dict] = []
+    for i, members in enumerate(groups):
+        sid = ids.get(i)
+        if sid is None:
+            base = cd.daily_id(_cold_value(members, "power_w", None))
+            sid, n = base, 1
+            while sid in used_ids:
+                n += 1
+                sid = f"{base}-{n}"
+        used_ids.add(sid)
+        old = prev_sigs.get(sid)
+        sig = _cold_stats(sid, members, old, now, days_w, config, local_hour)
+        sig["occurrences"] = occ.of([r for m in members for r in m.runs], old)
+        if sig["weight"] >= config.forget_weight or is_ignored(sig) or sig.get("label"):
+            out.append(sig)
+    for s in olds:
+        if s["id"] in ids.values():
+            continue
+        sig = _carried(s, carry, days_w)
+        sig["occurrences"] = occ.window(s)
+        if sig.get("label") or sig["weight"] >= config.forget_weight or is_ignored(sig):
+            out.append(sig)
+    return out
+
+
+def _cold_stats(sid, members: list[_ColdDay], old, now, days_w, config, local_hour) -> dict:
+    members = sorted(members, key=lambda m: m.day)
+    value = {k: _cold_value(members, k, old) for k in _COLD_LEARNED}
+    period = value["run_s"] + value["pause_s"]
+    hours = [0.0] * 24
+    for m in members:
+        for r in m.runs:
+            hours[local_hour(r.start) % 24] += m.weight
+    # the usual run lengths: those of the day that learned the most
+    best = max(members, key=lambda m: (m.learned, m.day))
+    modes = best.item.get("on_modes_s") if best.learned > 0 else None
+    modes = modes or (old or {}).get("on_modes_s") or best.item.get("on_modes_s") or [value["on_s"]]
+    energy = [(float(m.item.get("energy_kwh") or 0.0), m.weight) for m in members]
+    estimated = sum(float(m.item.get("estimated_kwh") or 0.0) for m in members)
+    recent = [(m.day, r) for m in reversed(members) for r in reversed(m.runs)][: config.examples]
+    first = members[0].day
+    sig = {
+        "id": sid,
+        "kind": COLD[0],
+        "band": COLD[1],
+        "label": (old or {}).get("label"),
+        "power_w": _r(value["power_w"]),
+        "duration_s": _r(value["on_s"]),
+        "on_s": _r(value["on_s"], 1),
+        "period_s": _r(period, 1),
+        "duty": _r(value["run_s"] / period, 2),
+        # one use is one run of the compressor
+        "weight": round(sum(m.weight * len(m.runs) for m in members), 6),
+        "count": sum(len(m.runs) for m in members),
+        "days_seen": len({m.day for m in members}),
+        "per_week": round(sum(m.weight * len(m.runs) for m in members) / days_w * 7, 2) if days_w else None,
+        "first_seen": min(first, old["first_seen"]) if old and old.get("first_seen") else first,
+        "last_seen": members[-1].day,
+        "hours": [round(h, 2) for h in hours],
+        "energy_kwh": round(sum(e for e, _ in energy), 3),
+        "weighted_energy_kwh": round(sum(e * w for e, w in energy), 3),
+        "examples": [
+            {"day": d, "start": r.start, "end": r.start + r.duration, "power_w": round(r.power)}
+            for d, r in recent
+        ],
+        "created_at": (old or {}).get("created_at") or now,
+        # the model the daily analysis follows (:func:`cold_models`)
+        "on_w": _r(value["on_w"]),
+        "off_w": _r(value["off_w"]),
+        "on_modes_s": [round(float(s)) for s in modes],
+        "run_s": _r(value["run_s"]),
+        "pause_s": _r(value["pause_s"]),
+        # of ``energy_kwh``: estimated from the duty, where it was not followed
+        "estimated_kwh": round(estimated, 3),
+    }
+    if old and old.get("review"):
+        sig["review"] = old["review"]
+    return sig
+
+
+def cold_models(registry: Mapping | None) -> list[dict]:
+    """The models of the cold signatures, for the daily analysis
+    (``AnalysisConfig.cold_models``): every one that was learned, the ones
+    the user ignored marked so (their steps stay theirs, they are not
+    reported)."""
+    out = []
+    for s in (registry or {}).get("signatures") or []:
+        if _group_of(s.get("kind"), s.get("band")) != COLD or not s.get("on_w"):
+            continue
+        model = {k: s.get(k) for k in ("id", *_COLD_LEARNED, "on_modes_s")}
+        out.append({**model, "ignored": True} if is_ignored(s) else model)
+    return out
+
+
 class _SampleAct:
     """A candidate cycle seen as an activation by :func:`_new_id`."""
 
@@ -781,6 +981,7 @@ class Matcher:
         self.multiphase = {
             s["id"] for s in registry.get("signatures") or [] if _group_of(s["kind"], s["band"]) == MULTIPHASE
         }
+        self.colds = [s for s in registry.get("signatures") or [] if _group_of(s["kind"], s["band"]) == COLD]
         for s in registry.get("signatures") or []:
             self.centers.setdefault(_group_of(s["kind"], s["band"]), []).append(
                 (float(s["power_w"]), s["id"])
@@ -798,6 +999,12 @@ class Matcher:
         except (KeyError, TypeError, ValueError):
             return None
         return _nearest(self.centers.get(group, []), power, self.tol)
+
+    def cold(self, item: Mapping) -> str | None:
+        """Registry id of a cold appliance of a daily report (``cold``):
+        the cold signature with the same steps, the nearest first."""
+        near = [(d, s["id"]) for s in self.colds if (d := cd.alike(item, s)) is not None]
+        return min(near)[1] if near else None
 
     def near(self, kind: str, band: str, power_w: float, within: float = 2.0) -> list[tuple[str, float]]:
         """The signatures of a group whose power is within ``within`` times
@@ -837,7 +1044,8 @@ def match(registry: Mapping | None, activation: Mapping) -> str | None:
 
 def annotate_report(report: dict, registry: Mapping | None) -> dict:
     """Add ``registry_id`` to the activations, the daily signatures (the
-    registry id most of its activations have) and the signature parts of the
+    registry id most of its activations have), the cold appliances (#89:
+    the cold signature with the same steps) and the signature parts of the
     peaks. Modifies and returns ``report``; the daily ids are kept."""
     m = Matcher(registry)
     by_start: dict[float, str | None] = {}
@@ -849,7 +1057,13 @@ def annotate_report(report: dict, registry: Mapping | None) -> dict:
         if a.get("signature") and rid:
             v = votes.setdefault(a["signature"], {})
             v[rid] = v.get(rid, 0) + 1
+    cold = {}
+    for c in report.get("cold") or []:
+        c["registry_id"] = cold[c.get("id")] = m.cold(c)
     for s in report.get("signatures") or []:
+        if s.get("kind") == COLD[0]:
+            s["registry_id"] = cold.get(s.get("id"))
+            continue
         v = votes.get(s.get("id"))
         s["registry_id"] = max(v, key=lambda r: (v[r], r)) if v else None
     for p in report.get("peaks") or []:
@@ -866,9 +1080,9 @@ def annotate_report(report: dict, registry: Mapping | None) -> dict:
 GROUPS = (("steady", "short"), ("steady", "medium"), ("steady", "long"), ("cycling", "session"))
 # the groups an appliance's signature source can name (a multiphase one is
 # learned only: it cannot be expected from a power alone, see the API)
-SOURCE_GROUPS = (*GROUPS, MULTIPHASE)
+SOURCE_GROUPS = (*GROUPS, MULTIPHASE, COLD)
 # typical duration of an expected signature, before its first use is seen
-_BAND_DURATION_S = {"short": 120, "medium": 1200, "long": 7200, "session": 1800, "cycle": 5400}
+_BAND_DURATION_S = {"short": 120, "medium": 1200, "long": 7200, "session": 1800, "cycle": 5400, "cold": 600}
 
 
 def nearest_signature(registry: Mapping | None, kind: str, band: str, power_w: float) -> dict | None:

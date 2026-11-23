@@ -91,6 +91,11 @@ def hourly_breakdown(report: Mapping, registry: Mapping | None) -> dict:
         for _, _, _, rid in items:
             votes[rid] = votes.get(rid, 0) + 1
         daily_rid[key] = max(votes, key=lambda r: (votes[r], r))
+    # cold appliances (#89): their rows are keyed by their daily id; one use per run
+    for c in report.get("cold") or []:
+        rid = daily_rid[c.get("id")] = matcher.cold(c) or UNMATCHED
+        if c.get("cycles"):
+            uses_sig[rid] = uses_sig.get(rid, 0) + len(c["cycles"])
 
     hours: dict[int, dict] = {}
     h = _hour(start)
