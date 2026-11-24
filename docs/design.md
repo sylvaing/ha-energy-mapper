@@ -353,6 +353,16 @@ flowchart TD
   `battery_invert` flip a sign.
 - The grid meter drives the timeline: one sample per grid reading. Other series are
   piecewise constant (Home Assistant records a state when it changes).
+- **House meter** (#97, `house_entity`, only by hand: the Energy dashboard has no such
+  source). A meter downstream of the battery and the inverter drives the timeline instead
+  and gives `Sample.house`; grid, PV and battery are held at its readings (as the
+  sub-meters: 5 minutes, then 0) and only feed the totals, `Sample.pv` for the night
+  threshold, and the peaks' breakdown. Meters polled at different instants (a cloud
+  battery, a late inverter) then make no false step, so the solar doubt (§ 4.2,
+  `hold_doubtful` / `SolarHold`) and `slow_solar_meter` are off; an unknown PV no longer
+  makes the house unknown. `derive()` drops a `house_entity` absent from the states
+  (finding `unavailable`), back to grid + PV + battery. `SampleBuilder` follows the same
+  rule (the night and live samples stay equal, tested).
 - **Unavailable sources**: PV keeps its last value for 5 minutes, then counts 0 if it was
   already near zero (night, ≤ 50 W) and *unknown* otherwise (an inverter timeout in daylight
   must not create a multi-kW fake step); samples with unknown PV have no house value. Sub-meters

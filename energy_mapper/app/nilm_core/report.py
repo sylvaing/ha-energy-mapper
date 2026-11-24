@@ -62,6 +62,10 @@ class AnalysisConfig:
     extra_pv_entities: list[str] = field(default_factory=list)
     battery_entity: str | None = None  # + discharge
     battery_invert: bool = False
+    # a meter of the house itself (#97), downstream of the battery and the
+    # solar: the house value instead of grid + PV + battery, whose meters are
+    # then only read for the totals and the solar hours
+    house_entity: str | None = None
     submeters: list[SubmeterConfig] = field(default_factory=list)
     switched_loads: list[SwitchedLoadConfig] = field(default_factory=list)
     # unit factors to W, per entity (1000 for kW sensors); missing = 1
@@ -120,7 +124,7 @@ class AnalysisConfig:
 
     def entities(self) -> list[str]:
         ids = [self.grid_entity, *self.extra_grid_entities, *self.extra_pv_entities]
-        for e in (self.grid_export_entity, self.pv_entity, self.battery_entity):
+        for e in (self.grid_export_entity, self.pv_entity, self.battery_entity, self.house_entity):
             if e:
                 ids.append(e)
         ids += [s.entity_id for s in self.submeters]
@@ -151,8 +155,8 @@ def base_load(values: list[float], percentile: float = 0.05) -> float:
 def find_steps(samples, config: AnalysisConfig, held: list[float] | None = None) -> list[Step]:
     """The steps of the residual load: ``step_threshold_w``, and the night
     threshold (#77) where the PV production of the samples stays near zero
-    around the step. With a PV meter, the samples whose production is in
-    doubt (a late solar reading, #86) are set aside first
+    around the step. With a PV meter and no house meter (#97), the samples
+    whose production is in doubt (a late solar reading, #86) are set aside first
     (:func:`~.steps.hold_doubtful`; their times are added to ``held``). The
     steps a sub-meter's misaligned reports left are marked ``explained_by``
     it (#85, :mod:`.submeters`). With the adaptive threshold (#88), the
@@ -180,9 +184,12 @@ def _detect(samples, config: AnalysisConfig, held: list[float] | None = None):
     points = [(s.ts, s.residual) for s in known]
     low = None
     if config.pv_entity:
-        # a known residual has a known production: one value per point
-        pv = [s.pv for s in known]
-        points = hold_doubtful(points, pv, solar_doubt_limit(config.step_threshold_w), held)
+        if not config.house_entity:
+            # a known residual has a known production: one value per point.
+            # With a house meter (#97) the production is not in the house
+            # value: a late solar reading makes no step, nothing is in doubt
+            pv = [s.pv for s in known]
+            points = hold_doubtful(points, pv, solar_doubt_limit(config.step_threshold_w), held)
         low = config.low_step_threshold()
     noise = config.noise_config()
     if low is None:
@@ -366,6 +373,7 @@ def analyze(
         estimated=[s.estimated for s in config.submeters],
         grid_export=series(config.grid_export_entity),
         battery=series(config.battery_entity, config.battery_invert),
+        house=series(config.house_entity),
     )
     points = [(s.ts, s.residual) for s in samples if s.residual is not None]
 

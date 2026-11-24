@@ -116,6 +116,7 @@ class DerivedConfig:
             "pv_entity": c.pv_entity if c else None,
             "extra_pv_entities": c.extra_pv_entities if c else [],
             "battery_entity": c.battery_entity if c else None,
+            "house_entity": c.house_entity if c else None,
             "tracked": [t.to_dict() for t in self.tracked],
             "findings": [f.to_dict() for f in self.findings],
         }
@@ -272,7 +273,7 @@ def derive(
 ) -> DerivedConfig:
     """Build the analysis configuration. ``options`` are the user's manual
     settings (grid_entity, grid_export_entity, grid_invert, pv_entity,
-    battery_entity, battery_invert, submeters, switched_loads, thresholds;
+    battery_entity, battery_invert, house_entity, submeters, switched_loads, thresholds;
     excluded_switched_loads: switches never measured as switched loads;
     excluded_submeters: automatic sub-meters not subtracted (ignored when
     ``submeters`` gives the list); extra_submeters: (entity, name) always
@@ -413,6 +414,12 @@ def derive(
     pv = options.get("pv_entity") or (pvs[0] if pvs else None)
     extra_pv = [] if options.get("pv_entity") else pvs[1:]
     battery = options.get("battery_entity") or battery
+    # a meter of the house itself (#97): only by hand, the Energy dashboard
+    # has no such source. Missing from Home Assistant: grid + solar + battery
+    house = options.get("house_entity") or None
+    if house and house not in idx.states:
+        out.findings.append(Finding("unavailable", house, f"{house}: sensor unavailable", {"name": house}))
+        house = None
     if options.get("submeters") is not None:
         submeters = [SubmeterConfig(e, e) for e in options["submeters"]]
     # also those of the add-on option (derive_options drops the exclusions
@@ -437,6 +444,7 @@ def derive(
         pv,
         *extra_pv,
         battery,
+        house,
         *(s.entity_id for s in submeters),
         *teachers,
     ]
@@ -449,6 +457,7 @@ def derive(
         extra_pv_entities=extra_pv,
         battery_entity=battery,
         battery_invert=bool(options.get("battery_invert")),
+        house_entity=house,
         submeters=submeters,
         switched_loads=switched,
         scales={e: idx.scale(e) for e in entities if e and idx.scale(e) != 1.0},

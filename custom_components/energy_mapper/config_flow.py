@@ -258,6 +258,7 @@ OPTIONS_SCHEMA = vol.Schema(
                     vol.Optional("pv_entity"): _power_sensor(),
                     vol.Optional("battery_entity"): _power_sensor(),
                     vol.Optional("battery_invert", default=False): BooleanSelector(),
+                    vol.Optional("house_entity"): _power_sensor(),
                     vol.Optional(SUBMETERS_MODE, default=MODE_AUTOMATIC): SelectSelector(
                         SelectSelectorConfig(
                             options=SUBMETERS_MODES,

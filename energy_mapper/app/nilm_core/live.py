@@ -641,7 +641,12 @@ class LiveDetector:
             noise=config.noise_config(),
         )
         # the solar doubt (#86): the samples wait here until theirs is known
-        self.hold = SolarHold(solar_doubt_limit(config.step_threshold_w)) if config.pv_entity else None
+        # no solar doubt with a house meter (#97): the production is not in the house value
+        self.hold = (
+            SolarHold(solar_doubt_limit(config.step_threshold_w))
+            if config.pv_entity and not config.house_entity
+            else None
+        )
         self.pairer = LivePairer(first_id=first_event_id)
         self.ranker = CandidateRanker(registry, local_hour)
         self.pv_moved_w = pv_moved_w if pv_moved_w is not None else 0.5 * config.step_threshold_w

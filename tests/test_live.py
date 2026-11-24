@@ -63,6 +63,7 @@ def night_samples(hist, cfg):
         estimated=[s.estimated for s in cfg.submeters],
         grid_export=series(cfg.grid_export_entity),
         battery=series(cfg.battery_entity, cfg.battery_invert),
+        house=series(cfg.house_entity),
     )
 
 
@@ -171,6 +172,41 @@ class SampleBuilderTest(unittest.TestCase):
             submeters=[SubmeterConfig("sensor.plug", "Plug"), SubmeterConfig("sensor.est", "Est", True)],
         )
         self.assertSameSamples(hist, cfg)
+
+    def test_house_meter(self):
+        """With a house meter (#97), the live samples are the night's too:
+        its readings drive the timeline, the other meters are held."""
+        rnd = random.Random(7)
+        t0, t1 = DAY0, DAY0 + 6 * HOUR
+        house = [
+            (t, f"{(2500 if (t // 900) % 2 else 400) + rnd.gauss(0, 10):.1f}")
+            for t, _ in level(t0, t1, 7, lambda t: 0)
+        ]
+        grid = [(t + 3, f"{rnd.gauss(100, 50):.1f}") for t, _ in level(t0, t1, 10, lambda t: 0)]
+        export = [(t + 4, "unavailable" if HOUR < t - t0 < 1.1 * HOUR else "30") for t, _ in grid[::4]]
+        pv = [(t + 1, "800") for t, _ in grid[::3]]
+        bat = [(t + 2, "-300" if (t // 1800) % 2 else "200") for t, _ in grid[::6]]
+        plug = [(t + 5, "120") for t, _ in grid[::2]]
+        hist = {
+            "sensor.house": house,
+            GRID: grid,
+            GRID + "_export": export,
+            PV: pv,
+            "sensor.bat": bat,
+            "sensor.plug": plug,
+        }
+        cfg = AnalysisConfig(
+            grid_entity=GRID,
+            grid_export_entity=GRID + "_export",
+            pv_entity=PV,
+            battery_entity="sensor.bat",
+            house_entity="sensor.house",
+            submeters=[SubmeterConfig("sensor.plug", "Plug")],
+        )
+        self.assertSameSamples(hist, cfg)
+        samples = night_samples(hist, cfg)
+        self.assertEqual([s.ts for s in samples], [t for t, _ in house])
+        self.assertEqual([s.house for s in samples], [float(v) for _, v in house])
 
     def test_prunes_old_readings(self):
         b = SampleBuilder(grid=[GRID], pv=[PV])

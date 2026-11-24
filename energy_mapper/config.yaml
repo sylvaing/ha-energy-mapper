@@ -1,6 +1,6 @@
 # https://developers.home-assistant.io/docs/apps/configuration
 name: Energy Mapper
-version: "0.18.2"
+version: "0.19.0"
 slug: energy_mapper
 description: Identify the appliances of the home from the whole-house power meter
 url: https://github.com/sylvaing/ha-energy-mapper/tree/main/energy_mapper
@@ -39,6 +39,7 @@ schema:
   pv_entity: str?
   battery_entity: str?
   battery_invert: bool
+  house_entity: str?
   submeters:
     - str?
   switched_loads:

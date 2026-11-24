@@ -25,7 +25,8 @@ MAX_LIST = 100
 MAX_NAME = 100
 
 # power sensors: an entity id of the sensor domain, or absent (automatic)
-SENSOR_KEYS = ("grid_entity", "grid_export_entity", "pv_entity", "battery_entity")
+# house_entity (#97): a meter of the house itself, instead of grid + solar + battery
+SENSOR_KEYS = ("grid_entity", "grid_export_entity", "pv_entity", "battery_entity", "house_entity")
 # adaptive_threshold (#88): the noise-adaptive step threshold, off by default
 # cold_appliances (#89): the regular low-power cycles, off by default (needs adaptive_threshold)
 BOOL_KEYS = ("grid_invert", "battery_invert", "adaptive_threshold", "cold_appliances")

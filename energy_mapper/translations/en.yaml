@@ -49,6 +49,13 @@ configuration:
   battery_invert:
     name: Invert the battery sign
     description: Enable if the battery sensor is positive when charging.
+  house_entity:
+    name: House power sensor
+    description: >-
+      Optional: a meter of the house itself (downstream of the battery and the
+      solar inverter, e.g. at the input of the distribution board). The house
+      curve then comes from it instead of grid + solar + battery, which are
+      still read for the day totals and the solar hours.
   submeters:
     name: Sub-meters
     description: >-

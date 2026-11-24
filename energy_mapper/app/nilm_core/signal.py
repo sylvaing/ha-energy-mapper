@@ -62,7 +62,7 @@ class Sample:
     pv: float | None  # None: production unknown (inverter unavailable in daytime)
     battery: float  # + discharge (feeds the house), - charge
     submetered: float
-    house: float | None  # grid + pv + battery
+    house: float | None  # grid + pv + battery, or the house meter's reading (#97)
     residual: float | None  # house - submetered: what the analysis looks at
     estimated: float = 0.0  # the part of ``submetered`` that is estimated
     # what each sub-meter took out of ``residual``, in the configured order
@@ -122,6 +122,7 @@ def build_samples(
     pv_night_w: float = 50.0,
     hold_s: float = 300.0,
     estimated: Sequence[bool] = (),
+    house: Sequence[tuple[float, float | None]] | None = None,
 ) -> list[Sample]:
     """One sample per grid reading (the grid meter drives the timeline).
 
@@ -130,11 +131,36 @@ def build_samples(
     ``battery`` is + when discharging into the house. All values in W.
     ``estimated``: for each sub-meter, whether it is an estimate (its power
     is also counted in ``Sample.estimated``).
+
+    ``house``: the readings of a meter that measures the house itself (#97).
+    It then drives the timeline and gives ``Sample.house``; grid, PV and
+    battery are only read at its readings (held as the other meters), for
+    the totals and the solar hours, and never enter the house value: meters
+    polled at different instants make no false step.
     """
     pv_s = StepSeries(pv) if pv else None
     exp_s = StepSeries(grid_export) if grid_export else None
     bat_s = StepSeries(battery) if battery else None
     subs = [StepSeries(s) for s in submeters]
+    if house is not None:
+        grid_s = StepSeries(grid) if grid else None
+        return [
+            sample_at(
+                ts,
+                held_value(grid_s, ts, hold_s) if grid_s else 0.0,
+                pv_s,
+                exp_s,
+                bat_s,
+                subs,
+                estimated,
+                pv_hold_s,
+                pv_night_w,
+                hold_s,
+                house=h,
+            )
+            for ts, h in house
+            if h is not None
+        ]
     timeline = list(grid)
     if exp_s:  # the timeline is the union of both meters' readings
         timeline = sorted(set(t for t, _ in grid) | set(exp_s.ts))
@@ -159,11 +185,14 @@ def sample_at(
     pv_hold_s: float,
     pv_night_w: float,
     hold_s: float,
+    house: float | None = None,
 ) -> Sample:
     """The sample of one grid reading ``g`` at ``ts``: the rules of the held
     values (PV, battery, sub-meters), shared by the nightly
     :func:`build_samples` and the live :class:`SampleBuilder`. The series
-    only need ``value_at`` and ``last_valid_before`` (:class:`StepSeries`)."""
+    only need ``value_at`` and ``last_valid_before`` (:class:`StepSeries`).
+    ``house``: the house meter's reading at ``ts`` (#97), the house value
+    instead of grid + PV + battery; ``g`` is then the grid held at ``ts``."""
     if exp_s:
         e = exp_s.value_at(ts)
         g = g - (e or 0.0)
@@ -172,7 +201,8 @@ def sample_at(
     values = tuple(max(held_value(s, ts, hold_s), 0.0) for s in subs)
     sub = sum(values)
     est = sum(v for v, e in zip(values, estimated, strict=False) if e)
-    house = g + p + b if p is not None else None
+    if house is None:
+        house = g + p + b if p is not None else None
     residual = house - sub if house is not None else None
     return Sample(ts, g, p, b, sub, house, residual, est, values)
 
@@ -324,9 +354,12 @@ class SampleBuilder:
         pv_hold_s: float = 300.0,
         pv_night_w: float = 50.0,
         hold_s: float = 300.0,
+        house: str | None = None,
     ):
         scales = scales or {}
         self.grid = _Combined(len(grid))
+        # the house meter (#97): it drives the timeline, as in build_samples
+        self.house = _Combined(1) if house else None
         self.pv = _Combined(len(pv)) if pv else None
         self.exp = LiveSeries() if grid_export else None
         self.bat = LiveSeries() if battery else None
@@ -350,6 +383,8 @@ class SampleBuilder:
             route(battery, self.bat.add, battery_invert)
         for e, s in zip(submeters, self.subs, strict=True):
             route(e, s.add)
+        if house:
+            route(house, lambda ts, v: self.house.add(0, ts, v))
         self._export_ts: set[float] = set()
 
     @classmethod
@@ -365,6 +400,7 @@ class SampleBuilder:
             grid_invert=config.grid_invert,
             battery_invert=config.battery_invert,
             estimated=[s.estimated for s in config.submeters],
+            house=config.house_entity,
             **kwargs,
         )
 
@@ -383,17 +419,29 @@ class SampleBuilder:
             add(float(ts), None if value is None else value * k)
 
     def pop(self, before: float | None = None) -> list[Sample]:
-        """The samples of the grid readings before ``before`` (None: all),
-        each one once, in time order."""
+        """The samples of the grid readings (the house meter's, with one)
+        before ``before`` (None: all), each one once, in time order."""
         if self.pv:
             self.pv.advance(before)
         grid = self.grid.advance(before)
-        if self.exp:  # the timeline is the union of both meters' readings
+        timeline: list[tuple[float, float | None, float | None]]  # (ts, grid, house)
+        if self.house:
+            # the house meter's readings drive the timeline (#97); the grid
+            # is held at each of them, its own readings and the export's
+            # make no sample
+            if self.exp:
+                self._export_ts = {t for t in self._export_ts if before is not None and t >= before}
+            timeline = [
+                (t, held_value(self.grid.out, t, self.hold_s), h)
+                for t, h in self.house.advance(before)
+                if h is not None
+            ]
+        elif self.exp:  # the timeline is the union of both meters' readings
             due = {t for t in self._export_ts if before is None or t < before}
             self._export_ts.difference_update(due)
-            timeline = [(t, self.grid.out.value_at(t)) for t in sorted(due | {t for t, _ in grid})]
+            timeline = [(t, self.grid.out.value_at(t), None) for t in sorted(due | {t for t, _ in grid})]
         else:
-            timeline = grid
+            timeline = [(t, g, None) for t, g in grid]
         pv_s = self.pv.out if self.pv else None
         out = [
             sample_at(
@@ -407,8 +455,9 @@ class SampleBuilder:
                 self.pv_hold_s,
                 self.pv_night_w,
                 self.hold_s,
+                h,
             )  # fmt: skip
-            for ts, g in timeline
+            for ts, g, h in timeline
             if g is not None
         ]
         if out:
@@ -420,6 +469,8 @@ class SampleBuilder:
 
     def _prune(self, cutoff: float) -> None:
         self.grid.prune(cutoff)
+        if self.house:
+            self.house.prune(cutoff)
         if self.pv:
             self.pv.prune(cutoff)
         for s in (self.exp, self.bat, *self.subs):

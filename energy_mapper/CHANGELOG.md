@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.19.0
+
+- House meter (#97): the new option `house_entity` (also in the
+  integration's options) takes a meter of the house itself, downstream of
+  the battery and the solar inverter. The house curve, its steps and its
+  peaks then come from it, and the residual is that meter minus the
+  sub-meters: grid, solar and battery sensors read at different instants
+  (a cloud integration polled every few seconds) no longer make false steps
+  when the battery starts or stops or a cloud passes. They are still read
+  for the day totals and the night threshold. The late solar readings are
+  not set aside with such a meter, and `slow_solar_meter` is not reported.
+  The live view follows the same meter. A sensor missing from Home
+  Assistant is reported as unavailable, and the analysis goes back to grid
+  + solar + battery. Off by default: nothing changes without it.
+- Integration 0.16.0: the *House power* field in the options, English and
+  French.
+
 ## 0.18.2
 
 - Labelled examples: "too small" is decided from the measured noise of the

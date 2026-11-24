@@ -41,6 +41,7 @@
               "pv_entity": "Puissance solaire",
               "battery_entity": "Puissance de la batterie",
               "battery_invert": "Le capteur de la batterie est positif en charge",
+              "house_entity": "Puissance de la maison",
               "submeters_mode": "Sous-compteurs à retirer",
               "submeters": "Sous-compteurs"
             },
@@ -49,6 +50,7 @@
               "grid_export_entity": "Seulement pour les compteurs qui donnent soutirage et injection en deux capteurs.",
               "pv_entity": "Puissance de la production solaire.",
               "battery_entity": "Puissance de la batterie de la maison, positive en décharge.",
+              "house_entity": "Facultatif : un compteur de la maison elle-même (en aval de la batterie et de l'onduleur solaire). La courbe de la maison vient alors de lui au lieu de réseau + solaire + batterie.",
               "submeters": "Capteurs de puissance d'appareils mesurés : leur puissance est retirée avant l'analyse.",
               "submeters_mode": "Automatique : ceux du tableau Énergie ; retirez-en un de la liste pour l'ignorer. Ajouter un capteur que le tableau Énergie ne liste pas fait de la liste la vôtre."
             }

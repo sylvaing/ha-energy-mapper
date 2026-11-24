@@ -252,6 +252,16 @@ def test_settings_from_form() -> None:
     }
 
 
+def test_house_entity_setting() -> None:
+    """The house meter (#97) is stored when set, shown again, and dropped when cleared."""
+    form = {"sensors": {"house_entity": "sensor.house_power"}}
+    settings = settings_from_form(form, addon_settings())
+    assert settings["house_entity"] == "sensor.house_power"
+    values = suggested_values(addon_settings(settings))
+    assert values["sensors"]["house_entity"] == "sensor.house_power"
+    assert "house_entity" not in settings_from_form({"sensors": {}}, addon_settings(settings))
+
+
 def test_suggested_values() -> None:
     values = suggested_values(
         addon_settings(

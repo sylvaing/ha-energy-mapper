@@ -29,6 +29,7 @@ AUTOMATIC = {
     "grid_export_entity": None,
     "pv_entity": "sensor.solar_power",
     "battery_entity": None,
+    "house_entity": None,
     "submeters": ["sensor.heat_pump_power"],
     "switched_loads": [{"entity_id": "switch.water_heater", "name": "Water heater", "on_states": ["on"]}],
 }

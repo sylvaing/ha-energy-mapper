@@ -41,6 +41,7 @@
               "pv_entity": "Solar power",
               "battery_entity": "Battery power",
               "battery_invert": "Battery sensor is positive when charging",
+              "house_entity": "House power",
               "submeters_mode": "Sub-meters to subtract",
               "submeters": "Sub-meters"
             },
@@ -49,6 +50,7 @@
               "grid_export_entity": "Only for meters that report import and export as two sensors.",
               "pv_entity": "Power of the solar production.",
               "battery_entity": "Power of the home battery, positive when discharging.",
+              "house_entity": "Optional: a meter of the house itself (downstream of the battery and the solar inverter). The house curve then comes from it instead of grid + solar + battery.",
               "submeters": "Power sensors of measured appliances: their power is subtracted before the analysis.",
               "submeters_mode": "Automatic: those of the Energy dashboard; remove one from the list to ignore it. Adding a sensor the Energy dashboard does not list makes the list your own."
             }

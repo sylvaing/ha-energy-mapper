@@ -51,6 +51,13 @@ configuration:
   battery_invert:
     name: Inverser le signe de la batterie
     description: À activer si le capteur de la batterie est positif en charge.
+  house_entity:
+    name: Capteur de puissance de la maison
+    description: >-
+      Facultatif : un compteur de la maison elle-même (en aval de la batterie
+      et de l'onduleur solaire, par exemple à l'entrée du tableau électrique).
+      La courbe de la maison vient alors de lui au lieu de réseau + solaire +
+      batterie, toujours lus pour les totaux du jour et les heures solaires.
   submeters:
     name: Sous-compteurs
     description: >-

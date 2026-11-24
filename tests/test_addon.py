@@ -679,6 +679,41 @@ class AnalyzerTests(unittest.TestCase):
             analyzer.analyze_day(TODAY - dt.timedelta(days=1))
         self.assertEqual(cm.exception.code, "no_data")
 
+    def test_house_meter_drives_the_day_checks(self):
+        """With a house meter (#97), a day is complete when that meter's
+        history is, whatever the grid's (a cloud integration that started
+        later), and empty when it has none."""
+        ha = FakeHA(data_start=0)
+        snap = snapshot()
+        snap["states"].append(
+            {
+                "entity_id": "sensor.house_power",
+                "state": "300",
+                "attributes": {"device_class": "power", "unit_of_measurement": "W"},
+            }
+        )
+        ha.snapshot = lambda: snap
+        day = TODAY - dt.timedelta(days=1)
+        late = midnight(day) + 3 * 3600
+        real = ha.history
+
+        def history(entities, start, end):
+            out = real(entities, start, end)
+            house = [(ts, v) for ts, v in out.get("sensor.grid_power", [])]
+            out["sensor.grid_power"] = [(ts, v) for ts, v in house if ts >= late]
+            out["sensor.house_power"] = house
+            return out
+
+        ha.history = history
+        analyzer, store = make_analyzer(self.tmp, ha, {"house_entity": "sensor.house_power"})
+        analyzer.analyze_day(day)
+        self.assertIsNotNone(store.load(day.isoformat()))
+        # without the house meter, the same history is a partial day
+        analyzer, _ = make_analyzer(self.tmp, ha, {})
+        with self.assertRaises(AnalysisError) as cm:
+            analyzer.analyze_day(day)
+        self.assertEqual(cm.exception.code, "partial_day")
+
     def test_no_grid(self):
         analyzer, _ = make_analyzer(self.tmp, FakeHA(0, prefs=False))
         with self.assertRaises(AnalysisError) as cm:

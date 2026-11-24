@@ -79,6 +79,7 @@ below (see `PUT /api/settings`).
 | `pv_entity` | Energy dashboard | Solar power sensor. |
 | `battery_entity` | Energy dashboard | Battery power sensor, positive when discharging. |
 | `battery_invert` | `false` | The battery sensor is positive when charging. |
+| `house_entity` | empty (off) | A meter of the house itself, downstream of the battery and the solar inverter: see [House meter](#house-meter). |
 | `submeters` | Energy dashboard | Power sensors of measured appliances, subtracted before the analysis. |
 | `switched_loads` | Energy dashboard | Appliances driven by a switch. |
 | `step_threshold_w` | `300` | Smallest power change considered as an appliance switching. |
@@ -239,7 +240,37 @@ has changed (a minute later at most); at night nothing changes.
 This needs a solar power sensor that reports a change of the production
 within a minute. Otherwise the finding `slow_solar_meter` says how long it
 takes: prefer a local reading of the inverter (a few seconds) to a cloud
-service that updates every few minutes.
+service that updates every few minutes. With a [house meter](#house-meter),
+none of this applies: the production is not in the house load.
+
+### House meter
+
+With a battery or solar panels, the house load is rebuilt as grid + solar +
+battery. When those sensors are not read at the same instants (a cloud
+integration polled every few seconds, typically), the load jumps for a few
+seconds each time the battery starts or stops or a cloud passes: steps that
+are no appliance, and energy left unexplained.
+
+If a meter measures the house itself, downstream of the battery and the
+solar inverter (a channel of an energy meter at the input of the
+distribution board, or the inverter's own "house consumption" sensor), set
+it as `house_entity` (add-on 0.19.0+; also in the integration's options,
+*Sensors*). Then:
+
+- the house curve, its steps and its peaks come from that meter alone, and
+  the residual is that meter minus the sub-meters;
+- grid, solar and battery are still read, at that meter's readings, for the
+  day totals (import, export, production, battery), and the solar
+  production for the [night threshold](#night-threshold);
+- the [late solar readings](#solar-readings-that-come-late) are not set
+  aside, and `slow_solar_meter` is not reported: they do not move the house
+  meter;
+- the live view follows the same meter.
+
+The meter must be signed like a consumption (positive, in W or kW) and
+report at least every few seconds: it drives the timeline. A sensor missing
+from Home Assistant is reported (`unavailable`) and the analysis goes back to
+grid + solar + battery.
 
 ## Reports
 
@@ -500,7 +531,7 @@ Accepted keys (all optional; `null`, `""` and `[]` mean "absent"):
 
 | Key | Value |
 |---|---|
-| `grid_entity`, `grid_export_entity`, `pv_entity`, `battery_entity` | A `sensor.` entity id |
+| `grid_entity`, `grid_export_entity`, `pv_entity`, `battery_entity`, `house_entity` | A `sensor.` entity id (`house_entity`: add-on 0.19.0+) |
 | `grid_invert`, `battery_invert` | `true` or `false` |
 | `submeters_mode` | `automatic` (default) or `manual`: `manual` makes `submeters` the exact list, possibly empty ("no sub-meters", even over the add-on option) |
 | `submeters` | List of `sensor.` entity ids (replaces those of the Energy dashboard; stored with `submeters_mode: manual`) |
