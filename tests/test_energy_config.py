@@ -223,6 +223,63 @@ class DeriveTests(unittest.TestCase):
         d = derive(h.prefs(), h.states, h.registry)
         self.assertEqual(d.config.grid_entity, "sensor.main_meter_channel_1_power")
 
+    def test_power_only_grid(self):
+        """A grid connection declared by its power sensor only (no import
+        meter, Home Assistant 2025.11+) is read."""
+        h = Installation()
+        h.add(power("sensor.grid_power", "800"))
+        h.sources.append(
+            {
+                "type": "grid",
+                "stat_energy_from": None,
+                "stat_energy_to": None,
+                "stat_rate": "sensor.grid_power",
+            }
+        )
+        d = derive(h.prefs(), h.states, h.registry)
+        self.assertEqual(d.config.grid_entity, "sensor.grid_power")
+        self.assertEqual(d.findings, [])
+
+    def test_export_meter_alone_is_not_a_grid(self):
+        h = Installation()
+        h.add(energy("sensor.grid_export_energy"), "p1")
+        h.add(power("sensor.grid_export_power"), "p1")
+        h.sources.append(
+            {"type": "grid", "stat_energy_from": None, "stat_energy_to": "sensor.grid_export_energy"}
+        )
+        d = derive(h.prefs(), h.states, h.registry)
+        self.assertIsNone(d.config)
+        self.assertEqual(["no_grid"], [f.kind for f in d.findings])
+
+    def test_declared_device_power_sensor_wins(self):
+        """A device's stat_rate is its sub-meter, not the sensor guessed from
+        its energy sensor's device."""
+        h = self._plug_and_relay()
+        h.add(power("sensor.fridge_real_power"))
+        h.devices[0]["stat_rate"] = "sensor.fridge_real_power"
+        d = derive(h.prefs(), h.states, h.registry)
+        self.assertEqual([m.entity_id for m in d.config.submeters], ["sensor.fridge_real_power"])
+        fridge = next(t for t in d.tracked if t.name == "Fridge")
+        self.assertEqual((fridge.power_entity, fridge.role), ("sensor.fridge_real_power", "submeter"))
+
+    def test_declared_device_power_sensor_missing_falls_back(self):
+        h = self._plug_and_relay()
+        h.devices[0]["stat_rate"] = "sensor.gone_power"
+        d = derive(h.prefs(), h.states, h.registry)
+        self.assertEqual([m.entity_id for m in d.config.submeters], ["sensor.fridge_plug_power"])
+
+    def test_declared_device_power_keeps_the_users_choices(self):
+        """A guessed sensor the user excluded or made teach stays the device's:
+        the declared one must not be subtracted behind the user's back."""
+        h = self._plug_and_relay()
+        h.add(power("sensor.fridge_real_power"))
+        h.devices[0]["stat_rate"] = "sensor.fridge_real_power"
+        for option, role in (("excluded_submeters", "excluded"), ("teachers", "teacher")):
+            d = derive(h.prefs(), h.states, h.registry, {option: ["sensor.fridge_plug_power"]})
+            self.assertEqual(d.config.submeters, [], option)
+            fridge = next(t for t in d.tracked if t.name == "Fridge")
+            self.assertEqual((fridge.power_entity, fridge.role), ("sensor.fridge_plug_power", role))
+
     def test_separate_import_export_meters_in_kw(self):
         h = Installation()
         h.add(energy("sensor.p1_energy_consumed"), "p1")

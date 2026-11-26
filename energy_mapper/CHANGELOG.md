@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.18.4
+
+- A grid connection declared in the Energy dashboard by its power sensor
+  alone (no import meter, Home Assistant 2025.11+) is read; it was skipped.
+- The power sensor declared with an individual device of the Energy
+  dashboard (`stat_rate`) is its sub-meter, before the sensor guessed from
+  its energy sensor's device. A guessed sensor you excluded from the
+  subtraction, or that teaches an appliance, stays the device's.
+
 ## 0.18.3
 
 - The power sensors declared in the Energy dashboard are used. Since Home

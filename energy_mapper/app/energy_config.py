@@ -208,9 +208,10 @@ def power_for(energy_entity: str, idx: _Index) -> str | None:
 def declared_rate(source: Mapping[str, Any], idx: _Index) -> str | None:
     """The power sensor declared for a source of the Energy dashboard.
 
-    Since Home Assistant 2025.11 a grid, solar or battery source may carry a
-    power statistic (``stat_rate``) in Home Assistant's sign convention: grid
-    positive when importing, battery positive when discharging. When the user
+    Since Home Assistant 2025.11 a grid, solar or battery source, and a
+    device (``device_consumption``), may carry a power statistic
+    (``stat_rate``) in Home Assistant's sign convention: grid positive when
+    importing, battery positive when discharging. When the user
     built it from an inverted or split sensor (``power_config``), Home
     Assistant stores the resulting sensor in ``stat_rate`` too. Used only when
     it is a power sensor present in the states."""
@@ -312,18 +313,20 @@ def derive(
     stat_rates: set[str] = set()  # power sensors declared in the Energy dashboard
     for src in (s for s in sources if s.get("type") == "grid"):
         imports = _flows(src, "stat_energy_from")
-        if not imports:
-            continue
-        energy = imports[0]
-        if _number(idx.state(energy)) == 0:
+        energy = imports[0] if imports else None
+        if energy and _number(idx.state(energy)) == 0:
             out.findings.append(Finding("grid_ignored", energy, "grid meter that has never counted", {}))
             continue
         power = declared_rate(src, idx)
         if power:
-            # a net power in Home Assistant's convention: exports are its negative part
+            # a net power in Home Assistant's convention: exports are its
+            # negative part. Read even without an import meter (a grid
+            # connection declared by its power sensor only).
             grids.append(power)
             stat_rates.add(power)
             continue
+        if not energy:
+            continue  # an export meter alone: nothing to read the house from
         power = power_for(energy, idx)
         if not power:
             out.findings.append(
@@ -398,7 +401,13 @@ def derive(
             continue
         name = d.get("name") or idx.attrs(energy).get("friendly_name") or energy
         src = idx.attrs(energy).get("source_entity")
-        power = power_for(energy, idx)
+        guessed = power_for(energy, idx)
+        # the power sensor declared with the device in the Energy dashboard
+        # wins over the guess, unless the user already excluded the guessed
+        # sensor or made it teach: that choice stays with the device
+        power = guessed
+        if guessed not in teachers and guessed not in excluded_meters:
+            power = declared_rate(d, idx) or guessed
         if not idx.available(energy):
             out.tracked.append(TrackedDevice(name, energy, power, "unavailable", src))
             out.findings.append(Finding("unavailable", energy, f"{name}: sensor unavailable", {"name": name}))

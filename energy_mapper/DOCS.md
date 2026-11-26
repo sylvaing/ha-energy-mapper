@@ -48,11 +48,13 @@ Days run from midnight to midnight in the time zone of Home Assistant.
 
 Nothing to configure if the **Energy dashboard** is set up: the add-on reads
 the grid meter, the solar production, the battery and the individual devices
-from it. For the grid, the solar production and the battery, it uses the
-power sensor declared in the dashboard (Home Assistant 2025.11 and later), in
-Home Assistant's sign convention (grid positive when importing, battery
-positive when discharging); otherwise, and for the devices, it finds the
-power sensor (W) that goes with each energy sensor (kWh) of the dashboard.
+from it. It uses the power sensor declared in the dashboard with each source
+and device (Home Assistant 2025.11 and later), in Home Assistant's sign
+convention for the sources (grid positive when importing, battery positive
+when discharging); a grid connection can be declared by its power sensor
+alone. Otherwise it finds the power sensor (W) that goes with each energy
+sensor (kWh) of the dashboard. A device whose guessed sensor you excluded or
+use to teach an appliance keeps that sensor.
 
 An appliance whose estimate you replaced, in the Energy dashboard, by its
 Energy Mapper statistic (`energy_mapper:load_…_energy`) stays measured: the

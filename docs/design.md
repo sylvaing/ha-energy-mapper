@@ -360,6 +360,11 @@ flowchart TD
   its sensors declared): ticked after a `battery_sign` finding on the guessed raw sensor, it
   would invert the declared one again. The finding `invert_ignored` tells the user to untick
   it. A manual entity keeps honouring the option.
+  A grid source with a `stat_rate` and no import meter (a power-only connection, allowed
+  since 2025.11) is read; an export meter alone is still skipped. A `device_consumption`
+  entry may carry a `stat_rate` too: it is the device's sub-meter, unless the guessed sensor
+  is in `excluded_submeters` or `teachers`, where the user's choice was made on the guessed
+  one (the declared sensor would otherwise be subtracted behind it).
 - The grid meter drives the timeline: one sample per grid reading. Other series are
   piecewise constant (Home Assistant records a state when it changes).
 - **Unavailable sources**: PV keeps its last value for 5 minutes, then counts 0 if it was
