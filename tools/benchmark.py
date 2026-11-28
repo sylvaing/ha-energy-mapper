@@ -493,7 +493,7 @@ def truth_score(
         if _covered(r.start, r.end, spans) >= FREE_COVER * (r.end - r.start):
             count(r.start, "found")
         this = {"start": r.start, "end": r.end, "power_w": r.power_w}
-        if any(_same(this, u) for u in near):
+        if any(_same(u, this) for u in near):  # the power compared with the run's, as for found
             count(r.start, "whole")
     truth = [(r.start, r.end) for r in runs]
     a, b = span or (report["start"], report["end"])

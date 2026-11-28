@@ -7,7 +7,9 @@ days only (no real data)."""
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import io
+import math
 import pathlib
 import sys
 import unittest
@@ -23,7 +25,10 @@ from nilm_core import small as sm  # noqa: E402
 from nilm_core.hourly import hourly_breakdown  # noqa: E402
 from nilm_core.registry import annotate_report, expected_signature, small_models  # noqa: E402
 from nilm_core.registry import update as update_registry  # noqa: E402
-from synth import DAY0, HOUR, Compressor, Steady, cold_day  # noqa: E402
+from nilm_core.report import find_steps  # noqa: E402
+from nilm_core.signal import build_samples, parse_numeric  # noqa: E402
+from nilm_core.steps import Step  # noqa: E402
+from synth import DAY0, HOUR, Compressor, Cycling, Steady, cold_day  # noqa: E402
 
 GRID = "sensor.grid_power"
 DAY = 24 * HOUR
@@ -47,6 +52,12 @@ def tv(day0=DAY0, at=20.0, hours=2.0, power=100.0) -> Steady:
 def report_of(loads, cfg=None, day0=DAY0, seed=11) -> dict:
     hist = cold_day(loads, day0=day0, seed=seed)
     return analyze(hist, cfg or config(), day0, day0 + DAY, local_hour=HOUR_OF)
+
+
+def find_steps_of(loads, cfg=None, seed=11) -> list:
+    hist = cold_day(loads, seed=seed)
+    samples = build_samples(grid=parse_numeric(hist[GRID]), pv=None, submeters=[], estimated=[])
+    return find_steps(samples, cfg or config())
 
 
 def long_uses(report: dict) -> list[dict]:
@@ -140,21 +151,164 @@ class HiddenStepTest(unittest.TestCase):
         self.assertGreaterEqual(use["end"], DAY0 + 22 * HOUR - 600 - 180)
         self.assertLessEqual(use["end"], DAY0 + 22 * HOUR)
 
-    def test_a_stop_that_is_not_known_closely_is_not_kept(self):
+    def test_a_stop_in_unknown_minutes_is_not_kept(self):
         """The level is unknown for 40 minutes around the end (a cycling
         session): the use ended somewhere in there, which is not enough.
-        Five unknown minutes are."""
+        Five unknown minutes still give an end by the level. With
+        ``open_end`` the use is kept as far as it was seen, its end marked
+        unknown."""
         points = [(DAY0 + 10 * k, 300.0 + (100.0 if 360 <= k < 1080 else 0.0)) for k in range(1440)]
         on, off = DAY0 + 3600, DAY0 + 10800
         wide = sm.Level(points, masks=[(off - 1200, off + 1200)])
         self.assertIsNone(sm.find_stop(wide, on, 100, True))
         narrow = sm.Level(points, masks=[(off - 240, off + 60)])
-        self.assertAlmostEqual(sm.find_stop(narrow, on, 100, True), off - 240, delta=90)
+        stop, how = sm.find_stop(narrow, on, 100, True)
+        self.assertEqual(how, "level")
+        self.assertAlmostEqual(stop, off - 240, delta=90)
+        opened = dataclasses.replace(sm.SMALL, open_end=True)
+        stop, how = sm.find_stop(wide, on, 100, True, opened)
+        self.assertEqual(how, "unknown")
+        self.assertAlmostEqual(stop, off - 1200, delta=90)
+        # seen for less than half an hour before the unknown minutes: nothing
+        early = sm.Level(points, masks=[(on + 900, off + 1200)])
+        self.assertIsNone(sm.find_stop(early, on, 100, True, opened))
+
+    def test_an_on_step_lost_in_a_cooking_session(self):
+        """A hob cycles for 40 minutes and the television starts in the
+        middle of it: no on-step, and 40 minutes during which the level is
+        not known. The off-step is seen two hours later. By default the use
+        is not reported (its start is not known within a quarter of an
+        hour); with ``open_end`` it is, from the end of the session, its
+        start marked unknown. A session of 8 minutes hides nothing."""
+        hob = Cycling(DAY0 + 19.6 * HOUR, DAY0 + 19.6 * HOUR + 2400, 1400, 30, 30)
+        loads = [tv(), hob]
+        self.assertEqual(long_uses(report_of(loads, config(cold=False))), [])
+        opened = config(cold=False, small=dataclasses.replace(sm.SMALL, open_end=True))
+        (use,) = long_uses(report_of(loads, opened))
+        self.assertEqual((use["how"], use["on"], use["off"]), ("completed", "unknown", "detected"))
+        self.assertAlmostEqual(use["start"], hob.end, delta=180)
+        self.assertAlmostEqual(use["end"], DAY0 + 22 * HOUR, delta=60)
+        short = Cycling(DAY0 + 20 * HOUR - 240, DAY0 + 20 * HOUR + 240, 1400, 30, 30)
+        (use,) = long_uses(report_of([tv(), short], config(cold=False)))
+        self.assertEqual((use["on"], use["off"]), ("level", "detected"))
+        self.assertAlmostEqual(use["start"], short.end, delta=180)
 
     def test_a_level_that_does_not_come_back_is_not_kept(self):
         """An on-step, then the level drifts away instead of stepping back."""
         up = Steady(DAY0 + 14 * HOUR, DAY0 + 30 * HOUR, 100)
         self.assertEqual(long_uses(report_of([up], config(cold=False))), [])
+
+
+# ---------------------------------------------------------------------------
+# an end in two steps; loads taken out of the level; two loads of one power
+# ---------------------------------------------------------------------------
+class TwoStage:
+    """An appliance that stops (or starts) in two stages ``gap_s`` apart:
+    ``share`` of its power first."""
+
+    def __init__(self, start: float, end: float, power: float, share=0.6, gap_s=30.0, at_start=False):
+        self.start, self.end, self.power = start, end, power
+        self.share, self.gap_s, self.at_start = share, gap_s, at_start
+
+    def power_at(self, t: float) -> float:
+        if self.at_start:
+            if self.start <= t < self.start + self.gap_s:
+                return self.share * self.power
+            return self.power if self.start + self.gap_s <= t < self.end else 0.0
+        if self.end <= t < self.end + self.gap_s:
+            return (1 - self.share) * self.power
+        return self.power if self.start <= t < self.end else 0.0
+
+
+class Settling:
+    """A heating element: it draws ``on_w`` when it starts and settles to
+    ``off_w`` with the time constant ``tau_s``."""
+
+    def __init__(self, start: float, end: float, on_w: float, off_w: float, tau_s: float = 1200.0):
+        self.start, self.end, self.on_w, self.off_w, self.tau_s = start, end, on_w, off_w, tau_s
+
+    def power_at(self, t: float) -> float:
+        if not self.start <= t < self.end:
+            return 0.0
+        return self.off_w + (self.on_w - self.off_w) * math.exp(-(t - self.start) / self.tau_s)
+
+
+class EdgesAndLoadsTest(unittest.TestCase):
+    def test_an_off_in_two_steps_is_one_edge(self):
+        """60 W then 40 W half a minute later: neither is the size of the
+        100 W on-step, the two together are."""
+        load = TwoStage(DAY0 + 20 * HOUR, DAY0 + 22 * HOUR, 100)
+        steps = find_steps_of([fridge(), load])
+        first, second = (s.delta for s in steps if abs(s.ts - load.end) < 90)
+        self.assertAlmostEqual(first + second, -100, delta=15)
+        self.assertFalse(sm.SMALL.same_size(100, -first) or sm.SMALL.same_size(100, -second))
+        (use,) = long_uses(report_of([fridge(), load]))
+        self.assertEqual((use["how"], use["on"], use["off"]), ("detected", "detected", "detected"))
+        self.assertAlmostEqual(use["start"], DAY0 + 20 * HOUR, delta=60)
+        self.assertAlmostEqual(use["end"], DAY0 + 22 * HOUR + 30, delta=60)
+        self.assertAlmostEqual(use["off_w"], 100, delta=10)
+        self.assertAlmostEqual(use["power_w"], 100, delta=10)
+        # without the merging no pair is made: only what one step and the level give
+        alone = config(small=dataclasses.replace(sm.SMALL, merge_s=0))
+        self.assertEqual({u["how"] for u in long_uses(report_of([fridge(), load], alone))}, {"completed"})
+
+    def test_an_on_in_two_steps(self):
+        load = TwoStage(DAY0 + 20 * HOUR, DAY0 + 22 * HOUR, 100, at_start=True)
+        (use,) = long_uses(report_of([fridge(), load]))
+        self.assertEqual(use["how"], "detected")
+        self.assertAlmostEqual(use["on_w"], 100, delta=10)
+        self.assertAlmostEqual(use["start"], DAY0 + 20 * HOUR, delta=60)
+
+    def test_two_steps_far_apart_are_two_edges(self):
+        edges = sm.edges_of(
+            [
+                Step(100.0, -60, 0, 0, low=True),
+                Step(130.0, -40, 0, 0, low=True),
+                Step(400.0, -50, 0, 0, low=True),
+            ]
+        )
+        self.assertEqual(
+            [[round(s.delta) for s in e.steps] for e in edges], [[-60], [-60, -40], [-40], [-50]]
+        )
+        self.assertEqual(edges[1].size, 100)
+
+    def test_a_heating_load_that_settles_leaves_the_level_flat(self):
+        """A 2 kW element starts at 2060 W and stops at 1940 W three hours
+        later. The television starts an hour before it and stops half an
+        hour before it does: taken out at one power, or along a straight
+        line, the heater digs a hole under the use, which is cut short."""
+        heater = Settling(DAY0 + 12 * HOUR, DAY0 + 15 * HOUR, 2060, 1940)
+        loads = [tv(at=11.0, hours=3.5), heater]
+        (use,) = long_uses(report_of(loads, config(cold=False)))
+        self.assertAlmostEqual(use["start"], DAY0 + 11 * HOUR, delta=60)
+        self.assertAlmostEqual(use["end"], DAY0 + 14.5 * HOUR, delta=60)
+        for other in ({"ramp": False}, {"settle_s": 0.0}):
+            cfg = config(cold=False, small=dataclasses.replace(sm.SMALL, **other))
+            (use,) = long_uses(report_of(loads, cfg))
+            self.assertLess(use["end"], DAY0 + 12.5 * HOUR, other)
+
+    def test_the_power_taken_out_goes_from_one_step_to_the_other(self):
+        runs = sm._Runs([(0.0, 6000.0, 2060.0, 1940.0)], settle_s=1500.0)
+        self.assertAlmostEqual(runs(0.0), 2060, delta=0.5)
+        self.assertAlmostEqual(runs(5999.0), 1940, delta=0.5)
+        self.assertLess(runs(1500.0), 2000)  # most of the way down after one time constant
+        line = sm._Runs([(0.0, 6000.0, 2060.0, 1940.0)])
+        self.assertAlmostEqual(line(3000.0), 2000, delta=0.5)
+        self.assertEqual(line(6000.0), 0.0)
+
+    def test_two_loads_of_the_same_power(self):
+        """One runs from 19:00 to 21:00, the other from 20:00 to 22:00. At
+        21:00 an off-step of their power arrives and the level stays
+        raised: nothing ends there for the load that is still on. The level
+        cannot tell which of the two went off: the uses reported are the
+        long one and the hour both were on, the same energy."""
+        report = report_of([tv(at=19.0), tv(at=20.0)], config(cold=False))
+        uses = long_uses(report)
+        spans = [(round((u["start"] - DAY0) / HOUR, 1), round((u["end"] - DAY0) / HOUR, 1)) for u in uses]
+        self.assertEqual(spans, [(19.0, 22.0), (20.0, 21.0)])
+        self.assertAlmostEqual(
+            sum(u["power_w"] * (u["end"] - u["start"]) for u in uses) / 3.6e6, 0.4, delta=0.03
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -191,8 +345,8 @@ class UnrelatedStepsTest(unittest.TestCase):
         self.assertFalse(sm.pair_ok(level, on, off + 1800, 100))  # back down before the off-step
         self.assertFalse(sm.pair_ok(level, on - 1800, off, 100))  # not raised yet after the on-step
         self.assertFalse(sm.pair_ok(level, on, off, 200))  # raised by half the step only
-        self.assertAlmostEqual(sm.find_stop(level, on, 100, True), off, delta=60)
-        self.assertAlmostEqual(sm.find_stop(level, off, 100, False), on, delta=60)
+        self.assertAlmostEqual(sm.find_stop(level, on, 100, True)[0], off, delta=60)
+        self.assertAlmostEqual(sm.find_stop(level, off, 100, False)[0], on, delta=60)
         self.assertIsNone(sm.find_stop(level, on, 200, True))
         # the minutes of a use of the fixed thresholds are unknown
         masked = sm.Level(points, masks=[(on + 600, off - 600)])

@@ -304,7 +304,7 @@ def small_uses(
     if not low:
         return []
     cfg = config.small
-    long, level = long_uses(low, points, acts or (), known or (), tracks or (), cfg)
+    long, level = long_uses(low, points, acts or (), known or (), tracks or (), cfg, steps)
     free = [
         s
         for s in steps
@@ -626,13 +626,13 @@ def _small_use(a: Activation) -> dict:
     (#110) says so, with how it was found (``how``) and each of its ends
     (``on``, ``off``: ``detected`` or ``level``): the size of an end the
     level gave is the size of the step that was seen."""
-    on, off = a.steps[0], a.steps[-1]
+    on_w, off_w = a.sizes or (abs(a.steps[0].delta), abs(a.steps[-1].delta))
     out = {
         "start": a.start,
         "end": a.end,
         "power_w": round(a.power_w),
-        "on_w": round(abs(on.delta)),
-        "off_w": round(abs(off.delta)),
+        "on_w": round(on_w),
+        "off_w": round(off_w),
     }
     if a.small:
         out.update({"long": True, "how": small_how(a), "on": a.ends[0], "off": a.ends[1]})

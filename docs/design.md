@@ -1393,18 +1393,33 @@ was only placed stays free.
 
 **The level** (`Level`, `level_of`) is the curve the detector read, one median per minute,
 minus what is already explained (`explained_power`): the uses of the fixed thresholds made of
-two steps, each at the size of its **on-step** (the level is continuous where the use starts;
-where it stops, it moves by what else changed during it: an on-step of 2.1 kW closed by an
-off-step of 2 kW leaves the level 100 W higher), the switched loads at their measured power,
-and the runs of the cold appliances the curve showed (detected or completed; a placed or
+two steps and the switched loads, each **from the size of its on-step to the size of its
+off-step** (for a switched load, the steps it explains at the two ends of each run), and the
+runs of the cold appliances the curve showed (detected or completed; a placed or
 filled run is where the model expects it, and subtracting it would dig a hole). Some minutes
 are **unknown** (`masks_of`): one minute around each step of those uses and loads, and the
 whole of what cannot be subtracted (a cycling session, each burst of a burst series, a
 multi-phase cycle, a load measured by its runs). The **floor** of a stretch is the 20th
 percentile of its known minutes: the level once the short-lived loads on top are left out.
 
-**Two steps** (`pair_long`, `pair_ok`). Every pair of free low steps of the same size (20 W
-or 25 %), 30 minutes to 8 hours apart, is tested:
+Between its two sizes a subtracted load follows a **settling curve** (`_Runs.power`,
+`SmallConfig.settle_s`, 25 minutes; a straight line for a run much shorter than that). A
+heating element draws less as it warms up, fast at first: on the reference installation the
+water heater's on-step is 25 to 200 W above its off-step on 10 days of 11 (about 1.85 kW
+against 1.75 kW).
+Taken out at one power it leaves a step of about 100 W at its end, which cuts any small use
+that runs across it; along a straight line it leaves a hole of 30 W in the middle of its run.
+What else changed during the load shows as a slope instead of a step: a small use whose
+on-step is merged into the load's own is not seen from that side (missed, not invented).
+
+**Edges** (`Edge`, `edges_of`). An edge is one free low step, or two of the same sign within
+a minute (`merge_s`) with no other between them: an appliance that stops in two stages, 60 W
+then 40 W half a minute later, has no off-step of the size of its on-step, and the two
+together are one. Both readings are candidates; a pair of two single steps is taken before
+one that needs a merged edge.
+
+**Two steps** (`pair_long`, `pair_ok`). Every pair of an on-edge and an off-edge of the same
+size (20 W or 25 %), 30 minutes to 8 hours apart, is tested:
 
 - the floor of its first half hour is above the floor of the half hour before it by 60 % of
   the step, and the floor of its last half hour above the floor of the half hour after it as
@@ -1419,7 +1434,7 @@ The pairs that pass are taken the shortest first, each step once; one that is th
 level as one already taken (each covers half of the other, powers within 30 %: the steps of a
 compressor nothing follows, just before the on-step and just after the off-step) is dropped.
 
-**One step hidden** (`complete`, `find_stop`). Each low step still free is followed on the
+**One step hidden** (`complete`, `find_stop`). Each edge still free is followed on the
 level: forwards from an on-step, backwards from an off-step, while the level stays above the
 floor on the other side of the step plus 60 % of it. Once it has been back down for 3 known
 minutes, the use has ended, and its end is the last minute it was seen raised. It is kept
@@ -1445,6 +1460,23 @@ the use is cut short (or missed, when what is left is under 30 minutes). A load 
 during the use only raises the level, and does no harm. Missing a use was preferred to
 inventing one throughout: a long small use ends up named and counted as an appliance.
 
+Three things were tried against the sessions a real house still misses, and left out:
+
+- **Taking the detected steps of other loads out of the level that is followed**, so that a
+  lamp switched off does not end the use. A step is often two loads at once, or a load and a
+  blip: one edge of another use is removed and the other kept, and the level followed is one
+  that never existed (a use was carried three hours past its end). More long uses, none
+  better.
+- **The detector's own reading just after an off-step as the floor**, for an off-step
+  followed within a minute by another load starting. An appliance that drops out for a minute
+  then looks like the end of a use: by the level, the house did not go down.
+- **An open end** (`SmallConfig.open_end`, kept as an option, off): when the walk reaches
+  minutes that are unknown for longer than a quarter of an hour (a cooking session) and the
+  level is down on their other side, the use is kept as far as it was seen, that end
+  `unknown`. It is a real load, but half of a use, and nothing checks that the house came
+  back to where it was. On the reference installation it changes nothing; synthetic test
+  only.
+
 **Report.** `small_uses` items of a long use add `long: true`, `how`, `on`, `off`. Nothing
 else moves until the registry knows a signature for it.
 
@@ -1464,33 +1496,53 @@ keep their report until they are analysed again.
 
 **Measured** (`tools/benchmark.py --adaptive --cold --truth`, § 8.11; reference
 installation, 14 days, 150 W night threshold; a ~93 W television on a plug that is **not**
-declared to the analysis, 7 sessions of 37 minutes to 4 h 35 over the last 6 days):
+declared to the analysis, 7 sessions of 37 minutes to 4 h 35 over the last 6 days). "First
+version": pairs and one hidden step on a level where each load is taken out at one power;
+"now": with the settling curve and the edges of two steps.
 
-| | Before (#99) | Long small uses |
-|---|---|---|
-| Sessions found whole (one use, half of each other) | 2 of 7 | 3 of 7 |
-| Sessions half covered by uses of that power, fragments included | 6 of 7 | 4 of 7 |
-| Uses of that power lasting at least half its shortest session, while the plug reported | 59 | 22 |
-| Their energy against the plug's | 586 % | 130 % |
-| Small uses a day | 45 | 15.5 (3.6 of them long) |
-| Cold appliances (2 signatures, runs, energy; the hidden freezer: 64 % found, 83 % right, 109 %) | – | equal |
-| Hidden freezer without the registry (found / right) | 79 % / 83 % | 65 % / 80 % |
-| Pump, through the registry and without it | 64 % / 79 %, 86 % / 100 % | equal |
-| House energy: unexplained, small | 12 %, – | 12 %, 1 % |
+| | Before (#99) | First version | Now |
+|---|---|---|---|
+| Sessions found whole (one use, half of each other) | 2 of 7 | 3 of 7 | 4 of 7 |
+| Sessions half covered by uses of that power, fragments included | 6 of 7 | 4 of 7 | 5 of 7 |
+| Long small uses of that power while the plug reported: the appliance's / others | – | 3 / 8 | 4 / 8 |
+| Uses of that power lasting at least half its shortest session | 59 | 22 | 23 |
+| Their energy against the plug's | 586 % | 130 % | 152 % |
+| Small uses a day (of which long) | 45 | 15.5 (3.6) | 15.4 (3.9) |
+| Signatures of kind `small` | – | 6 | 6 |
+| Cold appliances (2 signatures, 896 runs, energy; the hidden freezer: 64 % found, 83 % right, 109 %) | – | equal | equal |
+| Hidden freezer without the registry (found / right) | 79 % / 83 % | 65 % / 80 % | 65 % / 80 % |
+| Pump, through the registry and without it | 64 % / 79 %, 86 % / 100 % | equal | equal |
+| Ordinary signatures; house energy unexplained, small | 48; 12 %, – | 48; 12 %, 1 % | 48; 12 %, 1 % |
 
-The 3 found whole are two sessions of one afternoon (37 minutes and 3 h 34, each from its
-on-step and the level) and one that ran at half the usual power. The 4 others: one is cut
-after 34 minutes, where another load of 90 W stops (the level cannot tell which one went
-off); two start in the middle of a cooking session, their on-step lost among its steps, and
-stop in two steps a few seconds apart, neither the size of the on-step (for one of them a
-30-minute use is reported at its end instead, which is wrong); one starts at midday next to
-the water heater's run, where the level is not reliable. Of the 11 long small uses of the
-television's power found while its plug reported, 3 are the television: the house has other
-loads of that power and no plug on them, so this is not a precision. Six signatures of kind `small` come out of the 14 days (45 to
-220 W, 4 to 12 uses each); the one at 89 W holds the television's sessions and those of at
-least one other load of that power. The registry-free score of the hidden freezer falls
-because the pairs of unrelated steps that lasted hours are gone: each one "found" every run
-it happened to cover. Its cold-appliance score, the measure made for it, does not move.
+The 4 found whole: two sessions of one afternoon (37 minutes and 3 h 34, each from its
+on-step and the level), one that ran at half the usual power, and one evening session of
+4 h 35 of which the last 2 h 35 are one use, at 71 W (its start is lost in a cooking session,
+and the level it is read on is right only since the uses of the fixed thresholds around it
+are taken out from one step size to the other). The 3 others, and why the level cannot give
+them:
+
+- one is cut after 34 minutes: a load of 90 W that was on **before** the session stops
+  during it. The off-step is the appliance's size and the level comes down by it, to 40 W
+  above where it was before the session: nothing tells this from the appliance stopping;
+- one ends with its off followed within a minute by another load of about the same size that
+  stays on (the same happens the evening before): the level is down for a minute, then as
+  high as during the session. Its start is among the
+  steps of a cooking session. A use of 30 minutes is still reported at its end, wrongly;
+- one starts at midday while the water heater runs, on a day when that load's on-step is
+  200 W above its off-step, twice the usual: something else started with it, and the level
+  under it is 100 W off for an hour or more. A straight line between the two sizes finds the
+  last hour of that session and loses the 3 h 34 one of the next day.
+
+**The others at that power.** Of the 12 long small uses of the television's power found while
+its plug reported, 4 are the television. The 8 others last 31 minutes to 5 h 26 and start at
+any hour from 9 to 22; the television's last 43 minutes to 3 h 30 and start at 11, 15, 20 and
+21 h. Neither the duration nor the time of day separates them, so the signature is not split:
+the house has other loads of that power, and one signature holds them all. Six signatures of
+kind `small` come out of the 14 days (45 to 220 W, 4 to 12 uses each). The registry-free
+score of the hidden freezer falls from "before" because the pairs of unrelated steps that
+lasted hours are gone: each one "found" every run it happened to cover (with the cold
+appliances taking no step at all the score is the same 65 %). Its cold-appliance score, the
+measure made for it, does not move.
 
 Tests (`tests/test_small_long_uses.py`, synthetic): a 100 W use of 2 hours beside a 95 W
 compressor is found whole, with and without the cold appliances, and the cold track is the
@@ -1500,7 +1552,13 @@ come back; two unrelated low steps four hours apart are not paired; a use during
 is told apart; one-offs and uses of a single day make no signature, uses on several days make
 one, whose uses are then activations with their energy in the curve, the registry id and the
 hourly energy; it can be an appliance's source and keeps its label; without the adaptive
-threshold the report is the one of before; the benchmark's truth plug.
+threshold the report is the one of before; the benchmark's truth plug. An off (an on) in two
+steps half a minute apart is one edge and the use is found whole; a 2 kW element that settles
+from 2060 to 1940 W leaves the level flat under a use that crosses its start (cut short at one
+power or along a straight line); two loads of the same power overlapping give the long use
+and the hour both were on; an on-step lost in a 40-minute cooking session gives nothing by
+default, the use from the end of the session with `open_end`, and an 8-minute session hides
+nothing.
 
 ## 5. Using the Energy dashboard
 

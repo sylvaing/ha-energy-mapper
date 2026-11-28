@@ -189,7 +189,8 @@ measured noise:
   looked for as one use. Two steps of the same size are not enough at that
   power, so the add-on checks the level of the curve, once what it already
   explains is taken out: it must go up at the start, stay up, and come down
-  at the end. When a big load or the solar production hides one of the two
+  at the end. An appliance that stops in two steps a few seconds apart is
+  seen as stopping once. When a big load or the solar production hides one of the two
   steps, the other end is where the raised level stops, if that is known
   within a quarter of an hour and the house is then back where it was. A use
   that fails these tests is not reported: missing one is preferred to

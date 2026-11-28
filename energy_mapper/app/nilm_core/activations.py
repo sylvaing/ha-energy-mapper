@@ -46,6 +46,7 @@ class Activation:
     # end were found (``detected``: a step, ``level``: where the level stops)
     small: bool = False
     ends: tuple[str, str] | None = None
+    sizes: tuple[float, float] | None = None  # ... and the size of its on-edge and of its off-edge
     _on: tuple[list[float], list[float]] | None = field(default=None, init=False, repr=False, compare=False)
 
     @property

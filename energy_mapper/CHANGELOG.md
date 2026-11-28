@@ -11,6 +11,14 @@
   where the raised level stops; such a use is marked `completed`, and each
   end says how it was found (`detected` or `level`). A use the level does
   not support is not reported.
+- An appliance that starts or stops in two steps a few seconds apart (two
+  low steps of the same sign within a minute) is seen as one edge of their
+  summed size.
+- What is taken out of the level under a use: a load of the fixed
+  thresholds or a switched load goes from the size of its on-step to the
+  size of its off-step along a settling curve, so that a water heater
+  that draws 100 W less when it stops than when it starts does not hide,
+  or cut, the small use that runs with it.
 - The low steps the cold appliances took (their detected and completed
   runs) are no longer paired into small uses, and a pair of low steps half
   an hour or more apart is dropped when the level does not support it: the
