@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.19.0
+
+- Long small uses (#110), with `adaptive_threshold`: a small appliance that
+  stays on for hours (a television, a set-top box, a desktop computer at
+  about 100 W) is looked for as one use. Its two steps are no longer enough
+  to accept it: the level of the curve, without what is already explained,
+  must go up at its start, stay up, and come down at its end. When a big
+  load or the solar production hides one of its two steps, the other end is
+  where the raised level stops; such a use is marked `completed`, and each
+  end says how it was found (`detected` or `level`). A use the level does
+  not support is not reported.
+- The low steps the cold appliances took (their detected and completed
+  runs) are no longer paired into small uses, and a pair of low steps half
+  an hour or more apart is dropped when the level does not support it: the
+  `small_uses` list loses the fragments made of a television's on-step and
+  a fridge's off-step, and the pairs of unrelated steps hours apart. The
+  cold appliances themselves are found as before.
+- A long small use that comes back (4 uses on 3 days, at the same power)
+  becomes a signature of kind `small` (`small-90w`), proposed for review
+  like the others: it can be named, validated and made an appliance. From
+  the next analysis on, its uses are activations of the day (`small`), with
+  their energy in the breakdown and in the statistics. A one-off stays in
+  `small_uses` (`long`).
+- Nothing changes without `adaptive_threshold`.
+- `tools/benchmark.py --truth ENTITY[=NAME]`: a plug on an appliance that
+  is not declared to the analysis is only the truth; the result says how
+  many of its uses are found whole, the precision and the energy against
+  the plug. With `--adaptive` the days are analysed in order.
+- Integration 0.16.0: the panel names the kind of these signatures.
+
 ## 0.18.4
 
 - A grid connection declared in the Energy dashboard by its power sensor

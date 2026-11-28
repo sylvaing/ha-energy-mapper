@@ -337,6 +337,8 @@ flowchart TD
   MC --> MA[attribute: recognised cycles replace their activations]
   MA --> G[cluster: daily signatures]
   D -. low steps, with the options .-> CO[cold.detect: regular low-power cycles learned and followed]
+  CO -. the low steps left .-> SM[small uses; the long ones accepted on the level of the curve]
+  SM --> R
   G --> R[curve, totals, peaks, quality: report]
   CO --> R
   R --> RG[registry.update across days]
@@ -479,9 +481,14 @@ after). The rule is exercised by the synthetic days of `tests/test_switched_low_
 (a 100 W pump on a relay next to an 80 W fridge, in either polarity; the same pump as a
 regular cycle, which the cold appliances would otherwise learn).
 
+Since add-on 0.19.0 (#110) the pairing comes **after** the cold appliances (§ 4.13), without
+the low steps their detected and completed runs took, and starts with the long small uses
+(§ 4.14): a pair of half an hour or more must be supported by the level of the curve.
+
 They are reported as `small_uses` (`{start, end, power_w, on_w, off_w}`: a compressor starts
-higher than it stops) and never reach `activations`, the daily signatures, the registry, the
-review, the curve's breakdown nor the statistics: on a real curve there are tens of them a day
+higher than it stops) and, but the long ones that came back (§ 4.14), never reach
+`activations`, the daily signatures, the registry, the review, the curve's breakdown nor the
+statistics: on a real curve there are tens of them a day
 (42 on the reference installation), most of them unnamed small loads, and naming them one by
 one is not the point. Their steps are the input of the cold-appliance detector (§ 4.13,
 #89), which proposes only the regular groups.
@@ -785,6 +792,8 @@ the stored day summaries.
 - **Cold appliances** (§ 4.13): signatures of kind `cold`, made from the `cold` lists of the
   stored days and not from activations; they carry their model (`on_w`, `off_w`,
   `on_modes_s`, `run_s`, `pause_s`) and `estimated_kwh`.
+- **Long small uses** (§ 4.14): signatures of kind `small`, clustered on the power of the
+  long small uses of the stored days, kept only once they came back (4 uses on 3 days).
 - **Registry ids in daily reports**: `annotate_report()` adds `registry_id` to the activations
   (nearest signature, same rule), to the daily signatures (majority of their activations; a
   cold one: the cold signature with the same steps), to the `cold` items and
@@ -1205,7 +1214,8 @@ it).
 
 **Input.** The `low` steps of the adaptive threshold that no sub-meter and no switched load
 explains (§ 4.2; the unpaired ones too), the curve the detector read, and the cold models the registry already holds
-(`AnalysisConfig.cold_models`). The small uses are not read: their pairing is the problem.
+(`AnalysisConfig.cold_models`). The small uses are not read: their pairing is the problem
+(they are made afterwards, from the steps the cold appliances left, § 4.14).
 
 **Learning** (`learn`), in the quiet stretches only: no solar production at the two edges of
 a run (`PvQuiet`, with a solar meter) and no step of the fixed thresholds within 5 minutes
@@ -1279,7 +1289,8 @@ from, 0 when the stored one was followed; `model`: the registry id it was given)
 also a daily signature of kind `cold` (band `cold`, id `cold-<power to 10 W>w`, one use per
 run), and takes its energy in the curve as the signatures do (`curve[].signatures`,
 `energy_kwh.signatures`): what it explains leaves the unexplained share, the base load being
-the level under it. `small_uses`, `activations` and the ordinary signatures are untouched.
+the level under it. `activations` and the ordinary signatures are untouched; `small_uses`
+no longer has the pairs made of the steps of its detected and completed runs (§ 4.14).
 
 **Persistence.** `registry.update` makes one signature of kind `cold` of the days'
 appliances with the same steps (`cold.alike`): its model is the weighted median (age × quiet
@@ -1361,6 +1372,135 @@ stable id, proposes it after three days, keeps its label and review, gives the m
 night that teaches nothing is followed from the stored model; an appliance that is gone is
 not reported; an ignored one is not either; the hourly energy goes to the registry id; the
 settings; the benchmark's score.
+
+### 4.14 Long small uses (`small.py`, #110)
+
+A small appliance that is **not** cyclic and stays on for hours (a television, a set-top box,
+a desktop computer: about 100 W for one to four hours) makes two low steps hours apart and
+nothing in between. The pairing of § 4.2 fails on it in three ways: its on-step is the size
+of a cold appliance's off-step a few minutes later (a fragment of 10 to 20 minutes instead of
+a use of 2 hours); two unrelated low steps hours apart are easily the same size (a "use" of
+3 to 6 hours that never was); by day a big load or the solar production hides one of the two
+steps. So a long small use is not accepted on its steps: it is accepted on the **level** of
+the curve. Everything here is behind `adaptive_threshold` and changes nothing without it.
+
+**Order.** `analyze` first marks the low steps a sub-meter or a switched load explains
+(`explain_low_steps_of`), then follows the cold appliances (§ 4.13, unchanged: they never
+read the small uses), then makes the small uses from what is left. `cold.Track.edges` gives
+the low steps each run of a cold appliance is made of: those of its detected and completed
+runs (`SmallConfig.cold_steps`) are its own and are not paired again; the step of a run that
+was only placed stays free.
+
+**The level** (`Level`, `level_of`) is the curve the detector read, one median per minute,
+minus what is already explained (`explained_power`): the uses of the fixed thresholds made of
+two steps, each at the size of its **on-step** (the level is continuous where the use starts;
+where it stops, it moves by what else changed during it: an on-step of 2.1 kW closed by an
+off-step of 2 kW leaves the level 100 W higher), the switched loads at their measured power,
+and the runs of the cold appliances the curve showed (detected or completed; a placed or
+filled run is where the model expects it, and subtracting it would dig a hole). Some minutes
+are **unknown** (`masks_of`): one minute around each step of those uses and loads, and the
+whole of what cannot be subtracted (a cycling session, each burst of a burst series, a
+multi-phase cycle, a load measured by its runs). The **floor** of a stretch is the 20th
+percentile of its known minutes: the level once the short-lived loads on top are left out.
+
+**Two steps** (`pair_long`, `pair_ok`). Every pair of free low steps of the same size (20 W
+or 25 %), 30 minutes to 8 hours apart, is tested:
+
+- the floor of its first half hour is above the floor of the half hour before it by 60 % of
+  the step, and the floor of its last half hour above the floor of the half hour after it as
+  much. An on-step paired with the off-step of something else fails here: the level after
+  that off-step is the level before it;
+- in between, the level never stays for 3 known minutes in a row under the higher of the two
+  outer floors plus 60 % of the step: followed from either step, the raised level reaches
+  the other one. Two unrelated steps hours apart fail here;
+- at least half of its minutes are known.
+
+The pairs that pass are taken the shortest first, each step once; one that is the same raised
+level as one already taken (each covers half of the other, powers within 30 %: the steps of a
+compressor nothing follows, just before the on-step and just after the off-step) is dropped.
+
+**One step hidden** (`complete`, `find_stop`). Each low step still free is followed on the
+level: forwards from an on-step, backwards from an off-step, while the level stays above the
+floor on the other side of the step plus 60 % of it. Once it has been back down for 3 known
+minutes, the use has ended, and its end is the last minute it was seen raised. It is kept
+only when all of this holds, else nothing is reported:
+
+- it lasted 30 minutes to 8 hours, and half of its minutes are known;
+- the stop is known within 15 minutes: the last raised minute and the first minute back down
+  are no further apart (in between, the minutes are unknown: the load that hides the step).
+  The end reported is the last raised minute, so the use is never longer than what was seen;
+- past the stop, the floor is back within 40 % of the step of the floor before the use: the
+  house returned to where it was.
+
+Each end says how it was found, as the runs of the cold appliances do: `detected` (a step) or
+`level`; the use is `detected` (two steps) or `completed` (one step and the level). Its power
+is the mean of its two steps, or the size of the one that was seen.
+
+**The other small uses.** `pair_steps` then pairs what is left as before (§ 4.2), and a pair
+of 30 minutes or more must pass the same test of the level or it is dropped.
+
+**What the level cannot tell.** It is one number per minute for the whole house: when another
+load of about the same power **stops** while the use is on, the raised level ends there, and
+the use is cut short (or missed, when what is left is under 30 minutes). A load that starts
+during the use only raises the level, and does no harm. Missing a use was preferred to
+inventing one throughout: a long small use ends up named and counted as an appliance.
+
+**Report.** `small_uses` items of a long use add `long: true`, `how`, `on`, `off`. Nothing
+else moves until the registry knows a signature for it.
+
+**Signatures** (`registry.update`, `small_models`). The long small uses of the stored days
+(the `long` items of `small_uses`, and the `small` activations) are clustered on their power
+like the other uses, in a group of their own: kind `small`, band `small`, id
+`small-<power to 10 W>w`. A cluster only becomes a signature once it **came back**:
+4 uses on 3 different days (`RegistryConfig.small_min_uses`, `small_min_days`); a one-off
+stays in its day's list. From then on the signature is an ordinary one (weight, decay, label,
+review, occurrences, appliance source: `SOURCE_GROUPS` has the group), and
+`registry.small_models` gives it back to the daily analysis (`AnalysisConfig.small_models`,
+set by `service._run_day`): the long small uses within 12 % of its power are **activations**
+of the day (`small: true`, with `how`, `on`, `off`), have a daily signature of kind `small`,
+take their energy in the curve as the others do, and reach the hourly statistics through
+`Matcher` (`activation_group` knows the flag). The days analysed before the signature existed
+keep their report until they are analysed again.
+
+**Measured** (`tools/benchmark.py --adaptive --cold --truth`, § 8.11; reference
+installation, 14 days, 150 W night threshold; a ~93 W television on a plug that is **not**
+declared to the analysis, 7 sessions of 37 minutes to 4 h 35 over the last 6 days):
+
+| | Before (#99) | Long small uses |
+|---|---|---|
+| Sessions found whole (one use, half of each other) | 2 of 7 | 3 of 7 |
+| Sessions half covered by uses of that power, fragments included | 6 of 7 | 4 of 7 |
+| Uses of that power lasting at least half its shortest session, while the plug reported | 59 | 22 |
+| Their energy against the plug's | 586 % | 130 % |
+| Small uses a day | 45 | 15.5 (3.6 of them long) |
+| Cold appliances (2 signatures, runs, energy; the hidden freezer: 64 % found, 83 % right, 109 %) | – | equal |
+| Hidden freezer without the registry (found / right) | 79 % / 83 % | 65 % / 80 % |
+| Pump, through the registry and without it | 64 % / 79 %, 86 % / 100 % | equal |
+| House energy: unexplained, small | 12 %, – | 12 %, 1 % |
+
+The 3 found whole are two sessions of one afternoon (37 minutes and 3 h 34, each from its
+on-step and the level) and one that ran at half the usual power. The 4 others: one is cut
+after 34 minutes, where another load of 90 W stops (the level cannot tell which one went
+off); two start in the middle of a cooking session, their on-step lost among its steps, and
+stop in two steps a few seconds apart, neither the size of the on-step (for one of them a
+30-minute use is reported at its end instead, which is wrong); one starts at midday next to
+the water heater's run, where the level is not reliable. Of the 11 long small uses of the
+television's power found while its plug reported, 3 are the television: the house has other
+loads of that power and no plug on them, so this is not a precision. Six signatures of kind `small` come out of the 14 days (45 to
+220 W, 4 to 12 uses each); the one at 89 W holds the television's sessions and those of at
+least one other load of that power. The registry-free score of the hidden freezer falls
+because the pairs of unrelated steps that lasted hours are gone: each one "found" every run
+it happened to cover. Its cold-appliance score, the measure made for it, does not move.
+
+Tests (`tests/test_small_long_uses.py`, synthetic): a 100 W use of 2 hours beside a 95 W
+compressor is found whole, with and without the cold appliances, and the cold track is the
+one of the day without it; an on-step, then an off-step, hidden by a 2 kW load is found by
+the level and marked so; a stop known to 40 minutes is not kept, nor a level that does not
+come back; two unrelated low steps four hours apart are not paired; a use during another one
+is told apart; one-offs and uses of a single day make no signature, uses on several days make
+one, whose uses are then activations with their energy in the curve, the registry id and the
+hourly energy; it can be an appliance's source and keeps its label; without the adaptive
+threshold the report is the one of before; the benchmark's truth plug.
 
 ## 5. Using the Energy dashboard
 
@@ -1510,11 +1650,11 @@ summary with `curve: []` and `curve_pruned: true`.
 | `curve` | Per-minute rows `{t, house, grid, pv, submetered, estimated, base, known: {name: W}, signatures: {daily id: W}, other}` |
 | `peaks` | `{start, end, max_ts, house_w, grid_w, pv_w, parts: [{kind: submetered\|estimated\|known\|signature, name, power_w, since?, registry_id?}], unexplained_w, notable}` |
 | `known_loads` | Switched loads: `{name, entity_id, power_w, transitions, matched, on_states, inverted, on_s}`; an operation-state load (add-on 0.14.0+) adds `mode: "run"` and `runs` |
-| `activations` | `{start, end, power_w, cycling, duty, on_s, period_s, signature, registry_id}`; a burst series (add-on 0.16.0+, § 4.5) is `cycling` and adds `blocks` (`[[start, end]]`: when it was on, bursts less than 2 minutes apart as one); a recognised multi-phase cycle (add-on 0.10.0+) adds `multiphase: true` and `phases`, its `power_w` is its mean power and its `signature` the registry id of its template |
-| `small_uses` | Only with the noise-adaptive threshold (add-on 0.17.0+, § 4.2): the uses under the fixed thresholds, `{start, end, power_w, on_w, off_w}` (`on_w` / `off_w`: the size of its two steps). Kept apart: never in `activations`, `signatures`, the curve's breakdown nor the registry |
+| `activations` | `{start, end, power_w, cycling, duty, on_s, period_s, signature, registry_id}`; a burst series (add-on 0.16.0+, § 4.5) is `cycling` and adds `blocks` (`[[start, end]]`: when it was on, bursts less than 2 minutes apart as one); a recognised multi-phase cycle (add-on 0.10.0+) adds `multiphase: true` and `phases`, its `power_w` is its mean power and its `signature` the registry id of its template; a long small use of a known signature (add-on 0.19.0+, § 4.14) adds `small: true`, `how`, `on`, `off` |
+| `small_uses` | Only with the noise-adaptive threshold (add-on 0.17.0+, § 4.2): the uses under the fixed thresholds, `{start, end, power_w, on_w, off_w}` (`on_w` / `off_w`: the size of its two steps). Kept apart: never in `activations`, `signatures`, the curve's breakdown nor the registry. A long one (add-on 0.19.0+, § 4.14) adds `long: true`, `how: detected\|completed`, `on` and `off` (`detected\|level`); the registry reads those, and once they are a signature of kind `small` its uses are activations instead |
 | `cold` | Only with the cold appliances (add-on 0.18.0+, § 4.13): per appliance `{id, on_w, off_w, power_w, on_s, on_modes_s, run_s, pause_s, period_s, duty, learned_cycles, cycles: [{start, end, how: detected\|completed\|placed\|filled}], counts, estimated: [{start, end, power_w}], energy_kwh, estimated_kwh, model?, registry_id}`; `estimated_kwh` is the part of `energy_kwh` estimated from the duty where the appliance was not followed |
 | `cycles` | Candidate multi-phase cycles (add-on 0.10.0+): `{start, end, power_w (heating), energy_kwh, phases: [{kind: heat\|motor, offset_s, duration_s, power_w}], members, template, distance}` |
-| `signatures` | Daily signatures: `{id, kind, band, power_w, count, duration_s, energy_kwh, hours, on_s, period_s, duty, examples, registry_id}`, and `phases` for kind `multiphase`; a cold appliance (add-on 0.18.0+) is one of kind `cold` with `estimated_kwh` |
+| `signatures` | Daily signatures: `{id, kind, band, power_w, count, duration_s, energy_kwh, hours, on_s, period_s, duty, examples, registry_id}`, and `phases` for kind `multiphase`; a cold appliance (add-on 0.18.0+) is one of kind `cold` with `estimated_kwh`; the long small uses of a known signature (add-on 0.19.0+) make one of kind `small` |
 | `quality` | `{samples, steps, submeters, pv_unknown_s, max_gap_s, compute_s}`; `steps` leaves out those the sub-meters' reports made, and `submeters` (add-on 0.16.0+, § 4.12) lists, per sub-meter that measures and has something to say, `{entity_id, name, explained_steps, changes, located, lag_s, lag_min_s, lag_max_s}`; with a PV meter (add-on 0.16.0+, § 4.2) `solar_held` (samples set aside by the solar doubt) and `solar_interval_s` (how long the solar meter takes to tell a change, `null` when not measured); `meters` (add-on 0.17.0+, § 4.2 and 8.11): `{grid: {median_s, p90_s}, solar: {median_s, p90_s} \| null, window_s, noise_w: {no_solar, solar}, visible_w}`, the meters' reporting intervals, the detector's window, the noise of the residual load apart from and during the solar hours, and the smallest step the curve can show; with the noise-adaptive threshold, `low_steps` (the steps kept under the fixed thresholds) |
 | `ground_truth` | Only while an appliance learns from a sensor (add-on 0.11.0+, § 8.6): `[{key, entity_id, runs: [{start, end, energy_kwh, power_w, max_w, kind, duty, on_s?, period_s?, phases?}], covered: [[start, end]], covered_s, energy_kwh}]`; from a connected appliance (0.14.0+) also `mode: "state"`, `program_recorded?`, and per run `source: "state"`, `baseline_w`, `program?`, `counter_kwh?`, `named_phases?` |
 | `config` | Sensors used: `grid_entity`, `extra_grid_entities`, `grid_export_entity`, `pv_entity`, `extra_pv_entities`, `battery_entity`, `tracked` (`{name, energy_entity, power_entity, role, source_entity}`), `findings` |
@@ -2734,6 +2874,18 @@ after.
   (`energy_ratio`, `worst_day_ratio`, `estimated_share`), and the signature the registry of
   the hidden analyses holds for it. The runs of the cold appliances also count as uses in
   the registry-free score.
+- **A plug that is only the truth** (`--truth ENTITY[=NAME]`, with `--adaptive`; #110,
+  § 4.14). The appliance is **not** declared to the analysis: it stays in the curve, as for
+  anyone without that plug, and nothing is hidden; the real analysis of each day is scored
+  against the plug's runs (`truth_score`, `truths[]` in the result). A run is **found** when
+  the uses of similar power cover half of it, and found **whole** when a single one does and
+  the run covers half of that one (not a string of fragments). The **detections** are the
+  uses of similar power that last at least half the appliance's shortest run, while the plug
+  reported (`long_detections`, `long_true`: the long small uses among them); one is true when
+  the plug's runs cover half of it. Their energy is compared with the plug's, and the
+  signature of kind `small` of that power is given. With `--adaptive` the days are analysed
+  in order, as with `--cold`: a long small use that came back is a signature, and its uses
+  are activations from the next day (`small`, `long_small_uses_per_day`, the `small` share).
 - **Output**: a table (the registry-free score below it), and `--json` a result that
   `--compare` sets against a later run (recall, precision, energy ratio, registry-free recall
   and precision of each device, signatures, shares, the cold score). With the options off the
@@ -2845,7 +2997,10 @@ cannot be read).
   found where the curve is quiet (about half of a freezer's cycles on the reference
   installation) and only listed in the report (`small_uses`): they are not named, tracked nor
   counted in the breakdown, except the regular ones the cold appliances (§ 4.13) make
-  signatures of. Its
+  signatures of and the long ones that came back (§ 4.14: a small appliance on for hours is
+  found when the level of the curve shows it from start to end; it is cut short or missed
+  when another load of its power stops while it is on, when both its steps are hidden, or
+  when its off comes in several steps; two appliances of the same power are one signature). Its
   noise is that of the last 30 minutes: when the curve gets noisy at once, the threshold
   takes a quarter of an hour to follow. Multi-phase appliances (§ 4.9): two appliances running at once
   or back to back make one candidate, a low load next to a cycle is counted in it, one

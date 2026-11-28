@@ -248,6 +248,7 @@ const en = {
   cycling: "Cycling",
   multiphase: "Multi-phase cycle",
   cold: "Cold appliance",
+  small: "Small, for hours",
   // provisional names of the unnamed signatures (#52)
   name_power: "{power} appliance",
   name_power_cycles: "{power} appliance in cycles",
@@ -826,6 +827,7 @@ const fr: Table = {
   cycling: "Cyclique",
   multiphase: "Cycle à plusieurs phases",
   cold: "Appareil de froid",
+  small: "Petit, pendant des heures",
   name_power: "Appareil de {power}",
   name_power_cycles: "Appareil de {power} en cycles",
   name_power_multiphase: "Cycle avec chauffe de {power}",

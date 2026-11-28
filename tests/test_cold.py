@@ -432,12 +432,15 @@ class OptionOffTest(unittest.TestCase):
     def test_on_changes_nothing_else(self):
         """With the option, the report is the one without it plus the cold
         appliances: their list, their signatures, and their energy taken
-        from the unexplained share."""
+        from the unexplained share. The steps of their runs are theirs
+        (#110): the small uses those steps made are gone, no other one
+        appears."""
         off = stable(report_of(self.hist, config(cold=False, pv=True)))
         on = stable(report_of(self.hist, config(pv=True)))
         self.assertEqual(len(on.pop("cold")), 2)
         self.assertEqual([s for s in on["signatures"] if s["kind"] != "cold"], off["signatures"])
-        for key in set(off) - {"signatures", "curve", "energy_kwh"}:
+        self.assertLess(len(on["small_uses"]), len(off["small_uses"]) / 2)
+        for key in set(off) - {"signatures", "curve", "energy_kwh", "small_uses"}:
             self.assertEqual(on[key], off[key], key)
         for key in ("house", "grid_import", "grid_export", "pv", "submetered", "known", "base_w"):
             self.assertEqual(on["energy_kwh"][key], off["energy_kwh"][key], key)

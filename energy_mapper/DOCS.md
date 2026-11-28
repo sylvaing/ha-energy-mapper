@@ -183,7 +183,22 @@ measured noise:
   They are not signatures: they are not proposed for review, not tracked as
   appliances and not counted in the breakdown of the curve. A real curve has
   tens of them a day; those that come back regularly (a fridge, a freezer)
-  are grouped and proposed by the [cold appliances](#cold-appliances) option.
+  are grouped and proposed by the [cold appliances](#cold-appliances) option;
+- a **small appliance on for hours** (add-on 0.19.0+: a television, a
+  set-top box, a computer at about 100 W for half an hour to eight hours) is
+  looked for as one use. Two steps of the same size are not enough at that
+  power, so the add-on checks the level of the curve, once what it already
+  explains is taken out: it must go up at the start, stay up, and come down
+  at the end. When a big load or the solar production hides one of the two
+  steps, the other end is where the raised level stops, if that is known
+  within a quarter of an hour and the house is then back where it was. A use
+  that fails these tests is not reported: missing one is preferred to
+  inventing one. Such a use is first only listed (`small_uses`, `long`).
+  When it comes back, 4 uses on 3 different days at the same power, it
+  becomes a **signature of kind `small`** (`small-90w`), proposed for review
+  like any other: name it, validate it, make it an appliance. From the next
+  analysis on its uses are counted in the breakdown and the statistics. The
+  earlier days keep their report: analyse them again to count them too.
 
 Everything else is analysed exactly as without the option: the same steps,
 activations, signatures and energies, in the nightly analysis and in the live
@@ -275,7 +290,12 @@ Each report is a JSON document with:
 - `small_uses` (add-on 0.17.0+, only with `adaptive_threshold`): the uses
   under the thresholds that stand out of the noise of the curve, each with
   `start`, `end`, `power_w`, and the size of its two steps `on_w` and
-  `off_w`. They are in no other field of the report;
+  `off_w`. They are in no other field of the report. A long one (add-on
+  0.19.0+) adds `long: true`, `how` (`detected`: two steps, or `completed`:
+  one step and the level of the curve) and how each end was found (`on`,
+  `off`: `detected` or `level`); once it is a signature of kind `small`,
+  its uses are in `activations` instead (`small: true`, with the same
+  `how`, `on`, `off`) and in `signatures`;
 - `cold` (add-on 0.18.0+, only with `cold_appliances`): the cold appliances
   of the day, each with its model (`on_w`, `off_w`, `power_w`, `on_s`,
   `period_s`, `duty`), its runs (`cycles`: `start`, `end` and `how`:
@@ -332,8 +352,8 @@ Each signature keeps:
 
 | Field | Description |
 |---|---|
-| `id` | Stable identity, for example `short-2000w` (steady, under 10 min), `medium-...` (10 to 60 min), `long-...` (over 1 h), `cyc-1400w` (cycling session), `cycle-2000w` (multi-phase cycle, named after its heating power) or `cold-80w` (cold appliance, add-on 0.18.0+). |
-| `kind`, `band` | `steady`, `cycling`, `multiphase` or `cold`; `short`, `medium`, `long`, `session`, `cycle` or `cold`. A `cold` signature also has its model (`on_w`, `off_w`, `on_modes_s`, `run_s`, `pause_s`) and `estimated_kwh`, the part of its energy estimated where it was not followed; one use is one run of the compressor. |
+| `id` | Stable identity, for example `short-2000w` (steady, under 10 min), `medium-...` (10 to 60 min), `long-...` (over 1 h), `cyc-1400w` (cycling session), `cycle-2000w` (multi-phase cycle, named after its heating power), `cold-80w` (cold appliance, add-on 0.18.0+) or `small-90w` (a small appliance on for hours, add-on 0.19.0+). |
+| `kind`, `band` | `steady`, `cycling`, `multiphase`, `cold` or `small`; `short`, `medium`, `long`, `session`, `cycle`, `cold` or `small`. A `cold` signature also has its model (`on_w`, `off_w`, `on_modes_s`, `run_s`, `pause_s`) and `estimated_kwh`, the part of its energy estimated where it was not followed; one use is one run of the compressor. |
 | `label`, `appliance` | Name and key of the Home Assistant appliance this signature belongs to (`null` when none). A named signature is never forgotten. |
 | `power_w`, `duration_s` | Typical power and duration (weighted medians). |
 | `on_s`, `period_s`, `duty` | Typical cycle of a cycling session or of a thermostat's bursts (`null` for steady loads). |
@@ -1118,7 +1138,9 @@ HA_URL=http://homeassistant.local:8123 HA_TOKEN=<token> \
   continuously (EV chargers, inverter heat pumps) are not recognised well yet.
   With `adaptive_threshold` the smaller uses are found where the curve is
   quiet and listed apart (`small_uses`); only the regular ones (a fridge, a
-  freezer) are named and tracked, with `cold_appliances`.
+  freezer) are named and tracked, with `cold_appliances`, and the small
+  appliances that stay on for hours and come back (add-on 0.19.0+), when
+  the level of the curve shows them from start to end.
   Multi-phase appliances have a first version: two of them running at once,
   or a low load running next to a cycle, blur their cycles. See the
   [README](https://github.com/sylvaing/ha-energy-mapper#limits) for the full

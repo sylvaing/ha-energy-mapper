@@ -86,7 +86,8 @@ one cycling use too, from its fourth regular burst.
 - loads below the step threshold (300 W by default; with solar panels, the *smallest
   appliance at night* lowers it while they produce nothing): lighting, electronics, fridges
   (they end up in the base load or in "unexplained"; the experimental *cold appliances*
-  option finds fridges and freezers, see the settings);
+  option finds fridges and freezers, and the *threshold adapted to the noise* a small
+  appliance that stays on for hours, see the settings);
 - loads whose power varies continuously: EV chargers that modulate, inverter heat pumps and
   air conditioners, induction hobs at high power (a measured EV charger or heat pump is best
   declared as a sub-meter; variable loads will be handled in [#16](https://github.com/sylvaing/ha-energy-mapper/issues/16));
@@ -535,7 +536,10 @@ on/off states come with real-time detection
   makes a signature of each fridge or freezer it finds among them; in the busy hours it
   cannot follow their cycles and estimates their energy from the rhythm of the quiet hours.
   Two cold appliances with the same power steps are not told apart, and the live view does
-  not show them.
+  not show them. With the adapted threshold (add-on 0.19.0), a small appliance on for hours
+  (a television at about 100 W) is found as one use when the level of the curve shows it from
+  start to end, and becomes a signature once it came back on several days; in a busy
+  evening, when another small load stops while it is on, it is cut short or missed.
 - The **meter rate** sets the shortest visible use: an appliance must last at least two meter
   readings.
 - With **solar panels**, the grid and the solar sensors do not report together: since add-on

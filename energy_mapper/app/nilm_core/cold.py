@@ -537,6 +537,9 @@ class Track:
     # where it was not followed: ``(start, end, mean power)`` from the duty
     estimated: list[tuple[float, float, float]] = field(default_factory=list)
     signature: str | None = None
+    # the low steps its runs are made of, ``{time: how the run was found}``:
+    # those steps are its own (#110: not paired into small uses)
+    edges: dict[float, str] = field(default_factory=dict, repr=False, compare=False)
     _starts: list[float] | None = field(default=None, repr=False, compare=False)
 
     def evidence(self, start: float, end: float, hows: tuple[str, ...] = (DETECTED, COMPLETED)) -> int:
@@ -733,6 +736,10 @@ def follow(
             taken[0].add(r.up)
         if r.down is not None:
             taken[1].add(r.down)
+        if r.up is not None:
+            track.edges[ups[r.up][0]] = r.how
+        if r.down is not None:
+            track.edges[downs[r.down][0]] = r.how
         if last is not None:
             gap = r.start - last.end
             n = _missing(model, gap)
@@ -769,6 +776,7 @@ def detect(
     end: float,
     known: Sequence[Mapping] = (),
     cfg: ColdConfig = COLD,
+    edges: dict[float, str] | None = None,
 ) -> list[Track]:
     """The cold appliances of one analysis, the most energy first.
 
@@ -782,7 +790,9 @@ def detect(
     known one they do not show is followed with its stored values. Each
     is reported when the curve shows at least ``min_evidence`` of its runs,
     and a stored one when ``min_seen`` of the runs its period expects are
-    detected: an appliance that is gone is not estimated."""
+    detected: an appliance that is gone is not estimated. ``edges``, when
+    given, receives the low steps the runs of the appliances are made of,
+    those of an ignored one included (:attr:`Track.edges`)."""
     stored = [m for m in (Model.from_dict(k) for k in known) if m is not None]
     models = []
     for m in learn(steps, points, quiet, cfg):
@@ -798,7 +808,11 @@ def detect(
     tracks = []
     for m in [*models, *stored]:
         track = follow(m, steps, points, start, end, cfg, taken)
-        if m.ignored or track.evidence(start, end) < cfg.min_evidence:
+        if track.evidence(start, end) < cfg.min_evidence:
+            continue
+        if m.ignored:
+            if edges is not None:
+                edges.update(track.edges)
             continue
         if (
             not m.cycles
@@ -806,6 +820,8 @@ def detect(
         ):
             continue
         tracks.append(track)
+        if edges is not None:
+            edges.update(track.edges)
     tracks.sort(key=lambda t: -t.overlap_energy_wh(start, end))
     used: dict[str, int] = {}
     for t in tracks:
