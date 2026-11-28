@@ -41,6 +41,12 @@ class Activation:
     # a burst series (#87): its blocks ``(start, end)``, the bursts closer
     # than the session gap counted as one
     blocks: list[tuple[float, float]] | None = None
+    # a long small use (#110, :mod:`.small`): under the fixed thresholds,
+    # accepted on the level of the curve; ``ends``: how its start and its
+    # end were found (``detected``: a step, ``level``: where the level stops)
+    small: bool = False
+    ends: tuple[str, str] | None = None
+    sizes: tuple[float, float] | None = None  # ... and the size of its on-edge and of its off-edge
     _on: tuple[list[float], list[float]] | None = field(default=None, init=False, repr=False, compare=False)
 
     @property

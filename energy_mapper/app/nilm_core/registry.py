@@ -51,6 +51,18 @@ learned it, and goes back to the daily analysis (:func:`cold_models`), so
 the appliance is followed, or estimated, on a day whose quiet hours taught
 nothing.
 
+Long small uses (#110) as well: a use of about 100 W for hours, accepted
+on the level of the curve by the daily analysis (:mod:`.small`), is listed
+in the day's ``small_uses`` (``long``). Those of the stored days are
+clustered on their power like the other uses, in a group of their own
+(kind ``small``, band ``small``, id ``small-<power>w``), but a cluster
+only becomes a signature once it came back: at least ``small_min_uses``
+uses on ``small_min_days`` different days. A one-off stays in the day's
+list. A signature that exists goes back to the daily analysis
+(:func:`small_models`), which makes its uses activations (``small``):
+those are clustered here from then on, and the signature lives on as any
+other (weight, carry, label, review).
+
 Everything here is pure (no I/O, no clock): the caller passes the day
 summaries, the previous registry and ``now``.
 """
@@ -67,6 +79,7 @@ from dataclasses import dataclass
 
 from . import cold as cd
 from . import cycles as mp
+from . import small as sm
 from .signatures import duration_band, signature_id
 
 REGISTRY_VERSION = 1
@@ -96,6 +109,9 @@ class RegistryConfig:
     max_occurrences: int = 600  # per signature, the most recent ones
     cycle_distance: float = mp.CycleConfig.match_distance  # multiphase: template distance
     min_cycles: int = 3  # multiphase: candidate cycles of a new signature
+    # long small uses (#110): a new signature needs this many uses, on this many days
+    small_min_uses: int = 4
+    small_min_days: int = 3
 
 
 def decay(age_s: float, half_life_days: float) -> float:
@@ -123,9 +139,12 @@ class _Act:
     on_s: float | None
     period_s: float | None
     weight: float
+    small: bool = False  # a long small use (#110)
 
     @property
     def group(self) -> tuple[str, str]:
+        if self.small:
+            return SMALL
         if self.cycling:
             return "cycling", "session"
         return "steady", duration_band(self.end - self.start)
@@ -145,12 +164,15 @@ def _group_of(kind: str, band: str) -> tuple[str, str]:
 
 MULTIPHASE = ("multiphase", "cycle")
 COLD = cd.GROUP  # cold appliances (#89)
+SMALL = sm.GROUP  # long small uses (#110)
 
 
 def activation_group(activation: Mapping) -> tuple[str, str]:
     """(kind, band) of a stored activation, as used by the clustering."""
     if activation.get("multiphase"):
         return MULTIPHASE
+    if activation.get("small"):
+        return SMALL
     if activation.get("cycling"):
         return "cycling", "session"
     return "steady", duration_band(float(activation["end"]) - float(activation["start"]))
@@ -322,7 +344,10 @@ def update(
     # 1. activations, weighted by age
     groups: dict[tuple[str, str], list[_Act]] = {}
     for d in days:
-        for x in summaries[d].get("activations") or []:
+        # with the long small uses (#110): those of a known signature are
+        # activations (``small``), the others are in the day's list (``long``)
+        listed = [x for x in summaries[d].get("small_uses") or [] if x.get("long")]
+        for x in [*(summaries[d].get("activations") or []), *listed]:
             try:
                 a = _Act(
                     day=d,
@@ -334,6 +359,7 @@ def update(
                     on_s=x.get("on_s"),
                     period_s=x.get("period_s"),
                     weight=decay(now - float(x["start"]), hl),
+                    small=bool(x.get("small") or x.get("long")),
                 )
             except (KeyError, TypeError, ValueError):
                 continue
@@ -365,6 +391,8 @@ def update(
                 ids[i] = sid
         made: dict[int, dict] = {}
         for i, members in enumerate(clusters):
+            if g == SMALL and i not in ids and not _came_back(members, config):
+                continue  # a one-off long small use: it stays in its day's list
             sid = ids.get(i) or _new_id(g, members, used_ids)
             used_ids.add(sid)
             sig = _stats(sid, g, members, prev_sigs.get(sid), now, days_w, config, local_hour)
@@ -381,7 +409,7 @@ def update(
             near = [
                 (abs(c - s["power_w"]), i)
                 for i, c in enumerate(centers)
-                if abs(c - s["power_w"]) <= tol * s["power_w"]
+                if abs(c - s["power_w"]) <= tol * s["power_w"] and i in made
             ]
             absorbed = bool(near)
             if near:
@@ -516,10 +544,16 @@ def _next_day(day: str) -> str:
     return (dt.date.fromisoformat(day) + dt.timedelta(days=1)).isoformat()
 
 
+def _came_back(members: list[_Act], config: RegistryConfig) -> bool:
+    """Long small uses (#110) that make a signature: enough of them, on
+    enough different days."""
+    return len(members) >= config.small_min_uses and len({a.day for a in members}) >= config.small_min_days
+
+
 def _new_id(group, members, used_ids) -> str:
     kind, band = group
     power = weighted_median((a.power, a.weight) for a in members)
-    base = signature_id(kind, band, power)
+    base = sm.daily_id(power) if group == SMALL else signature_id(kind, band, power)
     sid, n = base, 1
     while sid in used_ids:
         n += 1
@@ -841,6 +875,18 @@ def cold_models(registry: Mapping | None) -> list[dict]:
     return out
 
 
+def small_models(registry: Mapping | None) -> list[dict]:
+    """The signatures of the long small uses (#110), for the daily analysis
+    (``AnalysisConfig.small_models``): ``{id, power_w}``. The uses of their
+    power are activations of the day; an ignored one too (it is hidden by
+    the review, as any ignored signature)."""
+    return [
+        {"id": s["id"], "power_w": s["power_w"]}
+        for s in (registry or {}).get("signatures") or []
+        if _group_of(s.get("kind"), s.get("band")) == SMALL and (s.get("power_w") or 0) > 0
+    ]
+
+
 class _SampleAct:
     """A candidate cycle seen as an activation by :func:`_new_id`."""
 
@@ -1080,9 +1126,17 @@ def annotate_report(report: dict, registry: Mapping | None) -> dict:
 GROUPS = (("steady", "short"), ("steady", "medium"), ("steady", "long"), ("cycling", "session"))
 # the groups an appliance's signature source can name (a multiphase one is
 # learned only: it cannot be expected from a power alone, see the API)
-SOURCE_GROUPS = (*GROUPS, MULTIPHASE, COLD)
+SOURCE_GROUPS = (*GROUPS, MULTIPHASE, COLD, SMALL)
 # typical duration of an expected signature, before its first use is seen
-_BAND_DURATION_S = {"short": 120, "medium": 1200, "long": 7200, "session": 1800, "cycle": 5400, "cold": 600}
+_BAND_DURATION_S = {
+    "short": 120,
+    "medium": 1200,
+    "long": 7200,
+    "session": 1800,
+    "cycle": 5400,
+    "cold": 600,
+    "small": 7200,
+}
 
 
 def nearest_signature(registry: Mapping | None, kind: str, band: str, power_w: float) -> dict | None:

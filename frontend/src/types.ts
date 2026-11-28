@@ -172,7 +172,8 @@ export interface Report {
 
 export interface RegistrySignature {
   id: string;
-  kind: "steady" | "cycling" | "multiphase" | "cold" | string;
+  /** `small` (add-on 0.19.0+, #110): a small appliance on for hours, found by the level of the curve */
+  kind: "steady" | "cycling" | "multiphase" | "cold" | "small" | string;
   /** cold (#89): of energy_kwh, the part estimated where it was not followed */
   estimated_kwh?: number | null;
   /** multiphase (#26): the template, its phases in order */

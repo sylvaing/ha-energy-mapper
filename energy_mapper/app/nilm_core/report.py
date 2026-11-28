@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import statistics
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -21,7 +22,11 @@ from .cycles import CycleConfig, Phase, attribute, find_cycles
 from .known import RUN, KnownLoad, SwitchedLoadConfig, explain_low_steps, resolve_switched_load
 from .quality import meter_quality
 from .signal import build_samples, parse_numeric, scaled, sum_series
-from .signatures import cluster
+from .signatures import Signature, cluster
+from .small import GROUP as SMALL_GROUP
+from .small import SMALL, SmallConfig, long_uses, model_of, pair_ok
+from .small import daily_id as small_id
+from .small import how as small_how
 from .steps import (
     MERGE_S,
     NOISE,
@@ -85,6 +90,13 @@ class AnalysisConfig:
     cold_appliances: bool = False
     cold_models: list[dict] = field(default_factory=list)
     cold: ColdConfig = COLD
+    # long small uses (#110, with the adaptive threshold): the low steps the
+    # cold appliances did not take are paired over hours and accepted on the
+    # level of the curve (:mod:`.small`). ``small_models``: the signatures
+    # of kind ``small`` the registry knows (:func:`~.registry.small_models`);
+    # the uses of their power are activations, the others are only listed
+    small_models: list[dict] = field(default_factory=list)
+    small: SmallConfig = SMALL
     # peaks: the top episodes above peak_relative x the period's maximum;
     # a peak is "notable" above peak_threshold_w, or when None above
     # peak_relative x the highest of the period's maximum and
@@ -206,38 +218,29 @@ def _detect(samples, config: AnalysisConfig, held: list[float] | None = None):
 SMALL_TOL_W = 20.0  # a small use's two steps agree within this, or the 25 % of pair_steps
 
 
-def small_uses(
+def explain_low_steps_of(
     steps: list[Step],
     points: list[tuple[float, float]],
     samples: list,
     config: AnalysisConfig,
-    base_w: float,
     window_s: float,
     histories: dict[str, list[tuple[float, str]]] | None = None,
     known: list[KnownLoad] | None = None,
     until: float | None = None,
-) -> list[Activation]:
-    """The small uses (#88): the pairs the low steps make, among themselves
-    or with a step of the fixed thresholds that nothing else used.
+) -> None:
+    """Mark the low steps something measured explains (#88, #99), before
+    anything reads them (the cold appliances, the small uses).
 
-    ``steps``: every step, once the uses of the fixed thresholds are made
-    (their steps are ``used``); ``points`` and ``samples``: what the
-    detector read (:func:`_detect`). The low steps a sub-meter's misaligned
-    reports left are first marked ``explained_by`` it, as the others were
-    (#85), in a pass of their own: what explains the other steps does not
-    change. Those a switched load's transitions make are then marked
-    ``explained_by`` that load (#99, :func:`~.known.explain_low_steps`;
-    ``histories``, ``known`` the loads of :func:`resolve_known` and ``until``
-    the end of the analysis: without them nothing is). Neither kind is
-    paired, nor read by the cold appliances (:mod:`.cold`).
-    The pairs are those of :func:`~.activations.pair_steps`, with a
-    tolerance fit for small powers, and are validated on the load as any
-    use. They exist only because of the adaptive threshold: they are
-    reported apart and never reach the signatures.
-    """
+    The low steps a sub-meter's misaligned reports left are marked
+    ``explained_by`` it, as the others were (#85), in a pass of their own:
+    what explains the other steps does not change. Those a switched load's
+    transitions make are then marked ``explained_by`` that load (#99,
+    :func:`~.known.explain_low_steps`; ``histories``, ``known`` the loads of
+    :func:`resolve_known` and ``until`` the end of the analysis: without
+    them nothing is)."""
     low = sorted((s for s in steps if s.low), key=lambda s: s.ts)
     if not low:
-        return []
+        return
     echoes = SubmeterEchoes.for_config(config)
     if echoes is not None:
         _, merge_s = adapted_windows(meter_interval([t for t, _ in points]), WINDOW_S, MERGE_S)
@@ -250,11 +253,74 @@ def small_uses(
         loads = known or [None] * len(config.switched_loads)
         for c, load in zip(config.switched_loads, loads, strict=True):
             explain_low_steps(c, histories.get(c.entity_id, []), low, until, load, SMALL_TOL_W)
-    free = [s for s in steps if s.low or not (s.used or s.explained_by)]
+
+
+def small_uses(
+    steps: list[Step],
+    points: list[tuple[float, float]],
+    samples: list,
+    config: AnalysisConfig,
+    base_w: float,
+    window_s: float,
+    histories: dict[str, list[tuple[float, str]]] | None = None,
+    known: list[KnownLoad] | None = None,
+    until: float | None = None,
+    acts: list[Activation] | None = None,
+    tracks: list[Track] | None = None,
+    taken: set[float] | None = None,
+    explained: bool = False,
+) -> list[Activation]:
+    """The small uses (#88, #110): what the low steps make, among
+    themselves or with a step of the fixed thresholds that nothing else
+    used.
+
+    ``steps``: every step, once the uses of the fixed thresholds are made
+    (their steps are ``used``); ``points`` and ``samples``: what the
+    detector read (:func:`_detect`). The low steps something measured
+    explains are marked first (:func:`explain_low_steps_of`; ``explained``:
+    it was done already) and are not paired, nor are those the cold
+    appliances took (``taken``: their times, from :attr:`.cold.Track.edges`).
+
+    1. **Long small uses** (:mod:`.small`): the low steps left are paired
+       over hours, each pair accepted on the level of the curve (the curve
+       without ``tracks``' runs, unknown while one of ``acts``, the uses of
+       the fixed thresholds, or of the ``known`` loads is on); then each
+       low step still free is followed on that level to the end the other
+       step did not show. They come back with ``small`` set.
+    2. **The others**: the pairs of :func:`~.activations.pair_steps` on
+       what is left, with a tolerance fit for small powers, validated on
+       the load as any use; one that lasts as long as a long small use
+       must pass the same test of the level, or it is dropped (two
+       unrelated steps hours apart).
+
+    They exist only because of the adaptive threshold. All are reported
+    apart, but the long ones of a signature the registry knows
+    (:func:`analyze`).
+    """
+    if not explained:
+        explain_low_steps_of(steps, points, samples, config, window_s, histories, known, until)
+    taken = taken or set()
+    low = sorted((s for s in steps if s.low and not s.explained_by and s.ts not in taken), key=lambda s: s.ts)
+    if not low:
+        return []
+    cfg = config.small
+    long, level = long_uses(low, points, acts or (), known or (), tracks or (), cfg, steps)
+    free = [
+        s
+        for s in steps
+        if (s.low and s.ts not in taken and not s.used) or not (s.low or s.used or s.explained_by)
+    ]
     pairs = pair_steps(free, tol_w=SMALL_TOL_W)
     # two steps of the fixed thresholds were already refused as a use
     pairs = [a for a in pairs if any(s.low for s in a.steps)]
-    return validate_activations(pairs, points, base_w)
+    kept = []
+    for a in validate_activations(pairs, points, base_w):
+        if a.duration_s >= cfg.min_s and not pair_ok(level, a.start, a.end, a.power_w, cfg):
+            for s in a.steps:
+                s.used = False
+            continue
+        kept.append(a)
+    return sorted([*long, *kept], key=lambda a: a.start)
 
 
 def solar_interval(
@@ -393,16 +459,29 @@ def analyze(
     signatures = cluster(acts, local_hour=local_hour)
     adaptive = {}
     tracks: list[Track] = []
+    small_sigs: list[dict] = []
     if config.adaptive_threshold:  # only with the option: the report is unchanged without it
-        small = small_uses(every_step, read, read_from, config, base_est, window_s, histories, known, end)
-        adaptive = {"small_uses": [_small_use(a) for a in small if a.end > start and a.start < end]}
+        # first, the low steps a sub-meter or a switched load explains are marked
+        explain_low_steps_of(every_step, read, read_from, config, window_s, histories, known, end)
         cold_cfg = config.cold_config()
+        edges: dict[float, str] = {}
         if cold_cfg is not None:  # cold appliances (#89): only with their own option too
-            # after the small uses: the low steps a sub-meter or a switched
-            # load explains are marked
             calm = PvQuiet([(s.ts, s.pv) for s in samples if s.pv is not None]) if config.pv_entity else None
             quiet = Quiet([s.ts for s in every_step if not s.low], calm, cold_cfg.quiet_margin_s)
-            tracks = detect_cold(every_step, read, quiet, start, end, config.cold_models, cold_cfg)
+            tracks = detect_cold(every_step, read, quiet, start, end, config.cold_models, cold_cfg, edges)
+        # then the small uses, from the low steps the cold appliances left (#110)
+        taken = {t for t, how in edges.items() if how in config.small.cold_steps}
+        small = small_uses(
+            every_step, read, read_from, config, base_est, window_s, acts=every, known=known,
+            tracks=tracks, taken=taken, explained=True,
+        )  # fmt: skip
+        small = [a for a in small if a.end > start and a.start < end]
+        # the long ones of a signature the registry knows are activations
+        known_small = [a for a in small if a.small and model_of(a.power_w, config.small_models, config.small)]
+        small_sigs = _small_signatures(known_small, config, local_hour)
+        acts = [*acts, *known_small]
+        adaptive = {"small_uses": [_small_use(a) for a in small if a.signature is None]}
+        if cold_cfg is not None:
             adaptive["cold"] = [track_dict(t, start, end) for t in tracks]
 
     # the cold appliances take their energy in the curve as the signatures do
@@ -440,6 +519,7 @@ def analyze(
         "curve": curve,
         "peaks": peaks,
         "signatures": [s.to_dict() for s in signatures]
+        + small_sigs
         + [_cold_signature(t, start, end, local_hour) for t in tracks],
         "known_loads": [
             {
@@ -504,17 +584,59 @@ def _cold_signature(track: Track, start: float, end: float, local_hour: Callable
     }
 
 
+def _small_signatures(uses: list[Activation], config: AnalysisConfig, local_hour) -> list[dict]:
+    """The long small uses of the signatures the registry knows (#110), as
+    daily signatures of kind ``small``: one per known signature, named
+    after its power (``small-90w``). Sets ``signature`` on the uses."""
+    groups: dict[str, list[Activation]] = {}
+    models: dict[str, dict] = {}
+    for a in uses:
+        m = model_of(a.power_w, config.small_models, config.small)
+        key = str(m.get("id") or m["power_w"])
+        groups.setdefault(key, []).append(a)
+        models[key] = m
+    out = []
+    used: dict[str, int] = {}
+    for key, members in sorted(groups.items(), key=lambda g: -sum(a.energy_kwh for a in g[1])):
+        sid = small_id(float(models[key]["power_w"]))
+        n = used.get(sid, 0)
+        used[sid] = n + 1
+        if n:
+            sid = f"{sid}-{n + 1}"
+        sig = Signature(
+            id=sid,
+            kind=SMALL_GROUP[0],
+            band=SMALL_GROUP[1],
+            power_w=statistics.median(a.power_w for a in members),
+            count=len(members),
+            duration_s=statistics.median(a.duration_s for a in members),
+            energy_kwh=sum(a.energy_kwh for a in members),
+        )
+        for a in members:
+            sig.hours[local_hour(a.start) % 24] += 1
+            a.signature = sid
+        sig.examples = [a.start for a in sorted(members, key=lambda a: -a.energy_kwh)[:3]]
+        out.append(sig.to_dict())
+    return out
+
+
 def _small_use(a: Activation) -> dict:
     """A small use (#88): one use under the fixed thresholds, with the size
-    of its two steps (a compressor starts higher than it stops)."""
-    on, off = a.steps[0], a.steps[-1]
-    return {
+    of its two steps (a compressor starts higher than it stops). A long one
+    (#110) says so, with how it was found (``how``) and each of its ends
+    (``on``, ``off``: ``detected`` or ``level``): the size of an end the
+    level gave is the size of the step that was seen."""
+    on_w, off_w = a.sizes or (abs(a.steps[0].delta), abs(a.steps[-1].delta))
+    out = {
         "start": a.start,
         "end": a.end,
         "power_w": round(a.power_w),
-        "on_w": round(on.delta),
-        "off_w": round(-off.delta),
+        "on_w": round(on_w),
+        "off_w": round(off_w),
     }
+    if a.small:
+        out.update({"long": True, "how": small_how(a), "on": a.ends[0], "off": a.ends[1]})
+    return out
 
 
 def _activation(a) -> dict:
@@ -528,6 +650,9 @@ def _activation(a) -> dict:
         "period_s": a.period_s,
         "signature": a.signature,
     }
+    if getattr(a, "small", False):
+        # a long small use of a known signature (#110), and how it was found
+        out.update({"small": True, "how": small_how(a), "on": a.ends[0], "off": a.ends[1]})
     if getattr(a, "blocks", None):
         # a burst series (#87): when it was on, the bursts closer than the
         # session gap as one block

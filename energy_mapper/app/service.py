@@ -38,6 +38,7 @@ from nilm_core.registry import (
     forget_after_days,
     nearest_signature,
     peak_reference,
+    small_models,
 )
 from nilm_core.registry import update as update_registry
 from nilm_core.steps import night_threshold
@@ -520,6 +521,8 @@ class Analyzer:
         cfg.cycle_templates = cycle_templates(registry)
         # the cold appliances learned so far (#89): followed again today
         cfg.cold_models = cold_models(registry) if cfg.cold_config() is not None else []
+        # the long small uses that came back (#110): activations of their signature today
+        cfg.small_models = small_models(registry) if cfg.adaptive_threshold else []
         report = analyze(
             histories, cfg, start, end, local_hour=lambda ts: dt.datetime.fromtimestamp(ts, tz).hour
         )

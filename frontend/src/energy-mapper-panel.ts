@@ -2414,7 +2414,7 @@ export class EnergyMapperPanel extends LitElement {
         </div>
         <div class="secondary sig-id">${s.id}</div>`,
       kind:
-        s.kind === "cycling" ? t("cycling") : s.kind === "multiphase" ? t("multiphase") : s.kind === "cold" ? t("cold") : t("steady"),
+        s.kind === "cycling" ? t("cycling") : s.kind === "multiphase" ? t("multiphase") : s.kind === "cold" ? t("cold") : s.kind === "small" ? t("small") : t("steady"),
       cycle,
       power: formatPower(s.power_w, info),
       duration: formatDuration(s.duration_s, info),

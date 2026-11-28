@@ -74,6 +74,9 @@ test("provisional name, English and French", () => {
   assert.equal(provisionalName(long, tFr, fr), "Appareil de 350 W, ~2 h, l’après-midi");
   const spread = { kind: "steady", power_w: 1900, duration_s: 230, hours: Array(24).fill(1) };
   assert.equal(provisionalName(spread, tEn, en), "1.9 kW appliance, ~4 min, all day");
+  // a small appliance on for hours (#110) is named like any steady one
+  const small = { kind: "small", power_w: 96, duration_s: 7000, hours: hours({ 20: 3, 21: 2 }) };
+  assert.equal(provisionalName(small, tEn, en), "96 W appliance, ~2 h, in the evening");
   const two = { kind: "steady", power_w: 800, duration_s: 1500, hours: hours({ 12: 3, 19: 3 }) };
   assert.equal(provisionalName(two, tEn, en), "800 W appliance, ~25 min, at midday and in the evening");
   assert.equal(provisionalName(two, tFr, fr), "Appareil de 800 W, ~25 min, à midi et le soir");
