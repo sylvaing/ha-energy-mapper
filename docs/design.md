@@ -1507,12 +1507,20 @@ version": pairs and one hidden step on a level where each load is taken out at o
 | Long small uses of that power while the plug reported: the appliance's / others | – | 3 / 8 | 4 / 8 |
 | Uses of that power lasting at least half its shortest session | 59 | 22 | 23 |
 | Their energy against the plug's | 586 % | 130 % | 152 % |
+| ... of which inside its sessions: the share of the appliance's consumption found | 77 % | 37 % | 44 % |
+| ... of which outside them: other loads of that power, or false uses | 423 % | 93 % | 104 % |
 | Small uses a day (of which long) | 45 | 15.5 (3.6) | 15.4 (3.9) |
 | Signatures of kind `small` | – | 6 | 6 |
 | Cold appliances (2 signatures, 896 runs, energy; the hidden freezer: 64 % found, 83 % right, 109 %) | – | equal | equal |
 | Hidden freezer without the registry (found / right) | 79 % / 83 % | 65 % / 80 % | 65 % / 80 % |
 | Pump, through the registry and without it | 64 % / 79 %, 86 % / 100 % | equal | equal |
 | Ordinary signatures; house energy unexplained, small | 48; 12 %, – | 48; 12 %, 1 % | 48; 12 %, 1 % |
+
+The energy inside the sessions is the honest measure of what is found of the appliance: 44 %
+of what its plug measured (a session found "whole" is only half covered or more, and one of
+them at 71 W for 93 W). "Before" has 77 % only because its pairs of unrelated steps lasted
+hours and covered whatever ran under them, with four times the appliance's consumption
+outside its sessions.
 
 The 4 found whole: two sessions of one afternoon (37 minutes and 3 h 34, each from its
 on-step and the level), one that ran at half the usual power, and one evening session of
@@ -2940,8 +2948,11 @@ after.
   the run covers half of that one (not a string of fragments). The **detections** are the
   uses of similar power that last at least half the appliance's shortest run, while the plug
   reported (`long_detections`, `long_true`: the long small uses among them); one is true when
-  the plug's runs cover half of it. Their energy is compared with the plug's, and the
-  signature of kind `small` of that power is given. With `--adaptive` the days are analysed
+  the plug's runs cover half of it. Their energy is compared with the plug's
+  (`energy_ratio`) and split in two: what lies inside the plug's runs (`inside_ratio`: the
+  share of the appliance's own consumption that is found; two detections at the same time
+  count once, the larger) and what lies outside them (`outside_ratio`: other appliances of
+  that power, or false uses). The signature of kind `small` of that power is given. With `--adaptive` the days are analysed
   in order, as with `--cold`: a long small use that came back is a signature, and its uses
   are activations from the next day (`small`, `long_small_uses_per_day`, the `small` share).
 - **Output**: a table (the registry-free score below it), and `--json` a result that

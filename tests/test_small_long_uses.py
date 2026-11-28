@@ -534,6 +534,10 @@ class BenchmarkTest(unittest.TestCase):
         self.assertAlmostEqual(t["power_w"], 93, delta=2)
         # the plug reads 7 % less than the curve shows
         self.assertAlmostEqual(t["energy_ratio"], 1 / 0.93, delta=0.12)
+        # all of it within the plug's runs, nothing outside them
+        self.assertAlmostEqual(t["inside_ratio"], 1 / 0.93, delta=0.12)
+        self.assertAlmostEqual(t["outside_ratio"], 0.0, delta=0.02)
+        self.assertAlmostEqual(t["inside_kwh"] + t["outside_kwh"], t["energy_kwh"], delta=0.002)
         self.assertEqual(self.result["devices"], [])  # nothing was hidden: it is no sub-meter
 
     def test_the_signature_it_became(self):
@@ -551,6 +555,32 @@ class BenchmarkTest(unittest.TestCase):
             self.assertNotIn(key, off)
         self.assertNotIn("small", off["energy"])
         self.assertNotIn("long small uses", benchmark.table(off))
+
+    def test_energy_inside_and_outside_the_runs(self):
+        """Two detections at the same time count once inside the runs (the
+        larger); what lies outside them is summed."""
+        run = benchmark.runs_of([(0.0, 0.0), (1000.0, 100.0), (8200.0, 0.0), (20000.0, 0.0)], 0.0, 20000.0)[0]
+        self.assertEqual([(r.start, r.end) for r in run], [(1000.0, 8200.0)])
+        report = {
+            "start": 0.0,
+            "end": 20000.0,
+            "activations": [],
+            "small_uses": [
+                {"start": 1000.0, "end": 4600.0, "power_w": 100, "long": True},  # inside
+                {
+                    "start": 1900.0,
+                    "end": 5600.0,
+                    "power_w": 90,
+                    "long": True,
+                },  # inside, partly at the same time
+                {"start": 6400.0, "end": 10000.0, "power_w": 100, "long": True},  # half inside
+                {"start": 12000.0, "end": 15600.0, "power_w": 110, "long": True},  # outside
+            ],
+        }
+        score = benchmark.truth_score(run, 100.0, 7200.0, None, report)
+        self.assertAlmostEqual(score["inside_kwh"], (100 * 3600 + 90 * 1000 + 100 * 1800) / 3.6e6)
+        self.assertAlmostEqual(score["outside_kwh"], (100 * 1800 + 110 * 3600) / 3.6e6)
+        self.assertEqual((score["all"]["long_detections"], score["all"]["long_true"]), (4, 3))
 
     def test_table_and_comparison(self):
         text = benchmark.table(self.result)

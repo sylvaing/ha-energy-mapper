@@ -70,8 +70,12 @@ cold appliance of the same power are not uses of a television), while the
 plug reported; one is **true** when the plug's runs cover half of it
 (``long_detections`` / ``long_true``: those among them that are long small
 uses, the others being ordinary or short small uses of that power). The
-energy of the detections is compared with the plug's, and the signature of
-kind ``small`` the registry made of them is given.
+energy of the detections is compared with the plug's (``energy``), and
+split in two: what lies **inside** the plug's runs, the share of the
+appliance's own consumption that is found (two detections at the same time
+count once), and what lies **outside** them, which is other appliances of
+that power or false uses. The signature of kind ``small`` the registry made
+of them is given.
 
 Standard library only, not shipped in the add-on image.
 """
@@ -498,6 +502,7 @@ def truth_score(
     truth = [(r.start, r.end) for r in runs]
     a, b = span or (report["start"], report["end"])
     energy = small = 0.0
+    kept: list[tuple[float, float, float]] = []  # the detections: start, end, power
     for u in uses:
         if not _similar(u["power_w"], power_w) or not a <= u["start"] < b:
             continue
@@ -509,6 +514,7 @@ def truth_score(
             count(u["start"], "long_detections")
         kwh = u["power_w"] * (min(u["end"], b) - u["start"]) / 3.6e6
         energy += kwh
+        kept.append((u["start"], min(u["end"], b), u["power_w"]))
         if u.get("small"):
             small += kwh  # an activation of a signature of kind small
         on = _spans(u)
@@ -517,9 +523,24 @@ def truth_score(
             if long:
                 count(u["start"], "long_true")
     out["energy_kwh"] = energy
+    # of that energy: what lies within the plug's runs (two detections at the same
+    # time count once, the larger) and what lies outside them (other appliances)
+    out["inside_kwh"] = _inside_ws(kept, truth) / 3.6e6
+    out["outside_kwh"] = sum(w * (y - x - _covered(x, y, truth)) for x, y, w in kept) / 3.6e6
     out["signature_kwh"] = small
     out["truth_kwh"] = sum(r.energy_kwh for r in runs)
     return out
+
+
+def _inside_ws(uses: Sequence[tuple[float, float, float]], runs: Sequence[tuple[float, float]]) -> float:
+    """The energy (W.s) of ``uses`` (``(start, end, power)``) within ``runs``:
+    where several uses are on at once, the largest one alone."""
+    total = 0.0
+    for a, b in runs:
+        cuts = sorted({a, b, *(t for x, y, _ in uses for t in (x, y) if a < t < b)})
+        for x, y in zip(cuts, cuts[1:], strict=False):
+            total += max((w for u0, u1, w in uses if u0 <= x and y <= u1), default=0.0) * (y - x)
+    return total
 
 
 def _truth_merge(parts: Sequence[Mapping], signature: Mapping | None) -> dict:
@@ -535,6 +556,8 @@ def _truth_merge(parts: Sequence[Mapping], signature: Mapping | None) -> dict:
 
     truth = sum(p["truth_kwh"] for p in parts)
     energy = sum(p["energy_kwh"] for p in parts)
+    inside = sum(p["inside_kwh"] for p in parts)
+    outside = sum(p["outside_kwh"] for p in parts)
     return {
         **total("all"),
         "no_solar": total("no_solar"),
@@ -542,6 +565,12 @@ def _truth_merge(parts: Sequence[Mapping], signature: Mapping | None) -> dict:
         "truth_kwh": round(truth, 3),
         "energy_kwh": round(energy, 3),
         "energy_ratio": round(energy / truth, 3) if truth else None,
+        # the detections' energy within the plug's runs (how much of the appliance
+        # is found) and outside them (what is not the appliance), against the plug's
+        "inside_kwh": round(inside, 3),
+        "outside_kwh": round(outside, 3),
+        "inside_ratio": round(inside / truth, 3) if truth else None,
+        "outside_ratio": round(outside / truth, 3) if truth else None,
         # of the detections' energy: what a signature of kind small carries
         "signature_kwh": round(sum(p["signature_kwh"] for p in parts), 3),
         "signature": signature,
@@ -928,7 +957,8 @@ def table(result: Mapping) -> str:
             "",
             "appliances left in the curve, against their plug (never declared to the analysis):",
             f"{'appliance':28} {'power':>7} {'uses':>5} {'found':>5} {'whole':>5} {'recall':>6} "
-            f"{'detect.':>7} {'precis.':>7} {'long: true/det.':>15} {'energy':>7}  signature",
+            f"{'detect.':>7} {'precis.':>7} {'long: true/det.':>15} {'energy':>7} {'inside':>7} "
+            f"{'outside':>7}  signature",
         ]
         for t in result["truths"]:
             if not t.get("uses"):
@@ -939,7 +969,8 @@ def table(result: Mapping) -> str:
                 f"{t['name'][:28]:28} {_num(t['power_w'], ' W'):>7} {t['uses']:5d} {t['found']:5d} "
                 f"{t['whole']:5d} {_pct(t['whole_recall']):>6} {t['detections']:7d} "
                 f"{_pct(t['precision']):>7} {str(t['long_true']) + '/' + str(t['long_detections']):>15} "
-                f"{_pct(t['energy_ratio']):>7}  "
+                f"{_pct(t['energy_ratio']):>7} {_pct(t.get('inside_ratio')):>7} "
+                f"{_pct(t.get('outside_ratio')):>7}  "
                 + (f"{sig['id']} ({sig['count']} use(s), {sig['days_seen']} day(s))" if sig else "none")
             )
     return "\n".join(lines)
@@ -989,13 +1020,19 @@ def compare(before: Mapping, after: Mapping) -> str:
         )
     if after.get("truths"):
         was = {t["entity_id"]: t for t in before.get("truths") or []}
-        lines += ["", f"{'left in the curve':28} {'found whole':>14} {'precision':>14} {'energy':>14}"]
+        lines += [
+            "",
+            f"{'left in the curve':28} {'found whole':>14} {'precision':>14} {'energy':>14} "
+            f"{'inside':>14} {'outside':>14}",
+        ]
         for t in after["truths"]:
             o = was.get(t["entity_id"], {})
             lines.append(
                 f"{t['name'][:28]:28} {delta(o.get('whole_recall'), t.get('whole_recall')):>14} "
                 f"{delta(o.get('precision'), t.get('precision')):>14} "
-                f"{delta(o.get('energy_ratio'), t.get('energy_ratio')):>14}"
+                f"{delta(o.get('energy_ratio'), t.get('energy_ratio')):>14} "
+                f"{delta(o.get('inside_ratio'), t.get('inside_ratio')):>14} "
+                f"{delta(o.get('outside_ratio'), t.get('outside_ratio')):>14}"
             )
     if any(d.get("cold") for d in after.get("devices") or []):
         lines += ["", f"{'cold appliance of':28} {'recall':>14} {'precision':>14} {'energy':>14}"]

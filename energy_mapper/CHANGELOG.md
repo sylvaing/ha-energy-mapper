@@ -35,7 +35,8 @@
 - `tools/benchmark.py --truth ENTITY[=NAME]`: a plug on an appliance that
   is not declared to the analysis is only the truth; the result says how
   many of its uses are found whole, the precision and the energy against
-  the plug. With `--adaptive` the days are analysed in order.
+  the plug, split into what lies inside the plug's runs (the share of the
+  appliance's consumption that is found) and outside them. With `--adaptive` the days are analysed in order.
 - Integration 0.16.0: the panel names the kind of these signatures.
 
 ## 0.18.4
